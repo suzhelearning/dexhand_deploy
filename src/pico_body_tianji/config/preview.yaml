@@ -1,0 +1,36 @@
+pico_controller_input:
+  ros__parameters:
+    rate: 90.0
+    stale_timeout: 0.5
+    require_reliable_timestamp: true
+    allow_unstamped_preview: false
+    min_cutoff: 1.0
+    beta: 0.7
+    elbow_min_cutoff: 0.3
+
+tianji_kinematic_sim:
+  ros__parameters:
+    ik_backend: pinocchio_cpp
+    rate: 30.0
+    home_minimum_duration: 2.0
+    home_max_speed_deg_s: 25.0
+    joint_limit_margin_deg: 5.0
+    max_joint_step_deg: 3.0
+    max_iteration_step_deg: 4.5
+    max_iterations: 24
+    position_tolerance_m: 0.001
+    orientation_tolerance_deg: 0.6
+    minimum_damping: 0.001
+    maximum_damping: 0.15
+    singular_value_threshold: 0.05
+    arm_angle_gain: 0.8
+    arm_angle_tolerance_deg: 2.0
+    arm_angle_merit_weight: 0.001
+    nullspace_damping: 0.001
+    joint_center_gain: 0.3
+    joint_center_activation_margin_deg: 15.0
+    joint_center_merit_weight: 0.001
+    singularity_avoidance_gain: 0.2
+    singularity_merit_weight: 0.01
+    left_home_deg: [55.0, -65.0, -70.0, -60.0, 60.0, 0.0, 0.0]
+    right_home_deg: [-55.0, -65.0, 70.0, -60.0, -60.0, 0.0, 0.0]

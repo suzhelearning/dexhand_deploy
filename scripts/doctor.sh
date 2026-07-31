@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common.sh"
+
+if [[ "$(uname -m)" != "x86_64" ]]; then
+  printf '错误：厂商 SDK 仅打包了 x86_64 版本。\n' >&2
+  exit 1
+fi
+
+activate_bundle_runtime
+
+required_files=(
+  "${BUNDLE_ROOT}/vendor/python/xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so"
+  "${BUNDLE_ROOT}/vendor/lib/libPXREARobotSDK.so"
+  "${BUNDLE_ROOT}/vendor/python/marvin_sdk/libMarvinSDK.so"
+  "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
+  "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4_mujoco.urdf"
+  "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/meshes/Link_Base.STL"
+  "${BUNDLE_ROOT}/src/pico_body_tianji/rviz/preview.rviz"
+  "${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
+  "${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim.bin"
+  "${PROJECT_PREFIX}/share/pico_body_tianji/launch/preview.launch.py"
+  "${PROJECT_PREFIX}/share/pico_body_tianji/rviz/preview.rviz"
+  "${ROS_ROOT}/bin/ros2"
+  "${ROS_ROOT}/lib/rviz2/rviz2"
+  "${ROS_ROOT}/lib/robot_state_publisher/robot_state_publisher"
+  "${ROS_ROOT}/lib/liburdf_xml_parser.so"
+  "${QT_PLUGIN_ROOT}/platforms/libqxcb.so"
+  "${ABI_LIBRARY_ROOT}/ld-linux-x86-64.so.2"
+  "${PIN_LIBRARY_ROOT}/libpinocchio_default.so"
+  "${ROS_ROOT}/lib/librmw_cyclonedds_cpp.so"
+  "${ROS_ROOT}/local/lib/python3.10/dist-packages/rclpy/__init__.py"
+)
+for file in "${required_files[@]}"; do
+  if [[ ! -f "${file}" ]]; then
+    printf '错误：缺少运行时文件：%s\n' "${file}" >&2
+    exit 1
+  fi
+done
+
+(
+  cd "${BUNDLE_ROOT}"
+  if ! sha256sum -c --quiet VENDOR_SHA256SUMS; then
+    printf '错误：厂商运行时文件校验失败。\n' >&2
+    exit 1
+  fi
+  expected_runtime_hash="$(awk 'NR == 1 {print $1}' RUNTIME_TREE_SHA256)"
+  actual_runtime_hash="$(
+    find runtime \
+      -type f \
+      ! -name '*.pyc' \
+      ! -name '*.pyo' \
+      ! -path '*/__pycache__/*' \
+      -print0 |
+      LC_ALL=C sort -z |
+      xargs -0 sha256sum |
+      sha256sum |
+      awk '{print $1}'
+  )"
+  if [[
+    -z "${expected_runtime_hash}" ||
+    "${actual_runtime_hash}" != "${expected_runtime_hash}"
+  ]]; then
+    printf '错误：ROS/Pinocchio/ABI 运行时树校验失败。\n' >&2
+    exit 1
+  fi
+)
+
+for library in \
+  "${BUNDLE_ROOT}/vendor/python/xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so" \
+  "${BUNDLE_ROOT}/vendor/lib/libPXREARobotSDK.so" \
+  "${BUNDLE_ROOT}/vendor/python/marvin_sdk/libMarvinSDK.so" \
+  "${ROS_ROOT}/lib/rviz2/rviz2" \
+  "${ROS_ROOT}/lib/robot_state_publisher/robot_state_publisher" \
+  "${ROS_ROOT}/lib/liburdf_xml_parser.so"
+do
+  if ldd "${library}" | grep -q 'not found'; then
+    printf '错误：动态库存在未满足依赖：%s\n' "${library}" >&2
+    ldd "${library}" >&2
+    exit 1
+  fi
+done
+
+PICO_BODY_TIANJI_BUNDLE_ROOT="${BUNDLE_ROOT}" python - <<'PY'
+import os
+from pathlib import Path
+
+import mujoco
+import numpy
+import rclpy
+import scipy
+import xrobotoolkit_sdk
+from geometry_msgs.msg import PoseStamped
+from marvin_sdk.fx_robot import DCSS, Marvin_Robot
+from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
+from tianji_world_output.config_loader import TianjiConfig
+
+config = TianjiConfig.load()
+assert config.init_joints["left"].shape == (7,)
+assert config.init_joints["right"].shape == (7,)
+assert DCSS is not None
+assert Marvin_Robot is not None
+marvin = Marvin_Robot()
+assert not marvin._connected
+assert PoseStamped is not None
+assert rclpy is not None
+assert Path(xrobotoolkit_sdk.__file__).is_file()
+model_path = (
+    Path(os.environ["PICO_BODY_TIANJI_BUNDLE_ROOT"])
+    / "src"
+    / "pico_body_tianji"
+    / "assets"
+    / "marvin_m6_ccs"
+    / "urdf"
+    / "marvin_m6_s_ccs_696_v4_mujoco.urdf"
+)
+xml, assets = portable_mujoco_urdf(model_path)
+model = mujoco.MjModel.from_xml_string(xml, assets)
+assert model.nq == 14
+print("Python/厂商 SDK 导入检查通过")
+print("Marvin SDK", marvin.SDK_version(), "（仅加载，未连接）")
+print(
+    "numpy",
+    numpy.__version__,
+    "scipy",
+    scipy.__version__,
+    "mujoco",
+    mujoco.__version__,
+)
+PY
+
+printf '%s\n' \
+  '环境和文件校验通过。ROS/Pinocchio/RViz/MuJoCo 已就绪；未连接设备。'

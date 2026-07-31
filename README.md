@@ -1,0 +1,412 @@
+# PICO → Marvin 天机双臂遥操作（Pixi 单文件便携包）
+
+本包适用于 Ubuntu 22.04 x86_64，可在同一台电脑上完成：
+
+- PICO 左右手柄和 SMPL 上肢数据读取；
+- C++ Pinocchio 双臂 IK；
+- RViz 与 MuJoCo 纯运动学仿真；
+- Marvin SDK 真机关节位置遥操作；
+- 真机状态监控和安全停机。
+
+运行时不需要 Docker、不要求预装 ROS 2，也不需要现场编译。本包不包含
+Wuji 手部资产或描述包；只保留 PICO 输入和天机坐标转换所需的最小
+白名单模块。
+
+![PICO 到 Marvin 天机双臂遥操作数据流](docs/data_flow.svg)
+
+正确运行关系是终端 1 持续运行一套 `sim`，终端 2 只运行一套
+`real`。`real` 复用 `sim` 的 PICO、SMPL 和 Pinocchio 输出，不会再
+启动第二套输入或 IK 节点。
+
+## 运行前提
+
+- Ubuntu 22.04 x86_64；
+- 可以访问软件源的网络，用于首次安装 Pixi 环境；
+- PXREA Unity/XRoboToolkit 服务和 PICO 在同一台电脑可用；
+- 真机测试时，电脑有线网卡与 Marvin 控制器位于同一网段。
+
+先检查 Pixi：
+
+```bash
+pixi --version
+```
+
+如果命令不存在，可按
+[Pixi 官方安装说明](https://pixi.sh/latest/installation/)安装：
+
+```bash
+curl -fsSL https://pixi.sh/install.sh | sh
+source ~/.bashrc
+pixi --version
+```
+
+## 第一次使用：推荐顺序
+
+### 1. 获取简化版项目并进入目录
+
+从 GitHub 克隆：
+
+```bash
+git clone git@github.com:hbw1010/tianji_teleop.git
+cd tianji_teleop
+```
+
+也可以使用独立压缩包：
+
+只需要复制这一份压缩包到目标电脑，不需要同时复制源码仓库、Docker
+镜像、ROS 工作区或外置校验文件。执行：
+
+```bash
+tar -xzf pico_tianji_teleop_standalone_*.tar.gz
+cd pico-tianji-real-teleop
+```
+
+后续命令都在 `pico-tianji-real-teleop` 目录中执行。运行
+`pixi run doctor` 时会使用包内的 `VENDOR_SHA256SUMS` 和
+`RUNTIME_TREE_SHA256` 自动检查厂商文件及运行时树，不依赖压缩包旁边
+的第二个文件。
+
+### 2. 安装锁定环境并做离线检查
+
+```bash
+pixi install --locked
+pixi run doctor
+pixi run test
+```
+
+- `pixi install --locked`：安装包内锁定的 Python、NumPy、SciPy 和
+  MuJoCo 版本；
+- `pixi run doctor`：检查 ROS、Pinocchio、RViz、MuJoCo、URDF、mesh
+  和厂商 SDK 文件；
+- `pixi run test`：短暂启动纯运动学节点并检查 ROS 话题链路。
+
+这三个步骤不会连接或驱动实体机械臂。`doctor` 会离线加载 Marvin SDK
+检查文件与 ABI，但不会建立控制器连接。
+
+### 3. 准备 PICO 输入
+
+1. 在同一台电脑启动 PXREA Unity/XRoboToolkit 服务；
+2. 戴上并唤醒 PICO；
+3. 确认左右手柄、右手柄 A 键和 SMPL Body 持续发送；
+4. 保持双手在舒适位置，暂时不要按 A。
+
+XRoboToolkit 默认由本机 `127.0.0.1:60061` 提供数据。若日志一直停在
+`Waiting for device discovery`，先处理 PICO/XRoboToolkit 连接，不要
+启动真机。
+
+下一步运行 `pixi run sim` 后，输入正常时，启动终端会出现设备发现/
+连接信息，RViz 中的 SMPL 骨架、左右目标末端会随人体和手柄运动。
+若骨架或目标保持不动，即使服务进程仍在，也不能视为数据正在持续刷新。
+
+### 4. 先验收仿真
+
+```bash
+pixi run sim
+```
+
+该命令同时启动 RViz 和 MuJoCo，只运行：
+
+```text
+PICO + SMPL → Pinocchio IK → 仿真 JointState → RViz/MuJoCo
+```
+
+它不会启动真机桥，也不会连接 Marvin 控制器。
+
+看到机械臂位于安全初始位后：
+
+1. 松开右手柄 A；
+2. 单击一次右手柄 A，记录当前参考姿态并开始遥操作；
+3. 小幅移动和旋转双手，确认左右臂方向、末端姿态和肘部方向正确；
+4. 再单击一次右手柄 A，双臂缓慢回到安全初始位；
+5. 保持 `pixi run sim` 终端运行，在另一个终端启动真机桥。
+
+只有仿真方向、姿态、关节连续性和回零行为都正确，才能继续真机步骤。
+
+### 5. 启动真机
+
+保持第 4 步的 `pixi run sim` 运行。真机任务只启动 Marvin 安全桥，
+复用这套主机侧 PICO + Pinocchio 链路，不会再启动第二套 PICO/IK。
+同时确认没有其他旧版 PICO 天机任务、官方控制节点、FxStation 或
+Marvin SDK 会话在运行。
+
+仿真主机链路和真机桥分别持有跨解压目录运行锁，因此可以同时运行，
+但各自不能重复启动。正常退出、`Ctrl+C` 或子节点异常退出时，脚本只
+停止自己管理的进程；如果主脚本曾被强制杀死，同类任务下次启动会根据
+受管 PID 和进程启动时间自动清理遗留进程。真机桥启动前还会确认 ROS
+图中恰好只有一个 PICO 输入节点和一个 Pinocchio IK 节点。外部旧节点
+不会被冒险误杀，而会触发拒绝启动。
+
+#### 5.1 配置天机有线网口
+
+调试网线连接控制器 ETH1 或 ETH3。官方调试网段使用：
+
+| 设备 | IPv4 地址 |
+|---|---|
+| 电脑有线网卡 | `192.168.1.165/24` |
+| Marvin 控制器 | `192.168.1.190` |
+
+Wi‑Fi 可以继续用于互联网，但机器人有线连接不要配置默认网关。先查找
+有线网卡名：
+
+```bash
+nmcli device status
+ip -brief link
+```
+
+以下假设网卡是 `enp3s0`，必须按本机输出修改：
+
+```bash
+WIRED_IF="enp3s0"
+
+nmcli connection show tianji-static >/dev/null 2>&1 || \
+  sudo nmcli connection add \
+    type ethernet \
+    con-name tianji-static \
+    ifname "$WIRED_IF"
+
+sudo nmcli connection modify tianji-static \
+  connection.interface-name "$WIRED_IF" \
+  ipv4.method manual \
+  ipv4.addresses 192.168.1.165/24 \
+  ipv4.gateway "" \
+  ipv4.dns "" \
+  ipv4.never-default yes \
+  ipv6.method disabled
+
+sudo nmcli connection up tianji-static
+```
+
+验证地址和路由：
+
+```bash
+WIRED_IF="enp3s0"
+ip -4 -brief address show dev "$WIRED_IF"
+ip route get 192.168.1.190
+ping -c 3 192.168.1.190
+```
+
+`ip route get` 必须显示从所选有线网卡发出，并包含
+`src 192.168.1.165`。如果控制器禁止 ICMP，ping 失败不一定表示 SDK
+不可连接；应先用 FxStation 验证连接，随后**完全关闭 FxStation**再
+启动本项目。若路由走 Wi‑Fi 或其他网卡，不要启动真机。
+
+需要恢复普通 DHCP 时：
+
+```bash
+sudo nmcli connection modify tianji-static \
+  ipv4.method auto \
+  ipv4.addresses "" \
+  ipv4.never-default no \
+  ipv6.method auto
+sudo nmcli connection up tianji-static
+```
+
+#### 5.2 启动真机桥
+
+首次在新电脑联调，推荐从较低控制器比例开始：
+
+```bash
+pixi run real -- \
+  --confirm-real \
+  --velocity-ratio 20 \
+  --acceleration-ratio 20
+```
+
+确认空载低速运行正常后，可使用当前默认值：
+
+```bash
+pixi run real -- --confirm-real
+```
+
+默认控制器速度为 50%，加速度为 70%。也可明确指定控制器地址：
+
+```bash
+ROBOT_IP="192.168.1.190"  # 如控制器地址不同，请修改这里
+pixi run real -- \
+  --confirm-real \
+  --robot-ip "$ROBOT_IP" \
+  --velocity-ratio 50 \
+  --acceleration-ratio 70
+```
+
+启动后程序会自动执行：
+
+```text
+连接 Marvin
+  → 检查并尝试清除已经释放的历史错误
+  → 检查控制器、双臂和 14 个伺服轴
+  → 读取当前实测关节角
+  → 以实测角无跳变进入 state=1 关节位置模式
+  → 以不高于 10°/s 缓慢到达安全零位
+  → 等待主机状态和反馈稳定
+  → 进入 phase=armed_idle
+```
+
+因此，执行真机命令后、按 A 之前，机械臂也会自动缓慢移动到安全零位。
+必须提前清空双臂运动空间并握住实体急停。
+
+只有看到以下日志后才能按右手柄 A：
+
+```text
+真机链路已就绪：保持安全零位，按右手柄 A 开始。
+```
+
+或者在状态中确认：
+
+```text
+phase=armed_idle
+```
+
+此时单击右手柄 A 开始遥操作；再次单击 A，或 PICO/SMPL 数据中断，
+机械臂会缓慢回安全位。真机终端按 `Ctrl+C` 会安全停止并释放 Marvin
+SDK 会话，但不会关闭仿真。结束全部工作时，先关闭真机终端并等待
+`Robot released`，再到仿真终端按 `Ctrl+C`。
+
+### 6. 另开终端监控真机状态
+
+进入同一解压目录后执行：
+
+```bash
+pixi run status
+```
+
+重点查看：
+
+- `phase`：当前真机阶段，正常待机应为 `armed_idle`；
+- `robot_connected`：是否已连接控制器；
+- `error_codes`：左右臂控制器错误码；
+- `servo_error_reports`：左右臂 14 个伺服轴错误明细；
+- `tracking_error_detail`：发生跟踪误差时的机械臂、关节和角度；
+- `error`：启动失败或安全停机的直接软件判据；
+- `readiness`：主机链路尚未就绪时的原因。
+
+## 常用命令
+
+| 命令 | 作用 | 是否连接真机 |
+|---|---|---|
+| `pixi run doctor` | 检查环境、模型和 SDK 文件 | 否 |
+| `pixi run test` | 验证 ROS/Pinocchio/话题链路 | 否 |
+| `pixi run sim` | 同时启动 RViz 和 MuJoCo | 否 |
+| `pixi run sim-rviz` | 只启动 RViz | 否 |
+| `pixi run sim-mujoco` | 只启动 MuJoCo | 否 |
+| `pixi run sim-topics` | 仅启动仿真话题，适合 SSH | 否 |
+| `pixi run real -- --confirm-real` | 复用正在运行的 sim，启动真机桥 | **是** |
+| `pixi run status` | 监听真机状态 | 否，仅订阅 |
+
+## 控制原理
+
+```text
+PICO 左右手柄 + SMPL 上肢
+  → 实时躯干坐标系下的相对末端变化
+  → SMPL 肩—肘—腕臂角参考
+  → C++ Pinocchio 阻尼 IK + 零空间优化
+  → 双臂关节命令安全门
+  → Marvin SDK state=1 关节位置控制
+```
+
+PICO 手柄决定末端相对位置和姿态。SMPL 不直接决定末端位置，只提供
+实时躯干坐标系和肩—肘—腕臂角参考，帮助选择更符合人体肘平面的冗余
+关节解。
+
+RViz 显示完整 Marvin URDF/mesh、SMPL 骨架、目标末端、当前 FK 和
+肘平面参考。MuJoCo 只镜像
+`/pico_body_sim/model_joint_states`，当前不执行动力学控制，也不会向
+真机回写。
+
+## 真机安全检查表
+
+运行 `pixi run real` 前必须逐项确认：
+
+- 双臂 48V 动力电源已开启；
+- 实体急停已释放、功能正常并在操作者手边；
+- 双臂运动空间无人、无障碍，首次测试保持空载；
+- 控制柜允许远程/自动控制；
+- PICO 左右手柄和 SMPL Body 持续刷新；
+- 已停止 FxStation、官方天机控制节点和其他 Marvin SDK 会话；
+- `pixi run sim` 已运行且只有一套 PICO/IK 主机链路；
+- 没有第二套旧仿真、旧真机桥或其他本项目控制进程；
+- 仿真中左右臂方向、末端姿态、肘平面和回零均已验收；
+- 当前控制器没有未释放的安全链或急停错误。
+
+程序不会绕过仍然生效的实体急停、安全回路或控制器错误。反馈超时、
+反馈序号停滞、实测越过物理硬限位、控制器/伺服报错、状态异常或跟踪
+误差过大时，会锁存软件急停并释放 SDK 连接。锁存后应先查明原因，再
+重新启动真机任务。
+
+## 常见问题
+
+### `pixi run doctor` 报 ROS/Pinocchio/ABI 失败
+
+确认系统为 Ubuntu 22.04 x86_64，并从完整解压目录运行，不要只复制
+`pixi.toml` 或 `scripts/`。若压缩包校验失败，应重新复制压缩包。
+
+### RViz 或 MuJoCo 无法打开
+
+本地图形桌面应执行：
+
+```bash
+echo "$DISPLAY"
+pixi run sim
+```
+
+SSH 或无显示器环境使用：
+
+```bash
+pixi run sim-topics
+```
+
+远程启动 GUI 需要正确配置 X11/Wayland 转发；`sim-topics` 本身不需要
+图形环境。
+
+### RViz 打开但没有机械臂
+
+先看启动终端是否有 `robot_state_publisher` 或 mesh 加载错误，再运行：
+
+```bash
+pixi run doctor
+```
+
+不要移动或删除解压目录中的 `runtime/`、`src/` 和 `vendor/`。
+
+### 按右手柄 A 没有反应
+
+常见原因：
+
+- PICO 或 SMPL 数据没有持续刷新；
+- 仿真尚未到安全初始位；
+- A 键一直处于按下状态，没有形成“松开后单击”的上升沿；
+- 真机尚未进入 `phase=armed_idle`；
+- 运行了两套控制节点，导致话题或 SDK 会话冲突。
+
+先松开 A，确认输入和状态正常，再单击一次。
+
+### 出现 `not_at_home`
+
+说明当前仿真关节还没有回到安全初始位。松开 A，等待回零完成，不要
+连续按键。若长期不恢复，停止进程并重新运行仿真排查。
+
+### 出现错误 13 或 `controller_emergency_stop`
+
+错误 13 属于控制器/外部急停安全链，不能通过放宽 PICO 软件关节限位
+解决。检查实体急停按钮、急停插头、安全输入回路和控制柜状态，并用
+FxStation 或控制器事件日志定位。原因未解除前不要反复使能。
+
+### 出现 `tracking_error`
+
+查看 `pixi run status` 中的 `tracking_error_detail`，确认是哪一侧、
+哪个关节以及目标角和实测角。常见原因包括关节实际跟随不足、机械负载
+过大、目标变化过快或接近不可达/限位姿态。不要直接扩大误差阈值。
+
+### 日志提示存在其他控制节点或 SDK 会话
+
+关闭 FxStation、官方控制程序、重复的旧 `pixi run real`/`pixi run
+sim` 终端及其他 Marvin SDK 程序。正常组合是一套 `sim` 主机链路加
+一套 `real` 真机桥；不能有第二套 PICO/IK，也不能有第二个真机桥。
+新版本会自动清理自己登记的残留进程；不受本包管理的 Docker/官方节点
+必须在其原终端或原运行环境中关闭。
+
+## 文件校验与来源
+
+厂商二进制校验值保存在 `VENDOR_SHA256SUMS`，随包 ROS 运行时树校验值
+保存在 `RUNTIME_TREE_SHA256`。厂商运行文件的来源与最小白名单说明见
+`VENDOR_RUNTIME.md`。

@@ -1,0 +1,26 @@
+[workspace]
+name = "pico-tianji-real-teleop"
+version = "0.3.0"
+description = "PICO + SMPL + Pinocchio 到 Marvin 双臂遥操作与 RViz/MuJoCo 仿真"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.10.*"
+numpy = "2.2.*"
+scipy = "1.14.*"
+pyyaml = ">=6,<7"
+mujoco = ">=3.2,<4"
+packaging = ">=24,<26"
+lark = ">=1.1,<2"
+netifaces = ">=0.11,<1"
+
+[tasks]
+doctor = "bash scripts/doctor.sh"
+test = { cmd = "bash scripts/test.sh", depends-on = ["doctor"] }
+real = { cmd = "bash scripts/run_real.sh", depends-on = ["doctor"] }
+status = { cmd = "bash scripts/status.sh", depends-on = ["doctor"] }
+sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
+sim-rviz = { cmd = "bash scripts/run_sim.sh --rviz-only", depends-on = ["doctor"] }
+sim-mujoco = { cmd = "bash scripts/run_sim.sh --mujoco-only", depends-on = ["doctor"] }
+sim-topics = { cmd = "bash scripts/run_sim.sh --topics-only", depends-on = ["doctor"] }
