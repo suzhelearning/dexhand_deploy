@@ -18,6 +18,28 @@ Wuji 手部资产或描述包；只保留 PICO 输入和天机坐标转换所需
 `real`。`real` 复用 `sim` 的 PICO、SMPL 和 Pinocchio 输出，不会再
 启动第二套输入或 IK 节点。
 
+## 是否可以独立控制天机
+
+可以。本仓库已经携带运行所需的 ROS 2、Pinocchio、RViz、MuJoCo、
+PICO Python/原生 SDK、Marvin Python SDK 和本项目节点。在支持的电脑
+上克隆后，不依赖 Docker、系统预装 ROS 2、官方 Wuji 仓库、FxStation
+或官方 `libKine` 即可启动完整链路：
+
+```text
+PICO + SMPL → Pinocchio IK → 真机安全桥 → Marvin SDK → 天机双臂
+```
+
+这里的“独立”不代表不需要外部设备和服务。运行时仍然需要：
+
+- Ubuntu 22.04 x86_64 电脑和 Pixi；
+- 本机正在运行的 PXREA Unity/XRoboToolkit 数据服务；
+- 已唤醒并持续发送手柄、A 键和 SMPL 数据的 PICO；
+- 与电脑有线直连、已上电并释放实体急停的 Marvin 控制器。
+
+`pixi run sim` 独立产生 PICO/SMPL/IK 目标；`pixi run real` 只连接
+Marvin 并复用该目标。因此二者属于同一个独立项目，但真机运行时必须
+保持一套 `sim` 与一套 `real` 同时运行。
+
 ## 运行前提
 
 - Ubuntu 22.04 x86_64；
