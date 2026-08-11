@@ -11,11 +11,11 @@ pico_controller_input:
 tianji_kinematic_sim:
   ros__parameters:
     ik_backend: pinocchio_cpp
-    rate: 30.0
+    rate: 90.0
     home_minimum_duration: 2.0
     home_max_speed_deg_s: 25.0
     joint_limit_margin_deg: 5.0
-    max_joint_step_deg: 3.0
+    max_joint_step_deg: 0.68
     max_iteration_step_deg: 4.5
     max_iterations: 24
     position_tolerance_m: 0.001

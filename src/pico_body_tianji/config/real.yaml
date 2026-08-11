@@ -9,8 +9,8 @@ marvin_hardware_bridge:
     state_timeout_s: 1.0
     feedback_timeout_s: 0.15
     maximum_pair_skew_s: 0.03
-    maximum_output_step_deg: 0.5
-    maximum_teleop_speed_deg_s: 40.0
+    maximum_output_step_deg: 0.25
+    maximum_teleop_speed_deg_s: 55.0
     maximum_tracking_error_deg: 8.0
     return_minimum_duration_s: 2.0
     return_max_speed_deg_s: 10.0
