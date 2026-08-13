@@ -160,6 +160,9 @@ class MarvinHardwareBridge(Node):
             home_tolerance_deg=float(
                 self.get_parameter("home_tolerance_deg").value
             ),
+            input_mode=str(
+                self.get_parameter("host_input_mode").value
+            ),
         )
         settings = HardwareSafetySettings(
             command_timeout_s=float(
@@ -235,6 +238,7 @@ class MarvinHardwareBridge(Node):
             "return_minimum_duration_s": 2.0,
             "return_max_speed_deg_s": 10.0,
             "home_tolerance_deg": 1.0,
+            "host_input_mode": "smpl",
             "feedback_hard_limit_padding_deg": 5.0,
             "left_home_deg": [
                 55.0,

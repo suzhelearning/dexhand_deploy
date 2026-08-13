@@ -120,7 +120,58 @@ XRoboToolkit 默认由本机 `127.0.0.1:60061` 提供数据。若日志一直停
 连接信息，RViz 中的 SMPL 骨架、左右目标末端会随人体和手柄运动。
 若骨架或目标保持不动，即使服务进程仍在，也不能视为数据正在持续刷新。
 
-### 4. 先验收仿真
+如果要先确认“不佩戴腿部 Motion Tracker 时，左右手柄是否仍能到达
+MiniPC”，关闭正在运行的 `sim`/`real`，关闭两枚 Motion Tracker，保持
+PICO、左右手柄和 XRoboToolkit 服务在线，然后执行：
+
+```bash
+pixi run pico-probe -- --duration 15
+```
+
+检测过程中分别移动左右手柄。该命令只读取 SDK，不启动 IK、不发布 ROS
+控制目标，也不连接 Marvin。最终出现
+`controller_link_live: true` 表示双手柄有效位姿和递增时间戳持续到达；
+`body_data_received: false`、`motion_tracker_count: 0` 是关闭腿部 Tracker
+后的预期结果，不会导致检测失败。
+
+### 4. 运行纯手柄到 IK 输出
+
+确认 `pico-probe` 通过后，继续保持 XRoboToolkit 的 Controller 和 Send
+开启，关闭 Body Tracking。确认没有运行 `sim`、`real` 或其他 SDK
+客户端，在终端 1 执行：
+
+```bash
+pixi run controller-only-ik
+```
+
+该命令只启动 `pico_controller_only_input` 和
+`tianji_kinematic_sim`。看到安全初始位就绪后，松开再单击右手柄 A，
+然后小幅移动左右手柄。它不启动 RViz/MuJoCo，也不连接 Marvin。
+
+在终端 2 查看 Pinocchio 输出的左右臂 14 个关节角（弧度）：
+
+```bash
+pixi run controller-only-joints
+```
+
+主要输出话题为：
+
+```text
+/pico_body_sim/left_arm/joint_commands   # 左臂 7 关节，单位为度
+/pico_body_sim/right_arm/joint_commands  # 右臂 7 关节，单位为度
+/pico_body_sim/model_joint_states        # 双臂 14 关节，单位为弧度
+```
+
+要像原来的 `pixi run sim` 一样同时查看 RViz 和 MuJoCo，先关闭上述
+`controller-only-ik` 任务，再执行：
+
+```bash
+pixi run sim_controller_only
+```
+
+松开再单击右手柄 A 后，小幅移动左右手柄即可观察对应机械臂。
+
+### 5. 先验收仿真
 
 ```bash
 pixi run sim
@@ -144,10 +195,11 @@ PICO + SMPL → Pinocchio IK → 仿真 JointState → RViz/MuJoCo
 
 只有仿真方向、姿态、关节连续性和回零行为都正确，才能继续真机步骤。
 
-### 5. 启动真机
+### 6. 启动真机
 
-保持第 4 步的 `pixi run sim` 运行。真机任务只启动 Marvin 安全桥，
-复用这套主机侧 PICO + Pinocchio 链路，不会再启动第二套 PICO/IK。
+保持已经验收的仿真任务运行：普通模式使用 `pixi run sim`，纯手柄模式
+使用 `pixi run sim_controller_only`。真机任务只启动 Marvin 安全桥，
+复用对应的主机侧 PICO + Pinocchio 链路，不会再启动第二套 PICO/IK。
 同时确认没有其他旧版 PICO 天机任务、官方控制节点、FxStation 或
 Marvin SDK 会话在运行。
 
@@ -158,7 +210,7 @@ Marvin SDK 会话在运行。
 图中恰好只有一个 PICO 输入节点和一个 Pinocchio IK 节点。外部旧节点
 不会被冒险误杀，而会触发拒绝启动。
 
-#### 5.1 配置天机有线网口
+#### 6.1 配置天机有线网口
 
 调试网线连接控制器 ETH1 或 ETH3。官方调试网段使用：
 
@@ -223,7 +275,7 @@ sudo nmcli connection modify tianji-static \
 sudo nmcli connection up tianji-static
 ```
 
-#### 5.2 启动真机桥
+#### 6.2 启动真机桥
 
 首次在新电脑联调，推荐从较低控制器比例开始：
 
@@ -284,7 +336,40 @@ phase=armed_idle
 SDK 会话，但不会关闭仿真。结束全部工作时，先关闭真机终端并等待
 `Robot released`，再到仿真终端按 `Ctrl+C`。
 
-### 6. 另开终端监控真机状态
+#### 6.3 启动纯手柄真机桥（不使用 Body/Tracker）
+
+终端 1 保持纯手柄仿真运行：
+
+```bash
+pixi run sim_controller_only
+```
+
+此时不要按 A，先确认仿真双臂已经处于安全初始位。终端 2 首次联调建议
+以较低比例启动纯手柄真机桥：
+
+```bash
+pixi run real_controller_only -- \
+  --confirm-real \
+  --velocity-ratio 20 \
+  --acceleration-ratio 20
+```
+
+它复用终端 1 的纯手柄输入、Pinocchio IK 和 14 关节命令；不会启动第二
+套输入或 IK，也不要求 SMPL Body 和腿部 Motion Tracker。原有的回零、
+命令新鲜度与同步、反馈、关节硬限位、输出斜坡、跟踪误差和安全停机检查
+保持不变。
+
+只有看到下面的日志，或状态显示 `phase=armed_idle` 后才能按 A：
+
+```text
+真机链路已就绪：保持安全零位，按右手柄 A 开始。
+```
+
+此后右手柄 A 同时控制仿真显示和真机；再次按 A 或手柄数据中断时，真机
+缓慢回安全位。结束时先在终端 2 按 `Ctrl+C` 并等待 `Robot released`，
+再关闭终端 1 的仿真。
+
+### 7. 另开终端监控真机状态
 
 进入同一解压目录后执行：
 
@@ -307,12 +392,17 @@ pixi run status
 | 命令 | 作用 | 是否连接真机 |
 |---|---|---|
 | `pixi run doctor` | 检查环境、模型和 SDK 文件 | 否 |
+| `pixi run pico-probe` | 只读检测无腿部 Tracker 时的双手柄输入 | 否 |
+| `pixi run controller-only-ik` | 纯手柄输入到 Pinocchio IK 输出 | 否 |
+| `pixi run controller-only-joints` | 查看纯手柄 IK 的 14 关节输出 | 否 |
+| `pixi run sim_controller_only` | 纯手柄 IK 的 RViz + MuJoCo 仿真 | 否 |
 | `pixi run test` | 验证 ROS/Pinocchio/话题链路 | 否 |
 | `pixi run sim` | 同时启动 RViz 和 MuJoCo | 否 |
 | `pixi run sim-rviz` | 只启动 RViz | 否 |
 | `pixi run sim-mujoco` | 只启动 MuJoCo | 否 |
 | `pixi run sim-topics` | 仅启动仿真话题，适合 SSH | 否 |
 | `pixi run real -- --confirm-real` | 复用正在运行的 sim，启动真机桥 | **是** |
+| `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
 | `pixi run status` | 监听真机状态 | 否，仅订阅 |
 
 ## 控制原理
@@ -337,15 +427,16 @@ RViz 显示完整 Marvin URDF/mesh、SMPL 骨架、目标末端、当前 FK 和
 
 ## 真机安全检查表
 
-运行 `pixi run real` 前必须逐项确认：
+运行 `pixi run real` 或 `pixi run real_controller_only` 前必须逐项确认：
 
 - 双臂 48V 动力电源已开启；
 - 实体急停已释放、功能正常并在操作者手边；
 - 双臂运动空间无人、无障碍，首次测试保持空载；
 - 控制柜允许远程/自动控制；
-- PICO 左右手柄和 SMPL Body 持续刷新；
+- PICO 左右手柄持续刷新；普通模式还要求 SMPL Body 持续刷新；
 - 已停止 FxStation、官方天机控制节点和其他 Marvin SDK 会话；
-- `pixi run sim` 已运行且只有一套 PICO/IK 主机链路；
+- 对应的 `pixi run sim` 或 `pixi run sim_controller_only` 已运行，且只有
+  一套 PICO/IK 主机链路；
 - 没有第二套旧仿真、旧真机桥或其他本项目控制进程；
 - 仿真中左右臂方向、末端姿态、肘平面和回零均已验收；
 - 当前控制器没有未释放的安全链或急停错误。

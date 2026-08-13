@@ -315,7 +315,7 @@ find_conflicting_teleop_nodes() {
   local mode="${1:-all}"
   awk -v mode="${mode}" '
     {
-      host_node = ($0 ~ /^\/(pico_controller_input|tianji_kinematic_sim|pico_body_sim\/marvin_robot_state_publisher)$/)
+      host_node = ($0 ~ /^\/(pico_controller_input|pico_controller_only_input|tianji_kinematic_sim|pico_body_sim\/marvin_robot_state_publisher)$/)
       output_node = ($0 ~ /^\/(marvin_hardware_bridge|tianji_world_output_node|tianji_arm_node)$/)
       if ((mode != "real" && host_node) || output_node) {
         if (!seen[$0]++) {
@@ -426,6 +426,48 @@ assert_single_simulation_host_chain() {
       '拒绝连接真机：主机侧必须恰好运行一套 PICO + Pinocchio IK。' \
       "  当前计数：PICO=${pico_count} IK=${ik_count}" \
       '请先运行 pixi run sim，并关闭其他旧仿真/遥操作任务。' >&2
+    return 1
+  fi
+}
+
+assert_single_controller_only_simulation_host_chain() {
+  local node_list=""
+  local controller_only_count=0
+  local smpl_count=0
+  local ik_count=0
+  if [[ -v PICO_TIANJI_NODE_LIST_OVERRIDE ]]; then
+    printf '%s\n' \
+      '拒绝连接真机：真机模式禁止覆盖 ROS 节点列表。' >&2
+    return 1
+  fi
+  if [[ "${PICO_TIANJI_SKIP_ROS_CONFLICT_CHECK:-0}" == "1" ]]; then
+    printf '%s\n' \
+      '拒绝连接真机：真机模式禁止跳过主机 ROS 链路检查。' >&2
+    return 1
+  fi
+  assert_managed_teleop_guard_alive controller-only-simulation
+  if ! node_list="$(read_teleop_node_list)"; then
+    printf '%s\n' \
+      '错误：无法检查纯手柄仿真主机链路，拒绝连接真机。' >&2
+    return 1
+  fi
+  controller_only_count="$(
+    awk '$0 == "/pico_controller_only_input" {count++} END {print count + 0}' \
+      <<<"${node_list}"
+  )"
+  smpl_count="$(
+    awk '$0 == "/pico_controller_input" {count++} END {print count + 0}' \
+      <<<"${node_list}"
+  )"
+  ik_count="$(
+    awk '$0 == "/tianji_kinematic_sim" {count++} END {print count + 0}' \
+      <<<"${node_list}"
+  )"
+  if ((controller_only_count != 1 || smpl_count != 0 || ik_count != 1)); then
+    printf '%s\n' \
+      '拒绝连接真机：主机侧必须恰好运行一套纯手柄 + Pinocchio IK。' \
+      "  当前计数：纯手柄=${controller_only_count} SMPL=${smpl_count} IK=${ik_count}" \
+      '请先运行 pixi run sim_controller_only，并关闭其他仿真任务。' >&2
     return 1
   fi
 }

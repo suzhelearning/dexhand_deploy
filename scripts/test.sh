@@ -27,6 +27,11 @@ trap stop_on_signal INT TERM
 activate_bundle_runtime
 assert_no_conflicting_teleop_nodes
 
+python -m unittest \
+  tests.test_pico_link_probe \
+  tests.test_controller_only_mapper \
+  tests.test_controller_only_host_readiness
+
 IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
 if [[ ! -x "${IK_NODE}" ]]; then
   printf '错误：Pinocchio IK 节点未生成：%s\n' "${IK_NODE}" >&2

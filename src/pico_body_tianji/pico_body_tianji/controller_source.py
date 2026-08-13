@@ -66,6 +66,21 @@ class XRoboControllerSource:
             body_timestamp_fallback=body_timestamp_fallback,
         )
 
+    def motion_tracker_count(self) -> int | None:
+        """Return the currently visible Motion Tracker count when supported.
+
+        Motion Tracker discovery is diagnostic information only.  A missing
+        API or a transient SDK error must not affect controller acquisition.
+        """
+        getter = getattr(self._sdk, "num_motion_data_available", None)
+        if getter is None:
+            return None
+        try:
+            count = int(getter())
+        except Exception:
+            return None
+        return count if count >= 0 else None
+
     def close(self) -> None:
         if self._opened:
             self._sdk.close()

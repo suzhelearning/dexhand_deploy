@@ -41,11 +41,14 @@ class HostReadinessGate:
         command_timeout_s: float = 0.2,
         maximum_pair_skew_s: float = 0.03,
         home_tolerance_deg: float = 1.0,
+        input_mode: str = "smpl",
     ):
         if freshness_timeout_s <= 0.0 or command_timeout_s <= 0.0:
             raise ValueError("readiness timeouts must be positive")
         if maximum_pair_skew_s < 0.0 or home_tolerance_deg <= 0.0:
             raise ValueError("readiness tolerances are invalid")
+        if input_mode not in {"smpl", "controller_only"}:
+            raise ValueError("unsupported host input mode")
         self._home = {
             "left": self._joints(left_home_deg, "left_home_deg"),
             "right": self._joints(right_home_deg, "right_home_deg"),
@@ -54,6 +57,7 @@ class HostReadinessGate:
         self._command_timeout_s = float(command_timeout_s)
         self._maximum_pair_skew_s = float(maximum_pair_skew_s)
         self._home_tolerance_deg = float(home_tolerance_deg)
+        self._input_mode = input_mode
         self._commands: dict[str, _TimedCommand | None] = {
             side: None for side in SIDES
         }
@@ -158,15 +162,33 @@ class HostReadinessGate:
             or self._teleop_state[0] != "idle"
         ):
             return HostReadiness(False, "host_not_idle")
-        if not (
+        if self._input_mode == "smpl":
+            if not (
+                source.get("source") == "live"
+                and source.get("smpl_source")
+                in {"live", "live_signature_fallback"}
+                and source.get("smpl_used") is True
+                and source.get("at_safe_home") is True
+                and source.get("error") is None
+            ):
+                return HostReadiness(False, "pico_smpl_not_live")
+        elif not (
             source.get("source") == "live"
-            and source.get("smpl_source")
-            in {"live", "live_signature_fallback"}
-            and source.get("smpl_used") is True
+            and source.get("input") == "pico_controllers_only"
+            and source.get("mapping")
+            == "controller_relative_end_pose_fixed_reference"
+            and source.get("body_tracking") == "disabled"
+            and source.get("motion_trackers_required") is False
+            and source.get("elbow_constraint")
+            == "disabled_in_controller_only_ik_config"
+            and source.get("smpl_used") is False
+            and source.get("scope") == "controller_only_ik"
             and source.get("at_safe_home") is True
             and source.get("error") is None
         ):
-            return HostReadiness(False, "pico_smpl_not_live")
+            return HostReadiness(
+                False, "pico_controller_only_not_live"
+            )
 
         if any(self._commands[side] is None for side in SIDES):
             return HostReadiness(False, "command_missing")
