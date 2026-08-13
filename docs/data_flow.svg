@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900" role="img" aria-labelledby="title desc">
   <title id="title">PICO 到 Marvin 天机双臂遥操作数据流</title>
-  <desc id="desc">PICO 手柄和 SMPL 数据经过躯干相对映射、Pinocchio IK 与安全门，分别送往 RViz MuJoCo 仿真和 Marvin 真机桥；真机反馈返回安全桥。</desc>
+  <desc id="desc">PICO 手柄和 SMPL 数据经过躯干相对映射、可配置 IK 与安全门，分别送往 RViz MuJoCo 仿真和 Marvin 真机桥；真机反馈返回安全桥。</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#f8fafc"/>
@@ -75,11 +75,11 @@
 
   <g filter="url(#shadow)">
     <rect x="735" y="245" width="300" height="165" rx="18" fill="#ecfdf5" stroke="#10b981" stroke-width="2"/>
-    <text x="885" y="282" text-anchor="middle" class="box-title">C++ Pinocchio IK</text>
-    <text x="885" y="315" text-anchor="middle" class="box-text">阻尼伪逆主任务</text>
-    <text x="885" y="343" text-anchor="middle" class="box-text">臂角 / 奇异点 / 限位零空间优化</text>
+    <text x="885" y="282" text-anchor="middle" class="box-title">C++ ArmIkSolver</text>
+    <text x="885" y="315" text-anchor="middle" class="box-text">Pinocchio / 天机官方 IK</text>
+    <text x="885" y="343" text-anchor="middle" class="box-text">统一臂角 / 奇异点 / 限位语义</text>
     <text x="885" y="371" text-anchor="middle" class="small">输出左右 7 关节连续目标</text>
-    <text x="885" y="394" text-anchor="middle" class="small">不加载官方 libKine</text>
+    <text x="885" y="394" text-anchor="middle" class="small">由 ik_backend 配置切换</text>
   </g>
 
   <g filter="url(#shadow)">

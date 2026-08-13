@@ -95,7 +95,7 @@ assert_single_controller_only_simulation_host_chain
 
 printf '%s\n' \
   '即将启动纯手柄真机链路：' \
-  '  复用 pixi run sim_controller_only 的单套纯手柄 + Pinocchio 链路' \
+  '  复用 pixi run sim_controller_only 的单套纯手柄 + IK 链路' \
   '  安全桥 → Marvin 低层关节控制' \
   '请确认双臂 48V、电气急停、控制模式和运动空间均已检查，' \
   '并关闭 FxStation、官方天机控制节点及其他 Marvin SDK 会话。' \

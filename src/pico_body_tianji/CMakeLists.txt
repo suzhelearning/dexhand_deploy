@@ -36,31 +36,73 @@ set(CMAKE_BUILD_RPATH "${PINOCCHIO_CMEEL_PREFIX_REAL}/lib")
 set(CMAKE_INSTALL_RPATH "${PINOCCHIO_CMEEL_PREFIX_REAL}/lib")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
-add_library(pinocchio_arm_ik src/pinocchio_arm_ik.cpp)
-target_compile_features(pinocchio_arm_ik PUBLIC cxx_std_17)
+add_library(
+  arm_ik
+  src/arm_ik_factory.cpp
+  src/pinocchio_arm_ik.cpp
+  src/tianji_official_arm_ik_proxy.cpp
+)
+target_compile_features(arm_ik PUBLIC cxx_std_17)
 target_compile_options(
-  pinocchio_arm_ik PRIVATE -Wall -Wextra -Wpedantic
+  arm_ik PRIVATE -Wall -Wextra -Wpedantic
 )
 target_include_directories(
-  pinocchio_arm_ik
+  arm_ik
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(
-  pinocchio_arm_ik PUBLIC Eigen3::Eigen pinocchio::pinocchio
+  arm_ik PUBLIC Eigen3::Eigen pinocchio::pinocchio ${CMAKE_DL_LIBS}
 )
 
-# 该节点名称沿用已验证的话题兼容名；它只做 Pinocchio IK/FK，
-# 不加载 libKine，也不直接连接机械臂。RViz/MuJoCo 仅订阅其输出。
+# 厂商 libKine 与 Pinocchio 的依赖闭包不能安全共存。native 库只链接
+# Eigen/dl，供独立 worker 和 probe 使用；ROS 主节点内使用 IPC proxy。
+add_library(tianji_official_native STATIC src/tianji_official_arm_ik.cpp)
+target_compile_features(tianji_official_native PUBLIC cxx_std_17)
+target_compile_options(tianji_official_native PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(
+  tianji_official_native PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(
+  tianji_official_native PUBLIC Eigen3::Eigen ${CMAKE_DL_LIBS}
+)
+
+# 该节点名称沿用已验证的话题兼容名；它只做所选后端的 IK/FK，
+# 不直接连接机械臂。RViz/MuJoCo 与真机桥接仅订阅其输出。
 add_executable(
   tianji_kinematic_sim src/tianji_kinematic_sim_node.cpp
 )
+add_executable(
+  tianji_official_ik_probe src/tianji_official_ik_probe.cpp
+)
+add_executable(
+  tianji_official_ik_worker src/tianji_official_ik_worker.cpp
+)
 target_compile_features(tianji_kinematic_sim PUBLIC cxx_std_17)
+target_compile_features(tianji_official_ik_probe PUBLIC cxx_std_17)
+target_compile_features(tianji_official_ik_worker PUBLIC cxx_std_17)
 target_compile_options(
   tianji_kinematic_sim PRIVATE -Wall -Wextra -Wpedantic
 )
-target_link_libraries(tianji_kinematic_sim pinocchio_arm_ik)
+target_compile_options(
+  tianji_official_ik_probe PRIVATE -Wall -Wextra -Wpedantic
+)
+target_compile_options(
+  tianji_official_ik_worker PRIVATE -Wall -Wextra -Wpedantic
+)
+target_link_libraries(tianji_kinematic_sim arm_ik)
+target_link_libraries(tianji_official_ik_probe tianji_official_native)
+target_link_libraries(tianji_official_ik_worker tianji_official_native)
+set_target_properties(
+  tianji_official_ik_probe
+  tianji_official_ik_worker
+  PROPERTIES
+    SKIP_BUILD_RPATH TRUE
+    INSTALL_RPATH ""
+)
 ament_target_dependencies(
   tianji_kinematic_sim
   ament_index_cpp
@@ -75,7 +117,12 @@ ament_target_dependencies(
 ament_python_install_package(${PROJECT_NAME})
 
 install(
-  TARGETS pinocchio_arm_ik tianji_kinematic_sim
+  TARGETS
+    arm_ik
+    tianji_official_native
+    tianji_kinematic_sim
+    tianji_official_ik_probe
+    tianji_official_ik_worker
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

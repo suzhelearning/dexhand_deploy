@@ -3,7 +3,7 @@
   <name>pico_body_tianji</name>
   <version>0.1.0</version>
   <description>
-    PICO + SMPL + Pinocchio 到 Marvin 双臂的真机遥操作运行包。
+    PICO + SMPL + 可配置 IK 到 Marvin 双臂的真机遥操作运行包。
   </description>
   <maintainer email="boen@localhost.localdomain">boen</maintainer>
   <license>Proprietary</license>

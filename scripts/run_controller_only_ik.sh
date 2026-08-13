@@ -23,7 +23,7 @@ for required in "${IK_NODE}" "${PARAMETERS}" "${INPUT_NODE}"; do
 done
 
 printf '%s\n' \
-  '启动 PICO 纯手柄 → Pinocchio IK 链路。' \
+  '启动 PICO 纯手柄 → 可配置 IK 链路。' \
   '不读取 Body/Motion Tracker，不启动 RViz/MuJoCo，不连接 Marvin。' \
   'IK 输出：/pico_body_sim/{left,right}_arm/joint_commands'
 

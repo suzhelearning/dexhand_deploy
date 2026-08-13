@@ -21,7 +21,7 @@ usage() {
   --both         同时启动 RViz 与 MuJoCo（默认）
   --rviz-only    只启动 RViz
   --mujoco-only  只启动 MuJoCo
-  --topics-only  只启动纯手柄、Pinocchio 和仿真关节话题
+  --topics-only  只启动纯手柄、IK 和仿真关节话题
   -h, --help
 
 本脚本只启动纯运动学仿真，
@@ -102,7 +102,7 @@ if [[ "${WITH_MUJOCO}" == true ]]; then
 fi
 
 printf '%s\n' \
-  '启动纯运动学仿真：PICO 纯手柄 → Pinocchio IK → JointState' \
+  '启动纯运动学仿真：PICO 纯手柄 → 可配置 IK → JointState' \
   "  RViz=${WITH_RVIZ}  MuJoCo=${WITH_MUJOCO}" \
   '该任务不会连接 Marvin 控制器。'
 

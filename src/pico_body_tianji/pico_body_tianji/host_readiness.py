@@ -30,7 +30,7 @@ class _TimedStatus:
 
 
 class HostReadinessGate:
-    """真机连接前验证同机 Pinocchio 主机链路的纯逻辑门。"""
+    """真机连接前验证同机 IK 主机链路的纯逻辑门。"""
 
     def __init__(
         self,
@@ -143,12 +143,14 @@ class HostReadinessGate:
 
         sim = self._sim_status.payload
         if not (
-            sim.get("sdk") == "pinocchio_cpp"
+            sim.get("ik_interface") == "arm_ik_solver_v1"
+            and isinstance(sim.get("ik_backend"), str)
+            and bool(sim.get("ik_backend"))
             and sim.get("robot_connected") is False
             and sim.get("scope") == "preview_only"
         ):
             return HostReadiness(
-                False, "sim_not_isolated_pinocchio"
+                False, "sim_not_isolated_expected_ik"
             )
         if (
             sim.get("mode") != "idle"

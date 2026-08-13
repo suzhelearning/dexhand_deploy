@@ -34,7 +34,7 @@ python -m unittest \
 
 IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
 if [[ ! -x "${IK_NODE}" ]]; then
-  printf '错误：Pinocchio IK 节点未生成：%s\n' "${IK_NODE}" >&2
+  printf '错误：可配置 IK 节点未生成：%s\n' "${IK_NODE}" >&2
   exit 1
 fi
 python - <<'PY'
@@ -56,7 +56,7 @@ wait "${ik_probe_pid}"
 ik_exit=$?
 set -e
 if [[ "${ik_exit}" -ne 124 && "${ik_exit}" -ne 0 ]]; then
-  printf '错误：Pinocchio 纯运动学节点启动失败：%s\n' \
+  printf '错误：可配置 IK 纯运动学节点启动失败：%s\n' \
     "${ik_exit}" >&2
   exit "${ik_exit}"
 fi
@@ -106,4 +106,4 @@ cleanup_preview
 trap - EXIT INT TERM
 
 printf '%s\n' \
-  '便携包 ROS + Pinocchio + 可视化话题链路验证通过；未连接实体机械臂。'
+  '便携包 ROS + 可配置 IK + 可视化话题链路验证通过；未连接实体机械臂。'

@@ -95,7 +95,7 @@ assert_single_simulation_host_chain
 
 printf '%s\n' \
   '即将启动真机链路：' \
-  '  复用 pixi run sim 的单套 PICO + Pinocchio 主机链路' \
+  '  复用 pixi run sim 的单套 PICO + IK 主机链路' \
   '  安全桥 → Marvin 低层关节控制' \
   '请确认双臂 48V、电气急停、控制模式和运动空间均已检查，' \
   '并关闭 FxStation、官方天机控制节点及其他 Marvin SDK 会话。' \

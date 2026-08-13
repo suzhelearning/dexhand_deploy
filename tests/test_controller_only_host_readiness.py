@@ -46,7 +46,8 @@ def _observe_safe_host(
         {
             "mode": "idle",
             "at_safe_home": True,
-            "sdk": "pinocchio_cpp",
+            "ik_interface": "arm_ik_solver_v1",
+            "ik_backend": "pinocchio_cpp",
             "robot_connected": False,
             "scope": "preview_only",
         },
@@ -71,6 +72,49 @@ class ControllerOnlyHostReadinessTest(unittest.TestCase):
     def test_exact_controller_only_host_is_ready(self) -> None:
         gate = _gate("controller_only")
         _observe_safe_host(gate, _controller_only_status())
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertTrue(decision.ready)
+        self.assertEqual(decision.reason, "ready")
+
+    def test_rejects_unknown_ik_interface(self) -> None:
+        gate = _gate("controller_only")
+        _observe_safe_host(gate, _controller_only_status())
+        gate.observe_sim_status(
+            {
+                "mode": "idle",
+                "at_safe_home": True,
+                "ik_interface": "unknown",
+                "ik_backend": "pinocchio_cpp",
+                "robot_connected": False,
+                "scope": "preview_only",
+            },
+            received_at=10.0,
+        )
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertFalse(decision.ready)
+        self.assertEqual(
+            decision.reason,
+            "sim_not_isolated_expected_ik",
+        )
+
+    def test_accepts_official_backend_with_same_interface(self) -> None:
+        gate = _gate("controller_only")
+        _observe_safe_host(gate, _controller_only_status())
+        gate.observe_sim_status(
+            {
+                "mode": "idle",
+                "at_safe_home": True,
+                "ik_interface": "arm_ik_solver_v1",
+                "ik_backend": "tianji_official",
+                "robot_connected": False,
+                "scope": "preview_only",
+            },
+            received_at=10.0,
+        )
 
         decision = gate.evaluate(now=10.02)
 

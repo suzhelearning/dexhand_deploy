@@ -423,7 +423,7 @@ assert_single_simulation_host_chain() {
   )"
   if ((pico_count != 1 || ik_count != 1)); then
     printf '%s\n' \
-      '拒绝连接真机：主机侧必须恰好运行一套 PICO + Pinocchio IK。' \
+      '拒绝连接真机：主机侧必须恰好运行一套 PICO + IK。' \
       "  当前计数：PICO=${pico_count} IK=${ik_count}" \
       '请先运行 pixi run sim，并关闭其他旧仿真/遥操作任务。' >&2
     return 1
@@ -465,7 +465,7 @@ assert_single_controller_only_simulation_host_chain() {
   )"
   if ((controller_only_count != 1 || smpl_count != 0 || ik_count != 1)); then
     printf '%s\n' \
-      '拒绝连接真机：主机侧必须恰好运行一套纯手柄 + Pinocchio IK。' \
+      '拒绝连接真机：主机侧必须恰好运行一套纯手柄 + IK。' \
       "  当前计数：纯手柄=${controller_only_count} SMPL=${smpl_count} IK=${ik_count}" \
       '请先运行 pixi run sim_controller_only，并关闭其他仿真任务。' >&2
     return 1

@@ -3,7 +3,7 @@
 本包适用于 Ubuntu 22.04 x86_64，可在同一台电脑上完成：
 
 - PICO 左右手柄和 SMPL 上肢数据读取；
-- C++ Pinocchio 双臂 IK；
+- 可切换的 C++ 双臂 IK（Pinocchio / 天机官方 `libKine`）；
 - RViz 与 MuJoCo 纯运动学仿真；
 - Marvin SDK 真机关节位置遥操作；
 - 真机状态监控和安全停机。
@@ -15,7 +15,7 @@ Wuji 手部资产或描述包；只保留 PICO 输入和天机坐标转换所需
 ![PICO 到 Marvin 天机双臂遥操作数据流](docs/data_flow.svg)
 
 正确运行关系是终端 1 持续运行一套 `sim`，终端 2 只运行一套
-`real`。`real` 复用 `sim` 的 PICO、SMPL 和 Pinocchio 输出，不会再
+`real`。`real` 复用 `sim` 的 PICO、SMPL 和 IK 输出，不会再
 启动第二套输入或 IK 节点。
 
 ## 是否可以独立控制天机
@@ -26,7 +26,7 @@ PICO Python/原生 SDK、Marvin Python SDK 和本项目节点。在支持的电�
 或官方 `libKine` 即可启动完整链路：
 
 ```text
-PICO + SMPL → Pinocchio IK → 真机安全桥 → Marvin SDK → 天机双臂
+PICO + SMPL → 可配置 IK → 真机安全桥 → Marvin SDK → 天机双臂
 ```
 
 这里的“独立”不代表不需要外部设备和服务。运行时仍然需要：
@@ -39,6 +39,11 @@ PICO + SMPL → Pinocchio IK → 真机安全桥 → Marvin SDK → 天机双臂
 `pixi run sim` 独立产生 PICO/SMPL/IK 目标；`pixi run real` 只连接
 Marvin 并复用该目标。因此二者属于同一个独立项目，但真机运行时必须
 保持一套 `sim` 与一套 `real` 同时运行。
+
+默认使用 `pinocchio_cpp`。工程已提供稳定的 `ArmIkSolver` 接口以及
+`tianji_official` 运行时适配器，可通过 YAML 切换且无需改动 ROS 话题和
+真机安全桥。官方库路径、机型配置和离线验证方法见
+[IK 后端接口与切换](docs/ik_backends.md)。
 
 ## 运行前提
 
@@ -148,7 +153,7 @@ pixi run controller-only-ik
 `tianji_kinematic_sim`。看到安全初始位就绪后，松开再单击右手柄 A，
 然后小幅移动左右手柄。它不启动 RViz/MuJoCo，也不连接 Marvin。
 
-在终端 2 查看 Pinocchio 输出的左右臂 14 个关节角（弧度）：
+在终端 2 查看 IK 输出的左右臂 14 个关节角（弧度）：
 
 ```bash
 pixi run controller-only-joints
@@ -180,7 +185,7 @@ pixi run sim
 该命令同时启动 RViz 和 MuJoCo，只运行：
 
 ```text
-PICO + SMPL → Pinocchio IK → 仿真 JointState → RViz/MuJoCo
+PICO + SMPL → 可配置 IK → 仿真 JointState → RViz/MuJoCo
 ```
 
 它不会启动真机桥，也不会连接 Marvin 控制器。
@@ -199,7 +204,7 @@ PICO + SMPL → Pinocchio IK → 仿真 JointState → RViz/MuJoCo
 
 保持已经验收的仿真任务运行：普通模式使用 `pixi run sim`，纯手柄模式
 使用 `pixi run sim_controller_only`。真机任务只启动 Marvin 安全桥，
-复用对应的主机侧 PICO + Pinocchio 链路，不会再启动第二套 PICO/IK。
+复用对应的主机侧 PICO + IK 链路，不会再启动第二套 PICO/IK。
 同时确认没有其他旧版 PICO 天机任务、官方控制节点、FxStation 或
 Marvin SDK 会话在运行。
 
@@ -207,7 +212,7 @@ Marvin SDK 会话在运行。
 但各自不能重复启动。正常退出、`Ctrl+C` 或子节点异常退出时，脚本只
 停止自己管理的进程；如果主脚本曾被强制杀死，同类任务下次启动会根据
 受管 PID 和进程启动时间自动清理遗留进程。真机桥启动前还会确认 ROS
-图中恰好只有一个 PICO 输入节点和一个 Pinocchio IK 节点。外部旧节点
+图中恰好只有一个 PICO 输入节点和一个 IK 节点。外部旧节点
 不会被冒险误杀，而会触发拒绝启动。
 
 #### 6.1 配置天机有线网口
@@ -354,7 +359,7 @@ pixi run real_controller_only -- \
   --acceleration-ratio 20
 ```
 
-它复用终端 1 的纯手柄输入、Pinocchio IK 和 14 关节命令；不会启动第二
+它复用终端 1 的纯手柄输入、IK 和 14 关节命令；不会启动第二
 套输入或 IK，也不要求 SMPL Body 和腿部 Motion Tracker。原有的回零、
 命令新鲜度与同步、反馈、关节硬限位、输出斜坡、跟踪误差和安全停机检查
 保持不变。
@@ -393,7 +398,7 @@ pixi run status
 |---|---|---|
 | `pixi run doctor` | 检查环境、模型和 SDK 文件 | 否 |
 | `pixi run pico-probe` | 只读检测无腿部 Tracker 时的双手柄输入 | 否 |
-| `pixi run controller-only-ik` | 纯手柄输入到 Pinocchio IK 输出 | 否 |
+| `pixi run controller-only-ik` | 纯手柄输入到可配置 IK 输出 | 否 |
 | `pixi run controller-only-joints` | 查看纯手柄 IK 的 14 关节输出 | 否 |
 | `pixi run sim_controller_only` | 纯手柄 IK 的 RViz + MuJoCo 仿真 | 否 |
 | `pixi run test` | 验证 ROS/Pinocchio/话题链路 | 否 |
@@ -411,7 +416,7 @@ pixi run status
 PICO 左右手柄 + SMPL 上肢
   → 实时躯干坐标系下的相对末端变化
   → SMPL 肩—肘—腕臂角参考
-  → C++ Pinocchio 阻尼 IK + 零空间优化
+  → ArmIkSolver（Pinocchio 或天机官方 IK）
   → 双臂关节命令安全门
   → Marvin SDK state=1 关节位置控制
 ```

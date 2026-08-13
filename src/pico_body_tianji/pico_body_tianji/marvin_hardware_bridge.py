@@ -106,7 +106,7 @@ def create_official_marvin_session() -> MarvinHardwareSession:
 
 
 class MarvinHardwareBridge(Node):
-    """Pinocchio 关节流到 Marvin 双臂的真机安全桥。"""
+    """主机 IK 关节流到 Marvin 双臂的真机安全桥。"""
 
     def __init__(self):
         super().__init__("marvin_hardware_bridge")
@@ -214,7 +214,7 @@ class MarvinHardwareBridge(Node):
         self._create_ros_interfaces()
         self.get_logger().warning(
             "真机桥已确认启动，但尚未连接 Marvin；"
-            "等待同机 Pinocchio 链路处于 idle 安全零位。"
+            "等待同机 IK 链路处于 idle 安全零位。"
             "连接时会自动清除已释放的历史锁存错误；"
             "仍然生效的实体急停或安全链不会被绕过。"
             f"指令斜坡上限={self._maximum_output_step_deg:.3f}°/帧"
@@ -644,7 +644,7 @@ class MarvinHardwareBridge(Node):
             "maximum_output_speed_deg_s": (
                 self._maximum_output_step_deg * self._rate_hz
             ),
-            "ik_source": "pinocchio_cpp_host_topics",
+            "ik_source": "arm_ik_solver_v1_host_topics",
             "hardware_sdk": "verified_marvin_python_sdk",
             "control_mode": "joint_position_state_1",
             "libkine_used": False,

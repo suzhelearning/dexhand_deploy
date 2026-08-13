@@ -1,4 +1,4 @@
-#include "pico_body_tianji/pinocchio_arm_ik.hpp"
+#include "pico_body_tianji/arm_ik_factory.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -170,6 +170,8 @@ public:
   : Node("tianji_kinematic_sim")
   {
     declare_parameter("ik_backend", "pinocchio_cpp");
+    declare_parameter("official_ik_library", "");
+    declare_parameter("official_ik_config", "");
     declare_parameter("rate", 30.0);
     declare_parameter("home_minimum_duration", 2.0);
     declare_parameter("home_max_speed_deg_s", 25.0);
@@ -199,10 +201,7 @@ public:
       {-55.0, -65.0, 70.0, -60.0, -60.0, 0.0, 0.0});
 
     const std::string backend = get_parameter("ik_backend").as_string();
-    if (backend != "pinocchio_cpp") {
-      throw std::invalid_argument(
-              "本预览节点只允许 ik_backend=pinocchio_cpp");
-    }
+    ik_backend_ = backend;
 
     rate_hz_ = get_parameter("rate").as_double();
     home_minimum_duration_s_ =
@@ -234,6 +233,7 @@ public:
       radians(get_parameter("max_iteration_step_deg").as_double());
     settings.maximum_joint_step_rad =
       radians(get_parameter("max_joint_step_deg").as_double());
+    maximum_joint_step_rad_ = settings.maximum_joint_step_rad;
     settings.joint_limit_margin_rad =
       radians(get_parameter("joint_limit_margin_deg").as_double());
     settings.arm_angle_gain =
@@ -261,7 +261,15 @@ public:
       package_share +
       "/assets/marvin_m6_ccs/urdf/"
       "marvin_m6_s_ccs_696_v4.urdf";
-    solver_ = std::make_unique<PinocchioArmIk>(urdf_path, settings);
+    ArmIkBackendOptions backend_options;
+    backend_options.urdf_path = urdf_path;
+    backend_options.official_library_path =
+      get_parameter("official_ik_library").as_string();
+    backend_options.official_config_path =
+      get_parameter("official_ik_config").as_string();
+    solver_ = create_arm_ik_solver(backend, backend_options, settings);
+    RCLCPP_INFO(
+      get_logger(), "已选择 IK 后端：%s", backend.c_str());
 
     arms_[kLeftIndex].side = ArmSide::kLeft;
     arms_[kLeftIndex].side_name = "left";
@@ -293,8 +301,8 @@ public:
     publish_at_home(true);
     RCLCPP_INFO(
       get_logger(),
-      "C++ Pinocchio 双臂纯运动学预览已启动；"
-      "未加载 libKine，未连接实体机械臂");
+      "双臂纯运动学节点已启动，IK 后端=%s；未连接实体机械臂",
+      ik_backend_.c_str());
   }
 
 private:
@@ -466,15 +474,30 @@ private:
         continue;
       }
       try {
-        const IkResult result = solver_->solve(
+        IkResult result = solver_->solve(
           arm.side,
           *arm.target,
           arm.current,
           *arm.elbow_direction);
+        if (!result.joints_rad.allFinite()) {
+          throw std::runtime_error("IK 后端返回非有限关节角");
+        }
+        const double actual_maximum_step =
+          (result.joints_rad - arm.current).cwiseAbs().maxCoeff();
+        result.maximum_joint_step_rad = actual_maximum_step;
+        if (
+          result.accepted &&
+          actual_maximum_step > maximum_joint_step_rad_ + 1.0e-10)
+        {
+          throw std::runtime_error("IK 后端返回值超过公共关节步长安全限制");
+        }
         if (result.accepted) {
           arm.current = result.joints_rad;
         }
         arm.achieved = solver_->forward(arm.side, arm.current);
+        if (!arm.achieved->matrix().allFinite()) {
+          throw std::runtime_error("IK 后端 FK 返回非有限位姿");
+        }
         arm.result = result;
         arm.error = result.saturated ?
           std::optional<std::string>(
@@ -516,7 +539,7 @@ private:
       std_msgs::msg::Bool message;
       message.data = true;
       return_complete_publisher_->publish(message);
-      RCLCPP_INFO(get_logger(), "Pinocchio 预览双臂已回到安全初始位");
+      RCLCPP_INFO(get_logger(), "IK 双臂已回到安全初始位");
     }
   }
 
@@ -602,7 +625,7 @@ private:
     visualization_msgs::msg::Marker marker;
     marker.header.stamp = stamp;
     marker.header.frame_id = arm.side_name + "_chest";
-    marker.ns = "pinocchio_tcp";
+    marker.ns = "ik_tcp";
     marker.id = marker_id;
     marker.type = visualization_msgs::msg::Marker::SPHERE;
     marker.action = visualization_msgs::msg::Marker::ADD;
@@ -798,7 +821,9 @@ private:
       << "\"at_safe_home\":" << json_bool(at_safe_home()) << ','
       << arm_status_json(arms_[kLeftIndex]) << ','
       << arm_status_json(arms_[kRightIndex]) << ','
-      << "\"sdk\":\"pinocchio_cpp\","
+      << "\"sdk\":" << json_quote(ik_backend_) << ','
+      << "\"ik_interface\":\"arm_ik_solver_v1\","
+      << "\"ik_backend\":" << json_quote(ik_backend_) << ','
       << "\"robot_connected\":false,"
       << "\"scope\":\"preview_only\""
       << '}';
@@ -829,12 +854,14 @@ private:
     static_broadcaster_->sendTransform(transforms);
   }
 
-  std::unique_ptr<PinocchioArmIk> solver_;
+  std::unique_ptr<ArmIkSolver> solver_;
   std::array<ArmState, 2> arms_;
+  std::string ik_backend_;
   std::string mode_{"idle"};
   double rate_hz_{30.0};
   double home_minimum_duration_s_{2.0};
   double home_max_speed_deg_s_{25.0};
+  double maximum_joint_step_rad_{radians(3.0)};
 
   std::array<
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr,
