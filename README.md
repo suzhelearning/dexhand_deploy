@@ -40,9 +40,9 @@ PICO + SMPL → 可配置 IK → 真机安全桥 → Marvin SDK → 天机双臂
 Marvin 并复用该目标。因此二者属于同一个独立项目，但真机运行时必须
 保持一套 `sim` 与一套 `real` 同时运行。
 
-默认使用 `pinocchio_cpp`。工程已提供稳定的 `ArmIkSolver` 接口以及
-`tianji_official` 运行时适配器，可通过 YAML 切换且无需改动 ROS 话题和
-真机安全桥。官方库路径、机型配置和离线验证方法见
+默认使用 `pinocchio_cpp`。工程已提供稳定的 `ArmIkSolver` 接口、速度级
+`pinocchio_qp` 和 `tianji_official` 运行时适配器，可通过 YAML 切换且无需
+改动 ROS 话题和真机安全桥。各后端配置和离线验证方法见
 [IK 后端接口与切换](docs/ik_backends.md)。
 
 ## 运行前提
@@ -145,28 +145,36 @@ Pixi 只负责锁定 Python 和 Pinocchio 构建依赖，不会替代系统 ROS�
 安装系统 ROS 时，普通运行不受影响，但执行 `build-ik` 会明确报告缺少
 `/opt/ros/humble/setup.bash`。
 
-先根据运行模式修改对应源码配置：
+运行模式的公共配置如下：
 
 | 运行模式 | 修改的配置文件 | Sim 命令 | Real 命令 |
 | --- | --- | --- | --- |
 | PICO + SMPL 全身链路 | `src/pico_body_tianji/config/preview.yaml` | `pixi run sim` | `pixi run real` |
 | 纯手柄链路 | `src/pico_body_tianji/config/controller_only_ik.yaml` | `pixi run sim_controller_only` | `pixi run real_controller_only` |
 
-在对应 YAML 的 `tianji_kinematic_sim.ros__parameters` 中选择 IK。使用
-Pinocchio：
+纯手柄的后端参数按实现分目录，不再混在公共模式配置中：
 
-```yaml
-ik_backend: pinocchio_cpp
-official_ik_library: ""
-official_ik_config: ""
+```text
+src/pico_body_tianji/config/ik/
+├── pinocchio_cpp/controller_only.yaml
+├── pinocchio_qp/controller_only.yaml
+└── tianji_official/controller_only.yaml
 ```
 
-使用天机官方 IK：
+`controller_only_ik.yaml` 保留 PICO 输入、频率、回零和公共安全
+参数；启动器根据 `ik_backend` 只加载对应的一个 profile。
 
-```yaml
-ik_backend: tianji_official
-official_ik_library: ""
-official_ik_config: ""
+纯手柄模式可以直接用独立任务启动 QP profile：
+
+```bash
+pixi run sim_controller_only_qp
+# 无 RViz/MuJoCo：
+pixi run controller-only-ik-qp
+
+# 官方 IK 的无界面纯手柄链路：
+pixi run controller-only-ik-official
+# 官方 IK + RViz/MuJoCo：
+pixi run sim_controller_only_official
 ```
 
 官方库路径和机型配置保持空字符串即可，运行时包装器会使用项目内的
@@ -179,7 +187,11 @@ pixi install --locked -e ik-build
 # 编译 src 下的 C++ IK，产物先进入 staging/ik
 pixi run -e ik-build build-ik
 
-# 把新二进制、官方 SDK 和两份 IK YAML 部署到 runtime
+# 检查 QP 左右臂收敛、不可达恢复和求解耗时
+staging/ik/lib/pico_body_tianji/pinocchio_qp_ik_probe \
+  src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf
+
+# 把新二进制、官方 SDK 和完整 config 目录部署到 runtime
 pixi run -e ik-build deploy-ik
 
 # 检查部署后的运行环境和 ROS 数据链路
@@ -188,7 +200,9 @@ pixi run test
 ```
 
 如果只修改了 YAML，且 `staging/ik` 中已有上一次的完整编译产物，可以
-跳过 `build-ik`，只执行 `pixi run -e ik-build deploy-ik`。修改了
+跳过 `build-ik`，只执行 `pixi run -e ik-build deploy-ik`。该命令
+会递归同步整个 `src/pico_body_tianji/config/` 到 runtime，包括真机
+配置与所有 IK profile。修改了
 `src/pico_body_tianji/src/`、头文件或 `CMakeLists.txt` 时，必须重新执行
 `build-ik` 和 `deploy-ik`。
 
@@ -217,6 +231,10 @@ pixi run real_controller_only -- \
   --velocity-ratio 20 \
   --acceleration-ratio 20
 ```
+
+验证 QP 时，将终端 1 替换为 `pixi run sim_controller_only_qp`。QP profile
+是基于 90 Hz、现有 0.68° 公共单步契约和离线轨迹得到的保守初值；连接
+真机前仍必须完成手柄 replay、低速和小工作空间验证。
 
 Real 不会再启动一套 IK，只复用对应 Sim 发布的 14 关节目标。真机前必须
 确认只有一套 Sim 在运行、FxStation 已关闭、实体急停已释放，并等待 Real

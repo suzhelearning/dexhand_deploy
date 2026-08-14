@@ -1,6 +1,6 @@
 #pragma once
 
-#include "pico_body_tianji/arm_ik_solver.hpp"
+#include "pico_body_tianji/ik/arm_ik_solver.hpp"
 
 #include <memory>
 #include <string>

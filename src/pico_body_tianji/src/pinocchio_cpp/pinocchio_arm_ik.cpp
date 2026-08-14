@@ -1,4 +1,4 @@
-#include "pico_body_tianji/pinocchio_arm_ik.hpp"
+#include "pico_body_tianji/ik/pinocchio_cpp/pinocchio_arm_ik.hpp"
 
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>

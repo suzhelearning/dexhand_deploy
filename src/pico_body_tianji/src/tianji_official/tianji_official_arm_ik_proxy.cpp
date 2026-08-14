@@ -1,6 +1,6 @@
-#include "pico_body_tianji/tianji_official_arm_ik.hpp"
+#include "pico_body_tianji/ik/tianji_official/tianji_official_arm_ik.hpp"
 
-#include "pico_body_tianji/tianji_official_ipc.hpp"
+#include "pico_body_tianji/ik/tianji_official/tianji_official_ipc.hpp"
 
 #include <sys/socket.h>
 #include <sys/types.h>

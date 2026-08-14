@@ -7,7 +7,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, Shutdown
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 
 
@@ -41,6 +41,18 @@ def generate_launch_description():
     with urdf_path.open(encoding="utf-8") as urdf_file:
         robot_description = urdf_file.read()
     with_rviz = LaunchConfiguration("with_rviz")
+    ik_backend = LaunchConfiguration("ik_backend")
+    backend_parameters = PathJoinSubstitution(
+        [
+            str(project_root),
+            "src",
+            "pico_body_tianji",
+            "config",
+            "ik",
+            ik_backend,
+            "controller_only.yaml",
+        ]
+    )
 
     return LaunchDescription(
         [
@@ -48,6 +60,11 @@ def generate_launch_description():
                 "with_rviz",
                 default_value="true",
                 description="是否启动 RViz 纯运动学预览",
+            ),
+            DeclareLaunchArgument(
+                "ik_backend",
+                default_value="pinocchio_cpp",
+                description="可选 pinocchio_cpp / pinocchio_qp / tianji_official",
             ),
             Node(
                 package="robot_state_publisher",
@@ -68,7 +85,11 @@ def generate_launch_description():
                 executable="tianji_kinematic_sim",
                 name="tianji_kinematic_sim",
                 output="screen",
-                parameters=[str(parameters)],
+                parameters=[
+                    str(parameters),
+                    backend_parameters,
+                    {"ik_backend": ik_backend},
+                ],
             ),
             ExecuteProcess(
                 cmd=[

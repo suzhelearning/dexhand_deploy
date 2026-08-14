@@ -23,8 +23,12 @@ real_controller_only = { cmd = "bash scripts/run_controller_only_real.sh", depen
 status = { cmd = "bash scripts/status.sh", depends-on = ["doctor"] }
 pico-probe = "bash scripts/probe_pico.sh"
 controller-only-ik = "bash scripts/run_controller_only_ik.sh"
+controller-only-ik-qp = "bash scripts/run_controller_only_ik.sh --qp"
+controller-only-ik-official = "bash scripts/run_controller_only_ik.sh --official"
 controller-only-joints = "bash scripts/watch_controller_only_joints.sh"
 sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --both", depends-on = ["doctor"] }
+sim_controller_only_qp = { cmd = "bash scripts/run_controller_only_sim.sh --both -- ik_backend:=pinocchio_qp", depends-on = ["doctor"] }
+sim_controller_only_official = { cmd = "bash scripts/run_controller_only_sim.sh --both -- ik_backend:=tianji_official", depends-on = ["doctor"] }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
 sim-rviz = { cmd = "bash scripts/run_sim.sh --rviz-only", depends-on = ["doctor"] }
 sim-mujoco = { cmd = "bash scripts/run_sim.sh --mujoco-only", depends-on = ["doctor"] }

@@ -40,6 +40,7 @@ add_library(
   arm_ik
   src/arm_ik_factory.cpp
   src/pinocchio_cpp/pinocchio_arm_ik.cpp
+  src/pinocchio_qp/pinocchio_qp_arm_ik.cpp
   src/tianji_official/tianji_official_arm_ik_proxy.cpp
 )
 target_compile_features(arm_ik PUBLIC cxx_std_17)
@@ -86,9 +87,14 @@ add_executable(
   tianji_official_ik_worker
   src/tianji_official/tianji_official_ik_worker.cpp
 )
+add_executable(
+  pinocchio_qp_ik_probe
+  src/pinocchio_qp/pinocchio_qp_ik_probe.cpp
+)
 target_compile_features(tianji_kinematic_sim PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_probe PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_worker PUBLIC cxx_std_17)
+target_compile_features(pinocchio_qp_ik_probe PUBLIC cxx_std_17)
 target_compile_options(
   tianji_kinematic_sim PRIVATE -Wall -Wextra -Wpedantic
 )
@@ -98,9 +104,13 @@ target_compile_options(
 target_compile_options(
   tianji_official_ik_worker PRIVATE -Wall -Wextra -Wpedantic
 )
+target_compile_options(
+  pinocchio_qp_ik_probe PRIVATE -Wall -Wextra -Wpedantic
+)
 target_link_libraries(tianji_kinematic_sim arm_ik)
 target_link_libraries(tianji_official_ik_probe tianji_official_native)
 target_link_libraries(tianji_official_ik_worker tianji_official_native)
+target_link_libraries(pinocchio_qp_ik_probe arm_ik)
 set_target_properties(
   tianji_official_ik_probe
   tianji_official_ik_worker
@@ -128,6 +138,7 @@ install(
     tianji_kinematic_sim
     tianji_official_ik_probe
     tianji_official_ik_worker
+    pinocchio_qp_ik_probe
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

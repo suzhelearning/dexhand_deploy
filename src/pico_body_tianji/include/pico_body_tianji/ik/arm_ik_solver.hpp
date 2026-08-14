@@ -3,6 +3,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
+#include <array>
 #include <limits>
 #include <string>
 
@@ -43,6 +44,35 @@ struct IkSettings
   double singularity_avoidance_gain{0.0};
   double singularity_finite_difference_rad{1.0e-4};
   double singularity_merit_weight{1.0e-2};
+
+  // pinocchio_qp 后端参数。任务残差按最大笛卡尔速度归一化，关节相关
+  // 代价按各关节速度上限归一化，因此下面权重均为无量纲相对权重。
+  double control_period_s{1.0 / 90.0};
+  double qp_position_time_constant_s{0.30};
+  double qp_orientation_time_constant_s{0.40};
+  double qp_max_linear_speed_m_s{0.25};
+  double qp_max_angular_speed_rad_s{1.00};
+  ArmJointVector qp_joint_velocity_limits_rad_s{
+    ArmJointVector::Constant(55.0 * 3.14159265358979323846 / 180.0)};
+  double qp_position_weight{1.0};
+  double qp_orientation_weight{0.45};
+  double qp_velocity_regularization_weight{2.0e-2};
+  double qp_continuity_weight{6.0e-2};
+  double qp_posture_weight{8.0e-3};
+  double qp_posture_time_constant_s{2.5};
+  ArmJointVector qp_left_nominal_rad{ArmJointVector::Zero()};
+  ArmJointVector qp_right_nominal_rad{ArmJointVector::Zero()};
+  double qp_joint_limit_activation_margin_rad{
+    15.0 * 3.14159265358979323846 / 180.0};
+  double qp_joint_limit_velocity_damper_gain{4.0};
+  double qp_singularity_critical_threshold{1.5e-2};
+  double qp_singularity_orientation_scale{0.15};
+  double qp_singularity_posture_multiplier{8.0};
+  double qp_singularity_velocity_multiplier{4.0};
+  double qp_singularity_escape_weight{3.0e-2};
+  double qp_singularity_escape_speed_rad_s{0.15};
+  int qp_max_active_set_iterations{48};
+  double qp_active_set_tolerance{1.0e-9};
 };
 
 struct IkResult
@@ -65,6 +95,12 @@ struct IkResult
   double minimum_limit_margin_rad{
     std::numeric_limits<double>::quiet_NaN()};
   double maximum_joint_step_rad{0.0};
+  double position_velocity_residual_m_s{
+    std::numeric_limits<double>::quiet_NaN()};
+  double orientation_velocity_residual_rad_s{
+    std::numeric_limits<double>::quiet_NaN()};
+  int solver_iterations{0};
+  int active_joint_constraints{0};
   std::string status;
 };
 

@@ -30,7 +30,13 @@ cd "${BUNDLE_ROOT}"
 ik_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_kinematic_sim"
 probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_probe"
 worker_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_worker"
-for binary in "${ik_binary}" "${probe_binary}" "${worker_binary}"; do
+qp_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/pinocchio_qp_ik_probe"
+for binary in \
+  "${ik_binary}" \
+  "${probe_binary}" \
+  "${worker_binary}" \
+  "${qp_probe_binary}"
+do
   if [[ ! -x "${binary}" ]]; then
     printf '错误：编译产物不存在：%s\n' "${binary}" >&2
     exit 1
@@ -49,7 +55,12 @@ if ! nm -C "${ik_binary}" | grep -F 'create_arm_ik_solver' >/dev/null; then
   printf '%s\n' '错误：新 IK 二进制不包含 IK factory。' >&2
   exit 1
 fi
+if ! nm -C "${ik_binary}" | grep -F 'PinocchioQpArmIk' >/dev/null; then
+  printf '%s\n' '错误：新 IK 二进制不包含 Pinocchio QP IK 实现。' >&2
+  exit 1
+fi
 
 printf 'IK 编译完成：%s\n' "${ik_binary}"
 printf '官方 IK probe：%s\n' "${probe_binary}"
 printf '官方 IK worker：%s\n' "${worker_binary}"
+printf 'Pinocchio QP probe：%s\n' "${qp_probe_binary}"

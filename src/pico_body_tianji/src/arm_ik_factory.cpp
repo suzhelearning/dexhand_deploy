@@ -1,7 +1,8 @@
-#include "pico_body_tianji/arm_ik_factory.hpp"
+#include "pico_body_tianji/ik/arm_ik_factory.hpp"
 
-#include "pico_body_tianji/pinocchio_arm_ik.hpp"
-#include "pico_body_tianji/tianji_official_arm_ik.hpp"
+#include "pico_body_tianji/ik/pinocchio_cpp/pinocchio_arm_ik.hpp"
+#include "pico_body_tianji/ik/pinocchio_qp/pinocchio_qp_arm_ik.hpp"
+#include "pico_body_tianji/ik/tianji_official/tianji_official_arm_ik.hpp"
 
 #include <functional>
 #include <map>
@@ -24,6 +25,13 @@ const std::map<std::string, Factory> & solver_factories()
       "pinocchio_cpp",
       [](const ArmIkBackendOptions & options, const IkSettings & settings) {
         return std::make_unique<PinocchioArmIk>(
+          options.urdf_path, settings);
+      }
+    },
+    {
+      "pinocchio_qp",
+      [](const ArmIkBackendOptions & options, const IkSettings & settings) {
+        return std::make_unique<PinocchioQpArmIk>(
           options.urdf_path, settings);
       }
     },

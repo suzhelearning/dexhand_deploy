@@ -1,0 +1,11 @@
+tianji_kinematic_sim:
+  ros__parameters:
+    # 官方 libKine 负责选解、工作空间、奇异和关节限位判定。
+    # 路径留空时，portable runtime 包装器传入内置 SDK 和机型配置。
+    ik_backend: tianji_official
+    official_ik_library: ""
+    official_ik_config: ""
+
+    # 纯手柄不提供 zsp_para 肘平面方向，按参考关节角最近选解。
+    arm_angle_gain: 0.0
+    arm_angle_merit_weight: 0.0

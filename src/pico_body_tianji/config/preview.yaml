@@ -10,7 +10,7 @@ pico_controller_input:
 
 tianji_kinematic_sim:
   ros__parameters:
-    # 可选 pinocchio_cpp / tianji_official。runtime 已内置官方 SDK；
+    # 可选 pinocchio_cpp / pinocchio_qp / tianji_official。runtime 已内置官方 SDK；
     # 下面两项留空时由正式启动器自动传入，也可显式覆盖。
     ik_backend: pinocchio_cpp
     official_ik_library: ""

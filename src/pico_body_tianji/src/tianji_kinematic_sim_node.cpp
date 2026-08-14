@@ -1,4 +1,4 @@
-#include "pico_body_tianji/arm_ik_factory.hpp"
+#include "pico_body_tianji/ik/arm_ik_factory.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -193,6 +193,29 @@ public:
     declare_parameter("joint_center_merit_weight", 1.0e-3);
     declare_parameter("singularity_avoidance_gain", 0.2);
     declare_parameter("singularity_merit_weight", 1.0e-2);
+    declare_parameter("qp_position_time_constant_s", 0.30);
+    declare_parameter("qp_orientation_time_constant_s", 0.40);
+    declare_parameter("qp_max_linear_speed_m_s", 0.25);
+    declare_parameter("qp_max_angular_speed_rad_s", 1.00);
+    declare_parameter<std::vector<double>>(
+      "qp_joint_velocity_limits_deg_s",
+      {55.0, 55.0, 55.0, 55.0, 55.0, 55.0, 55.0});
+    declare_parameter("qp_position_weight", 1.0);
+    declare_parameter("qp_orientation_weight", 0.45);
+    declare_parameter("qp_velocity_regularization_weight", 2.0e-2);
+    declare_parameter("qp_continuity_weight", 6.0e-2);
+    declare_parameter("qp_posture_weight", 8.0e-3);
+    declare_parameter("qp_posture_time_constant_s", 2.5);
+    declare_parameter("qp_joint_limit_activation_margin_deg", 15.0);
+    declare_parameter("qp_joint_limit_velocity_damper_gain", 4.0);
+    declare_parameter("qp_singularity_critical_threshold", 1.5e-2);
+    declare_parameter("qp_singularity_orientation_scale", 0.15);
+    declare_parameter("qp_singularity_posture_multiplier", 8.0);
+    declare_parameter("qp_singularity_velocity_multiplier", 4.0);
+    declare_parameter("qp_singularity_escape_weight", 3.0e-2);
+    declare_parameter("qp_singularity_escape_speed_deg_s", 8.6);
+    declare_parameter("qp_max_active_set_iterations", 48);
+    declare_parameter("qp_active_set_tolerance", 1.0e-9);
     declare_parameter<std::vector<double>>(
       "left_home_deg",
       {55.0, -65.0, -70.0, -60.0, 60.0, 0.0, 0.0});
@@ -254,6 +277,55 @@ public:
       get_parameter("singularity_avoidance_gain").as_double();
     settings.singularity_merit_weight =
       get_parameter("singularity_merit_weight").as_double();
+    settings.control_period_s = 1.0 / rate_hz_;
+    settings.qp_position_time_constant_s =
+      get_parameter("qp_position_time_constant_s").as_double();
+    settings.qp_orientation_time_constant_s =
+      get_parameter("qp_orientation_time_constant_s").as_double();
+    settings.qp_max_linear_speed_m_s =
+      get_parameter("qp_max_linear_speed_m_s").as_double();
+    settings.qp_max_angular_speed_rad_s =
+      get_parameter("qp_max_angular_speed_rad_s").as_double();
+    settings.qp_joint_velocity_limits_rad_s = joint_vector_from_degrees(
+      get_parameter("qp_joint_velocity_limits_deg_s").as_double_array(),
+      "qp_joint_velocity_limits_deg_s");
+    settings.qp_position_weight =
+      get_parameter("qp_position_weight").as_double();
+    settings.qp_orientation_weight =
+      get_parameter("qp_orientation_weight").as_double();
+    settings.qp_velocity_regularization_weight =
+      get_parameter("qp_velocity_regularization_weight").as_double();
+    settings.qp_continuity_weight =
+      get_parameter("qp_continuity_weight").as_double();
+    settings.qp_posture_weight =
+      get_parameter("qp_posture_weight").as_double();
+    settings.qp_posture_time_constant_s =
+      get_parameter("qp_posture_time_constant_s").as_double();
+    settings.qp_joint_limit_activation_margin_rad = radians(
+      get_parameter("qp_joint_limit_activation_margin_deg").as_double());
+    settings.qp_joint_limit_velocity_damper_gain =
+      get_parameter("qp_joint_limit_velocity_damper_gain").as_double();
+    settings.qp_singularity_critical_threshold =
+      get_parameter("qp_singularity_critical_threshold").as_double();
+    settings.qp_singularity_orientation_scale =
+      get_parameter("qp_singularity_orientation_scale").as_double();
+    settings.qp_singularity_posture_multiplier =
+      get_parameter("qp_singularity_posture_multiplier").as_double();
+    settings.qp_singularity_velocity_multiplier =
+      get_parameter("qp_singularity_velocity_multiplier").as_double();
+    settings.qp_singularity_escape_weight =
+      get_parameter("qp_singularity_escape_weight").as_double();
+    settings.qp_singularity_escape_speed_rad_s = radians(
+      get_parameter("qp_singularity_escape_speed_deg_s").as_double());
+    settings.qp_max_active_set_iterations = static_cast<int>(
+      get_parameter("qp_max_active_set_iterations").as_int());
+    settings.qp_active_set_tolerance =
+      get_parameter("qp_active_set_tolerance").as_double();
+    settings.qp_left_nominal_rad = joint_vector_from_degrees(
+      get_parameter("left_home_deg").as_double_array(), "left_home_deg");
+    settings.qp_right_nominal_rad = joint_vector_from_degrees(
+      get_parameter("right_home_deg").as_double_array(), "right_home_deg");
+    arm_angle_required_ = settings.arm_angle_gain > 0.0;
 
     const std::string package_share =
       ament_index_cpp::get_package_share_directory("pico_body_tianji");
@@ -470,15 +542,20 @@ private:
   {
     for (std::size_t index = 0; index < arms_.size(); ++index) {
       ArmState & arm = arms_[index];
-      if (!arm.target.has_value() || !arm.elbow_direction.has_value()) {
+      if (
+        !arm.target.has_value() ||
+        (arm_angle_required_ && !arm.elbow_direction.has_value()))
+      {
         continue;
       }
       try {
+        const Eigen::Vector3d elbow_direction =
+          arm.elbow_direction.value_or(Eigen::Vector3d::Zero());
         IkResult result = solver_->solve(
           arm.side,
           *arm.target,
           arm.current,
-          *arm.elbow_direction);
+          elbow_direction);
         if (!result.joints_rad.allFinite()) {
           throw std::runtime_error("IK 后端返回非有限关节角");
         }
@@ -766,6 +843,18 @@ private:
       std::optional<double>(
       degrees(arm.result->arm_angle_error_rad)) :
       std::nullopt;
+    const std::optional<double> position_velocity_residual =
+      arm.result.has_value() ?
+      std::optional<double>(arm.result->position_velocity_residual_m_s) :
+      std::nullopt;
+    const std::optional<double> orientation_velocity_residual =
+      arm.result.has_value() ?
+      std::optional<double>(arm.result->orientation_velocity_residual_rad_s) :
+      std::nullopt;
+    const int solver_iterations =
+      arm.result.has_value() ? arm.result->solver_iterations : 0;
+    const int active_joint_constraints =
+      arm.result.has_value() ? arm.result->active_joint_constraints : 0;
     const bool step_limited =
       arm.result.has_value() && arm.result->joint_step_limited;
     const bool saturated =
@@ -806,6 +895,14 @@ private:
       << json_optional_number(damping) << ','
       << json_quote(prefix + "_arm_angle_error_deg") << ':'
       << json_optional_number(arm_angle_error_deg) << ','
+      << json_quote(prefix + "_position_velocity_residual_m_s") << ':'
+      << json_optional_number(position_velocity_residual) << ','
+      << json_quote(prefix + "_orientation_velocity_residual_rad_s") << ':'
+      << json_optional_number(orientation_velocity_residual) << ','
+      << json_quote(prefix + "_solver_iterations") << ':'
+      << solver_iterations << ','
+      << json_quote(prefix + "_active_joint_constraints") << ':'
+      << active_joint_constraints << ','
       << json_quote(prefix + "_singularity_active") << ':'
       << json_bool(singularity_active);
     return stream.str();
@@ -862,6 +959,7 @@ private:
   double home_minimum_duration_s_{2.0};
   double home_max_speed_deg_s_{25.0};
   double maximum_joint_step_rad_{radians(3.0)};
+  bool arm_angle_required_{false};
 
   std::array<
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr,
