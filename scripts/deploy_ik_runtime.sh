@@ -16,6 +16,7 @@ SDK_CONFIG="${SDK_SOURCE_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
 RUNTIME_SHARE="${BUNDLE_ROOT}/runtime/pico_body_tianji/share/pico_body_tianji"
 SOURCE_CONFIG="${BUNDLE_ROOT}/src/pico_body_tianji/config"
 RUNTIME_CONFIG="${RUNTIME_SHARE}/config"
+STRIP_TOOL="${IK_STRIP_TOOL:-/usr/bin/strip}"
 
 for binary in "${NEW_IK}" "${NEW_PROBE}" "${NEW_WORKER}"; do
   if [[ ! -x "${binary}" ]]; then
@@ -30,6 +31,10 @@ for sdk_file in "${SDK_LIBRARY}" "${SDK_CONFIG}"; do
     exit 1
   fi
 done
+if [[ ! -x "${STRIP_TOOL}" ]]; then
+  printf '错误：找不到可执行的 strip 工具：%s\n' "${STRIP_TOOL}" >&2
+  exit 1
+fi
 if [[ ! -x "${RUNTIME_BIN}/tianji_kinematic_sim" ]]; then
   printf '%s\n' '错误：runtime IK Bash 包装器不存在，拒绝部署。' >&2
   exit 1
@@ -49,7 +54,10 @@ for path in \
   "${RUNTIME_BIN}/tianji_official_ik_worker.bin" \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so" \
   "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg" \
-  "${RUNTIME_SHARE}/launch/controller_only_ik.launch.py"
+  "${RUNTIME_SHARE}/launch/controller_only_ik.launch.py" \
+  "${RUNTIME_SHARE}/launch/controller_only_sim.launch.py" \
+  "${RUNTIME_SHARE}/launch/preview.launch.py" \
+  "${RUNTIME_SHARE}/launch/real_teleop.launch.py"
 do
   if [[ -f "${path}" ]]; then
     cp -a -- "${path}" "${BACKUP_DIR}/$(basename "${path}")"
@@ -77,6 +85,14 @@ install -m 0644 \
 install -m 0755 "${NEW_IK}" "${RUNTIME_BIN}/tianji_kinematic_sim.bin.new"
 install -m 0755 "${NEW_PROBE}" "${RUNTIME_BIN}/tianji_official_ik_probe.bin.new"
 install -m 0755 "${NEW_WORKER}" "${RUNTIME_BIN}/tianji_official_ik_worker.bin.new"
+# staging 保留 RelWithDebInfo 完整调试符号；runtime 只部署去除
+# DWARF 调试段的运行版，避免将数十 MB 的调试信息提交到 Git。
+"${STRIP_TOOL}" --strip-debug \
+  "${RUNTIME_BIN}/tianji_kinematic_sim.bin.new"
+"${STRIP_TOOL}" --strip-debug \
+  "${RUNTIME_BIN}/tianji_official_ik_probe.bin.new"
+"${STRIP_TOOL}" --strip-debug \
+  "${RUNTIME_BIN}/tianji_official_ik_worker.bin.new"
 mv -f -- \
   "${RUNTIME_BIN}/tianji_kinematic_sim.bin.new" \
   "${RUNTIME_BIN}/tianji_kinematic_sim.bin"
@@ -104,9 +120,16 @@ if ! diff -qr -- "${SOURCE_CONFIG}" "${RUNTIME_CONFIG}" >/dev/null; then
   printf '%s\n' '错误：src 与 runtime 的 config 目录部署后仍不一致。' >&2
   exit 1
 fi
-install -m 0644 \
-  "${BUNDLE_ROOT}/src/pico_body_tianji/launch/controller_only_ik.launch.py" \
-  "${RUNTIME_SHARE}/launch/controller_only_ik.launch.py"
+for launch_file in \
+  controller_only_ik.launch.py \
+  controller_only_sim.launch.py \
+  preview.launch.py \
+  real_teleop.launch.py
+do
+  install -m 0644 \
+    "${BUNDLE_ROOT}/src/pico_body_tianji/launch/${launch_file}" \
+    "${RUNTIME_SHARE}/launch/${launch_file}"
+done
 
 runtime_hash="$(
   cd "${BUNDLE_ROOT}"
@@ -127,6 +150,7 @@ printf '%s\n' \
   "IK runtime 部署完成；旧文件备份在 ${BACKUP_DIR}" \
   "保留入口：${RUNTIME_BIN}/tianji_kinematic_sim" \
   "新二进制：${RUNTIME_BIN}/tianji_kinematic_sim.bin" \
+  "runtime ELF 已移除 DWARF 调试信息；staging 仍保留调试版" \
   "官方 probe：${RUNTIME_BIN}/tianji_official_ik_probe" \
   "官方 SDK：${SDK_RUNTIME_ROOT}" \
   "配置已同步：${SOURCE_CONFIG} -> ${RUNTIME_CONFIG}"

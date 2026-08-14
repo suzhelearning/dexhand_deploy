@@ -19,8 +19,12 @@ def _runtime_nodes(context):
     package_share = Path(
         get_package_share_directory("pico_body_tianji")
     )
-    preview_config = str(package_share / "config" / "preview.yaml")
-    real_config = str(package_share / "config" / "real.yaml")
+    preview_config = (
+        package_share / "config" / "mode" / "full_body" / "preview.yaml"
+    )
+    real_config = str(
+        package_share / "config" / "mode" / "full_body" / "real.yaml"
+    )
     robot_ip = LaunchConfiguration("robot_ip").perform(context)
     velocity_ratio = int(
         LaunchConfiguration("velocity_ratio").perform(context)
@@ -42,14 +46,14 @@ def _runtime_nodes(context):
             executable="tianji_kinematic_sim",
             name="tianji_kinematic_sim",
             output="screen",
-            parameters=[preview_config],
+            parameters=[str(preview_config)],
         ),
         Node(
             package="pico_body_tianji",
             executable="pico_controller_input",
             name="pico_controller_input",
             output="screen",
-            parameters=[preview_config],
+            parameters=[str(preview_config)],
         ),
         Node(
             package="pico_body_tianji",

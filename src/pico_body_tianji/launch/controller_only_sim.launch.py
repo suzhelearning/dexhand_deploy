@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, Shutdown
+from launch.actions import DeclareLaunchArgument, Shutdown
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -15,20 +14,12 @@ def generate_launch_description():
     package_share = Path(
         get_package_share_directory("pico_body_tianji")
     )
-    project_root = Path(__file__).resolve().parents[3]
     parameters = (
-        project_root
-        / "src"
-        / "pico_body_tianji"
+        package_share
         / "config"
+        / "mode"
+        / "controller_only"
         / "controller_only_ik.yaml"
-    )
-    controller_only_input = (
-        project_root
-        / "src"
-        / "pico_body_tianji"
-        / "scripts"
-        / "pico_controller_only_input"
     )
     rviz_config = package_share / "rviz" / "preview.rviz"
     urdf_path = (
@@ -41,18 +32,6 @@ def generate_launch_description():
     with urdf_path.open(encoding="utf-8") as urdf_file:
         robot_description = urdf_file.read()
     with_rviz = LaunchConfiguration("with_rviz")
-    ik_backend = LaunchConfiguration("ik_backend")
-    backend_parameters = PathJoinSubstitution(
-        [
-            str(project_root),
-            "src",
-            "pico_body_tianji",
-            "config",
-            "ik",
-            ik_backend,
-            "controller_only.yaml",
-        ]
-    )
 
     return LaunchDescription(
         [
@@ -60,11 +39,6 @@ def generate_launch_description():
                 "with_rviz",
                 default_value="true",
                 description="是否启动 RViz 纯运动学预览",
-            ),
-            DeclareLaunchArgument(
-                "ik_backend",
-                default_value="pinocchio_cpp",
-                description="可选 pinocchio_cpp / pinocchio_qp / tianji_official",
             ),
             Node(
                 package="robot_state_publisher",
@@ -85,21 +59,14 @@ def generate_launch_description():
                 executable="tianji_kinematic_sim",
                 name="tianji_kinematic_sim",
                 output="screen",
-                parameters=[
-                    str(parameters),
-                    backend_parameters,
-                    {"ik_backend": ik_backend},
-                ],
+                parameters=[str(parameters)],
             ),
-            ExecuteProcess(
-                cmd=[
-                    sys.executable,
-                    str(controller_only_input),
-                    "--ros-args",
-                    "--params-file",
-                    str(parameters),
-                ],
+            Node(
+                package="pico_body_tianji",
+                executable="pico_controller_only_input",
+                name="pico_controller_only_input",
                 output="screen",
+                parameters=[str(parameters)],
             ),
             Node(
                 package="rviz2",
@@ -114,15 +81,4 @@ def generate_launch_description():
                 condition=IfCondition(with_rviz),
             ),
         ]
-    )
-
-
-if __name__ == "__main__":
-    from ros2launch.api.api import launch_a_launch_file
-
-    raise SystemExit(
-        launch_a_launch_file(
-            launch_file_path=__file__,
-            launch_file_arguments=sys.argv[1:],
-        )
     )

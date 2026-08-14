@@ -5,45 +5,12 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common.sh"
 
-IK_BACKEND="pinocchio_cpp"
 if (($#)); then
-  case "$1" in
-    --qp)
-      IK_BACKEND="pinocchio_qp"
-      shift
-      ;;
-    --official)
-      IK_BACKEND="tianji_official"
-      shift
-      ;;
-    --backend)
-      if (($# < 2)); then
-        printf '%s\n' '错误：--backend 缺少后端名称。' >&2
-        exit 2
-      fi
-      IK_BACKEND="$2"
-      shift 2
-      ;;
-    *)
-      printf '%s\n' \
-        '用法：pixi run controller-only-ik' \
-        '      pixi run controller-only-ik-qp' \
-        '      pixi run controller-only-ik-official' >&2
-      exit 2
-      ;;
-  esac
-fi
-if (($#)); then
-  printf '%s\n' '错误：纯手柄 IK 启动器收到多余参数。' >&2
+  printf '%s\n' \
+    '错误：此内部启动器不接受 IK 参数。' \
+    '请在 config/mode/controller_only/controller_only_ik.yaml 中修改 ik_backend。' >&2
   exit 2
 fi
-case "${IK_BACKEND}" in
-  pinocchio_cpp|pinocchio_qp|tianji_official) ;;
-  *)
-    printf '错误：不支持 IK 后端 %s\n' "${IK_BACKEND}" >&2
-    exit 2
-    ;;
-esac
 
 acquire_teleop_guard controller-only-ik
 install_teleop_cleanup_traps
@@ -53,13 +20,22 @@ activate_bundle_runtime
 assert_no_conflicting_teleop_nodes
 
 IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
-PARAMETERS="${BUNDLE_ROOT}/src/pico_body_tianji/config/controller_only_ik.yaml"
-BACKEND_PARAMETERS="${BUNDLE_ROOT}/src/pico_body_tianji/config/ik/${IK_BACKEND}/controller_only.yaml"
-INPUT_NODE="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/pico_controller_only_input"
+PARAMETERS="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml"
+IK_BACKEND="$(
+  awk '$1 == "ik_backend:" {print $2; exit}' "${PARAMETERS}"
+)"
+case "${IK_BACKEND}" in
+  pinocchio_cpp|pinocchio_qp|tianji_official) ;;
+  *)
+    printf '错误：%s 中的 ik_backend=%s 无效\n' \
+      "${PARAMETERS}" "${IK_BACKEND:-<missing>}" >&2
+    exit 2
+    ;;
+esac
+INPUT_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/pico_controller_only_input"
 for required in \
   "${IK_NODE}" \
   "${PARAMETERS}" \
-  "${BACKEND_PARAMETERS}" \
   "${INPUT_NODE}"
 do
   if [[ ! -f "${required}" ]]; then
@@ -77,7 +53,6 @@ printf '%s\n' \
 ik_arguments=(
   "--ros-args"
   "--params-file" "${PARAMETERS}"
-  "--params-file" "${BACKEND_PARAMETERS}"
 )
 setsid "${IK_NODE}" "${ik_arguments[@]}" &
 ik_pid=$!

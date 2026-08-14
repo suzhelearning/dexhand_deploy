@@ -29,7 +29,7 @@
 新增其他实现时，只需继承 `ArmIkSolver`，再在
 `src/arm_ik_factory.cpp` 注册名称。ROS 节点和真机桥不应包含厂商专用逻辑。
 
-## 目录与 profile
+## 目录与模式配置
 
 公共接口与各后端头文件按同一规则组织：
 
@@ -44,32 +44,36 @@ include/pico_body_tianji/ik/
    └── tianji_official_ipc.hpp
 ```
 
-纯手柄的三个后端也各自使用独立 profile：
+运行参数先按全身和纯手柄模式分组，不再为每个 IK 建立额外 YAML：
 
 ```text
-config/ik/
-├── pinocchio_cpp/controller_only.yaml
-├── pinocchio_qp/controller_only.yaml
-└── tianji_official/controller_only.yaml
+config/mode/
+├── full_body/
+│   ├── preview.yaml
+│   └── real.yaml
+└── controller_only/
+    ├── controller_only_ik.yaml
+    └── controller_only_real.yaml
 ```
 
-`config/controller_only_ik.yaml` 只保留纯手柄输入、回零和公共
-安全参数。启动器根据 `ik_backend` 只追加加载对应后端的
-`controller_only.yaml`。
+`preview.yaml` 和 `controller_only_ik.yaml` 分别是全身/纯手柄模式的
+唯一 IK 选择点，也保存三种后端的算法参数。未选中后端的专用参数不会参与
+该后端求解。命令行不接受 IK 选择。
 
 ## 启用 Pinocchio QP
 
-纯手柄 profile 位于：
+纯手柄 QP 参数位于：
 
 ```text
-config/ik/pinocchio_qp/controller_only.yaml
+config/mode/controller_only/controller_only_ik.yaml
 ```
 
 它按 90 Hz 设置期望笛卡尔速度、位置/姿态相对权重、每关节速度上限、
-连续性、Home 自然姿态、关节限位减速带和奇异恢复调度。直接运行：
+连续性、Home 自然姿态、关节限位减速带和奇异恢复调度。在该文件中把
+`ik_backend` 设为 `pinocchio_qp`、部署，然后使用模式的固定命令：
 
 ```bash
-pixi run sim_controller_only_qp
+pixi run sim_controller_only
 ```
 
 QP 使用工程内的 7 变量 active-set box 求解器，不增加共享库依赖。任务残差
@@ -83,19 +87,18 @@ QP 使用工程内的 7 变量 active-set box 求解器，不增加共享库依�
 `runtime/tianji_official`。先确认设备确实是 Marvin M6 CCS V4.0，并使用与它匹配的
 `ccs_m6_40.MvKDCfg`。错误机型配置可能返回数值正常但物理错误的结果。
 
-纯手柄配置位于
-`config/ik/tianji_official/controller_only.yaml`。启动时设置：
+纯手柄官方 IK 参数和后端选择均位于
+`config/mode/controller_only/controller_only_ik.yaml`：
 
 ```yaml
 tianji_kinematic_sim:
   ros__parameters:
     ik_backend: tianji_official
-    official_ik_library: ""
-    official_ik_config: ""
 ```
 
-正式 runtime 启动器会自动传入内置 SDK 路径；只有需要测试其他 SDK
-版本时才在 YAML 中显式覆盖绝对路径。选择默认 `pinocchio_cpp` 时不会
+其中 `official_ik_library` 和 `official_ik_config` 默认留空，
+runtime 包装器会自动传入内置 SDK 路径；只有需要测试其他 SDK 版本时
+才在该模式 YAML 中显式覆盖绝对路径。选择默认 `pinocchio_cpp` 时不会
 启动 worker，也不会加载厂商库。
 
 ## 构建与部署
@@ -112,7 +115,8 @@ pixi run -e ik-build deploy-ik
 中的 Pinocchio 4.0.0 二进制必须与 `runtime/pin` 逐字节一致。`deploy-ik`
 会先将旧文件备份到 `staging/runtime-backup`，再更新正式二进制、worker、
 probe，并将整个源码 `config/` 递归同步到 runtime，最后更新
-`RUNTIME_TREE_SHA256`。
+`RUNTIME_TREE_SHA256`。runtime ELF 在部署时移除 DWARF 调试段，
+`staging/ik` 中的 `RelWithDebInfo` 产物仍保留完整调试信息。
 
 官方适配器完成以下边界转换：
 

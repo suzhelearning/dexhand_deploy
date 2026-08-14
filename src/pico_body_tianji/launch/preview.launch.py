@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, Shutdown
 from launch.conditions import IfCondition
@@ -5,19 +7,19 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
-import os
-
 
 def generate_launch_description():
-    package_share = get_package_share_directory("pico_body_tianji")
-    parameters = os.path.join(package_share, "config", "preview.yaml")
-    rviz_config = os.path.join(package_share, "rviz", "preview.rviz")
-    urdf_path = os.path.join(
-        package_share,
-        "assets",
-        "marvin_m6_ccs",
-        "urdf",
-        "marvin_m6_s_ccs_696_v4.urdf",
+    package_share = Path(get_package_share_directory("pico_body_tianji"))
+    parameters = (
+        package_share / "config" / "mode" / "full_body" / "preview.yaml"
+    )
+    rviz_config = package_share / "rviz" / "preview.rviz"
+    urdf_path = (
+        package_share
+        / "assets"
+        / "marvin_m6_ccs"
+        / "urdf"
+        / "marvin_m6_s_ccs_696_v4.urdf"
     )
     with open(urdf_path, encoding="utf-8") as urdf_file:
         robot_description = urdf_file.read()
@@ -49,21 +51,21 @@ def generate_launch_description():
                 executable="tianji_kinematic_sim",
                 name="tianji_kinematic_sim",
                 output="screen",
-                parameters=[parameters],
+                parameters=[str(parameters)],
             ),
             Node(
                 package="pico_body_tianji",
                 executable="pico_controller_input",
                 name="pico_controller_input",
                 output="screen",
-                parameters=[parameters],
+                parameters=[str(parameters)],
             ),
             Node(
                 package="rviz2",
                 executable="rviz2",
                 name="pico_body_tianji_rviz",
                 output="screen",
-                arguments=["-d", rviz_config],
+                arguments=["-d", str(rviz_config)],
                 additional_env={
                     "QT_X11_NO_MITSHM": "1",
                 },

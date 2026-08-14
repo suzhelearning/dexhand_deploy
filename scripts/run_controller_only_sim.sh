@@ -14,7 +14,7 @@ LAUNCH_PID=""
 usage() {
   cat <<'EOF'
 用法：
-  pixi run sim_controller_only [-- ROS launch 参数...]
+  pixi run sim_controller_only -- [模式]
   bash scripts/run_controller_only_sim.sh [模式] [-- ROS launch 参数...]
 
 模式：
@@ -83,12 +83,11 @@ install_teleop_cleanup_traps
 activate_bundle_runtime
 assert_no_conflicting_teleop_nodes
 
-CONTROLLER_ONLY_LAUNCH_DIR="${BUNDLE_ROOT}/src/pico_body_tianji/launch"
-CONTROLLER_ONLY_LAUNCH="${CONTROLLER_ONLY_LAUNCH_DIR}"
-CONTROLLER_ONLY_LAUNCH+="/controller_only_sim.launch.py"
+ROS2_BIN="${ROS_ROOT}/bin/ros2"
+CONTROLLER_ONLY_LAUNCH="${PROJECT_PREFIX}/share/pico_body_tianji/launch/controller_only_sim.launch.py"
 MUJOCO_VIEWER="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/mujoco_joint_viewer.py"
 
-for required in "${CONTROLLER_ONLY_LAUNCH}" "${MUJOCO_VIEWER}"; do
+for required in "${ROS2_BIN}" "${CONTROLLER_ONLY_LAUNCH}" "${MUJOCO_VIEWER}"; do
   if [[ ! -f "${required}" ]]; then
     printf '错误：纯手柄仿真运行文件不存在：%s\n' "${required}" >&2
     exit 1
@@ -111,7 +110,7 @@ if [[ "${WITH_RVIZ}" == true ]]; then
   with_rviz="true"
 fi
 
-setsid python "${CONTROLLER_ONLY_LAUNCH}" \
+setsid python "${ROS2_BIN}" launch pico_body_tianji controller_only_sim.launch.py \
   "with_rviz:=${with_rviz}" "${FORWARDED_ARGS[@]}" &
 LAUNCH_PID=$!
 register_teleop_process_group \

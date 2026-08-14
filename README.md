@@ -149,33 +149,34 @@ Pixi 只负责锁定 Python 和 Pinocchio 构建依赖，不会替代系统 ROS�
 
 | 运行模式 | 修改的配置文件 | Sim 命令 | Real 命令 |
 | --- | --- | --- | --- |
-| PICO + SMPL 全身链路 | `src/pico_body_tianji/config/preview.yaml` | `pixi run sim` | `pixi run real` |
-| 纯手柄链路 | `src/pico_body_tianji/config/controller_only_ik.yaml` | `pixi run sim_controller_only` | `pixi run real_controller_only` |
+| PICO + SMPL 全身链路 | `src/pico_body_tianji/config/mode/full_body/preview.yaml` | `pixi run sim` | `pixi run real` |
+| 纯手柄链路 | `src/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml` | `pixi run sim_controller_only` | `pixi run real_controller_only` |
 
-纯手柄的后端参数按实现分目录，不再混在公共模式配置中：
+配置先按运行模式分组；每种模式各有一个 Sim/IK 配置和一个 Real 配置：
 
 ```text
-src/pico_body_tianji/config/ik/
-├── pinocchio_cpp/controller_only.yaml
-├── pinocchio_qp/controller_only.yaml
-└── tianji_official/controller_only.yaml
+src/pico_body_tianji/config/mode/
+├── full_body/
+│   ├── preview.yaml
+│   └── real.yaml
+└── controller_only/
+    ├── controller_only_ik.yaml
+    └── controller_only_real.yaml
 ```
 
-`controller_only_ik.yaml` 保留 PICO 输入、频率、回零和公共安全
-参数；启动器根据 `ik_backend` 只加载对应的一个 profile。
+`preview.yaml` 和 `controller_only_ik.yaml` 已包含三种 IK 的全部参数。
+程序只使用当前后端需要的部分。IK 不在命令行选择，只需在对应模式的
+YAML 中修改一行：
 
-纯手柄模式可以直接用独立任务启动 QP profile：
-
-```bash
-pixi run sim_controller_only_qp
-# 无 RViz/MuJoCo：
-pixi run controller-only-ik-qp
-
-# 官方 IK 的无界面纯手柄链路：
-pixi run controller-only-ik-official
-# 官方 IK + RViz/MuJoCo：
-pixi run sim_controller_only_official
+```yaml
+tianji_kinematic_sim:
+  ros__parameters:
+    ik_backend: pinocchio_qp  # 或 pinocchio_cpp / tianji_official
 ```
+
+因此运行命令始终只有
+`sim`、`real`、`sim_controller_only`、`real_controller_only` 四个，
+不会把模式名与 IK 名组合成新命令。
 
 官方库路径和机型配置保持空字符串即可，运行时包装器会使用项目内的
 `runtime/tianji_official`。修改完成后，在项目根目录依次执行：
@@ -201,8 +202,10 @@ pixi run test
 
 如果只修改了 YAML，且 `staging/ik` 中已有上一次的完整编译产物，可以
 跳过 `build-ik`，只执行 `pixi run -e ik-build deploy-ik`。该命令
-会递归同步整个 `src/pico_body_tianji/config/` 到 runtime，包括真机
-配置与所有 IK profile。修改了
+会递归同步整个 `src/pico_body_tianji/config/` 到 runtime，包括两种模式的
+四个 YAML。部署时还会移除 runtime ELF 的 DWARF
+调试信息，完整 `RelWithDebInfo` 产物继续保留在 `staging/ik`，
+避免将调试符号作为大文件提交到 Git。修改了
 `src/pico_body_tianji/src/`、头文件或 `CMakeLists.txt` 时，必须重新执行
 `build-ik` 和 `deploy-ik`。
 
@@ -232,9 +235,10 @@ pixi run real_controller_only -- \
   --acceleration-ratio 20
 ```
 
-验证 QP 时，将终端 1 替换为 `pixi run sim_controller_only_qp`。QP profile
-是基于 90 Hz、现有 0.68° 公共单步契约和离线轨迹得到的保守初值；连接
-真机前仍必须完成手柄 replay、低速和小工作空间验证。
+验证 QP 时，在对应的公共 YAML 中把 `ik_backend` 改为
+`pinocchio_qp`，部署后仍使用上面的同一条 Sim 命令。QP profile 是基于
+90 Hz、现有 0.68° 公共单步契约和离线轨迹得到的保守初值；连接真机前
+仍必须完成手柄 replay、低速和小工作空间验证。
 
 Real 不会再启动一套 IK，只复用对应 Sim 发布的 14 关节目标。真机前必须
 确认只有一套 Sim 在运行、FxStation 已关闭、实体急停已释放，并等待 Real
@@ -277,12 +281,12 @@ pixi run pico-probe -- --duration 15
 客户端，在终端 1 执行：
 
 ```bash
-pixi run controller-only-ik
+pixi run sim_controller_only -- --topics-only
 ```
 
 该命令只启动 `pico_controller_only_input` 和
-`tianji_kinematic_sim`。看到安全初始位就绪后，松开再单击右手柄 A，
-然后小幅移动左右手柄。它不启动 RViz/MuJoCo，也不连接 Marvin。
+`tianji_kinematic_sim`，不启动 RViz/MuJoCo，也不连接 Marvin。
+看到安全初始位就绪后，松开再单击右手柄 A，然后小幅移动左右手柄。
 
 在终端 2 查看 IK 输出的左右臂 14 个关节角（弧度）：
 
@@ -298,8 +302,7 @@ pixi run controller-only-joints
 /pico_body_sim/model_joint_states        # 双臂 14 关节，单位为弧度
 ```
 
-要像原来的 `pixi run sim` 一样同时查看 RViz 和 MuJoCo，先关闭上述
-`controller-only-ik` 任务，再执行：
+要同时查看 RViz 和 MuJoCo，先关闭上述无界面任务，再执行：
 
 ```bash
 pixi run sim_controller_only
@@ -523,23 +526,18 @@ pixi run status
 - `error`：启动失败或安全停机的直接软件判据；
 - `readiness`：主机链路尚未就绪时的原因。
 
-## 常用命令
+## 四个运行入口
 
 | 命令 | 作用 | 是否连接真机 |
 |---|---|---|
-| `pixi run doctor` | 检查环境、模型和 SDK 文件 | 否 |
-| `pixi run pico-probe` | 只读检测无腿部 Tracker 时的双手柄输入 | 否 |
-| `pixi run controller-only-ik` | 纯手柄输入到可配置 IK 输出 | 否 |
-| `pixi run controller-only-joints` | 查看纯手柄 IK 的 14 关节输出 | 否 |
-| `pixi run sim_controller_only` | 纯手柄 IK 的 RViz + MuJoCo 仿真 | 否 |
-| `pixi run test` | 验证 ROS/Pinocchio/话题链路 | 否 |
 | `pixi run sim` | 同时启动 RViz 和 MuJoCo | 否 |
-| `pixi run sim-rviz` | 只启动 RViz | 否 |
-| `pixi run sim-mujoco` | 只启动 MuJoCo | 否 |
-| `pixi run sim-topics` | 仅启动仿真话题，适合 SSH | 否 |
 | `pixi run real -- --confirm-real` | 复用正在运行的 sim，启动真机桥 | **是** |
+| `pixi run sim_controller_only` | 纯手柄 IK 的 RViz + MuJoCo 仿真 | 否 |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
-| `pixi run status` | 监听真机状态 | 否，仅订阅 |
+
+`doctor`、`test`、`pico-probe`、`status` 和 `controller-only-joints` 是检查/
+观测工具，不是新的运行模式。`sim` 两个入口均可追加
+`-- --rviz-only`、`-- --mujoco-only` 或 `-- --topics-only`，但入口名不变。
 
 ## 控制原理
 
@@ -601,10 +599,10 @@ pixi run sim
 SSH 或无显示器环境使用：
 
 ```bash
-pixi run sim-topics
+pixi run sim -- --topics-only
 ```
 
-远程启动 GUI 需要正确配置 X11/Wayland 转发；`sim-topics` 本身不需要
+远程启动 GUI 需要正确配置 X11/Wayland 转发；`--topics-only` 本身不需要
 图形环境。
 
 ### RViz 打开但没有机械臂

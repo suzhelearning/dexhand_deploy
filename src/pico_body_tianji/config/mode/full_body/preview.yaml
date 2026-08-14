@@ -1,0 +1,69 @@
+pico_controller_input:
+  ros__parameters:
+    rate: 90.0
+    stale_timeout: 0.5
+    require_reliable_timestamp: true
+    allow_unstamped_preview: false
+    min_cutoff: 1.0
+    beta: 0.7
+    elbow_min_cutoff: 0.3
+
+tianji_kinematic_sim:
+  ros__parameters:
+    # 全身模式只在这里选择 IK：
+    # pinocchio_cpp / pinocchio_qp / tianji_official。
+    ik_backend: pinocchio_cpp
+
+    # 全身模式公共频率、回零和安全契约。
+    rate: 90.0
+    home_minimum_duration: 2.0
+    home_max_speed_deg_s: 25.0
+    joint_limit_margin_deg: 5.0
+    max_joint_step_deg: 0.68
+    position_tolerance_m: 0.001
+    orientation_tolerance_deg: 0.6
+    arm_angle_gain: 0.8
+    arm_angle_tolerance_deg: 2.0
+    arm_angle_merit_weight: 0.001
+    left_home_deg: [55.0, -65.0, -70.0, -60.0, 60.0, 0.0, 0.0]
+    right_home_deg: [-55.0, -65.0, 70.0, -60.0, -60.0, 0.0, 0.0]
+
+    # 天机官方 IK。留空时 runtime 包装器使用项目内置 SDK 和机型配置。
+    official_ik_library: ""
+    official_ik_config: ""
+
+    # pinocchio_cpp：迭代 DLS、冗余选解和奇异规避参数。
+    max_iterations: 24
+    max_iteration_step_deg: 4.5
+    minimum_damping: 0.001
+    maximum_damping: 0.15
+    singular_value_threshold: 0.05
+    nullspace_damping: 0.001
+    joint_center_gain: 0.3
+    joint_center_activation_margin_deg: 15.0
+    joint_center_merit_weight: 0.001
+    singularity_avoidance_gain: 0.2
+    singularity_merit_weight: 0.01
+
+    # pinocchio_qp：任务权重、硬约束和奇异恢复参数。
+    qp_position_time_constant_s: 0.30
+    qp_orientation_time_constant_s: 0.40
+    qp_max_linear_speed_m_s: 0.25
+    qp_max_angular_speed_rad_s: 1.00
+    qp_joint_velocity_limits_deg_s: [55.0, 55.0, 55.0, 55.0, 55.0, 55.0, 55.0]
+    qp_position_weight: 1.0
+    qp_orientation_weight: 0.45
+    qp_velocity_regularization_weight: 0.02
+    qp_continuity_weight: 0.06
+    qp_posture_weight: 0.008
+    qp_posture_time_constant_s: 2.5
+    qp_joint_limit_activation_margin_deg: 15.0
+    qp_joint_limit_velocity_damper_gain: 4.0
+    qp_singularity_critical_threshold: 0.015
+    qp_singularity_orientation_scale: 0.15
+    qp_singularity_posture_multiplier: 8.0
+    qp_singularity_velocity_multiplier: 4.0
+    qp_singularity_escape_weight: 0.03
+    qp_singularity_escape_speed_deg_s: 8.6
+    qp_max_active_set_iterations: 48
+    qp_active_set_tolerance: 1.0e-9

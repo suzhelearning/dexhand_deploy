@@ -102,7 +102,7 @@ printf '%s\n' \
   '机械臂进入 armed_idle 前不要按右手柄 A。'
 
 BRIDGE_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/marvin_hardware_bridge"
-REAL_CONFIG="${PROJECT_PREFIX}/share/pico_body_tianji/config/real.yaml"
+REAL_CONFIG="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/full_body/real.yaml"
 
 bridge_arguments=(
   "--confirm-real"

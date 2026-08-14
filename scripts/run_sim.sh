@@ -14,7 +14,7 @@ LAUNCH_PID=""
 usage() {
   cat <<'EOF'
 用法：
-  pixi run sim [-- ROS launch 参数...]
+  pixi run sim -- [模式]
   bash scripts/run_sim.sh [模式] [-- ROS launch 参数...]
 
 模式：
@@ -71,7 +71,7 @@ if [[
 ]]; then
   printf '%s\n' \
     '错误：未检测到 DISPLAY/WAYLAND_DISPLAY，无法启动 GUI。' \
-    '可改用 pixi run sim-topics 验证无界面仿真链路。' >&2
+    '可改用 pixi run sim -- --topics-only 验证无界面仿真链路。' >&2
   exit 1
 fi
 

@@ -37,6 +37,18 @@ if [[ ! -x "${IK_NODE}" ]]; then
   printf '错误：可配置 IK 节点未生成：%s\n' "${IK_NODE}" >&2
   exit 1
 fi
+PREVIEW_CONFIG="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/full_body/preview.yaml"
+IK_BACKEND="$(
+  awk '$1 == "ik_backend:" {print $2; exit}' "${PREVIEW_CONFIG}"
+)"
+case "${IK_BACKEND}" in
+  pinocchio_cpp|pinocchio_qp|tianji_official) ;;
+  *)
+    printf '错误：%s 中的 ik_backend=%s 无效\n' \
+      "${PREVIEW_CONFIG}" "${IK_BACKEND:-<missing>}" >&2
+    exit 2
+    ;;
+esac
 python - <<'PY'
 from ament_index_python.packages import get_package_share_directory
 
@@ -46,8 +58,7 @@ print("Ament 安装索引检查通过：", share)
 PY
 
 setsid timeout 3 "${IK_NODE}" --ros-args \
-  --params-file \
-  "${PROJECT_PREFIX}/share/pico_body_tianji/config/preview.yaml" &
+  --params-file "${PREVIEW_CONFIG}" &
 ik_probe_pid=$!
 register_teleop_process_group \
   "${ik_probe_pid}" portable-test-ik-probe 5
