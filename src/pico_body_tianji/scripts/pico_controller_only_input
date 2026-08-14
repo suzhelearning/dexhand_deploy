@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from pico_body_tianji.controller_only_input_node import main
+from pico_body_tianji.controller_only.controller_only_input_node import main
 
 
 if __name__ == "__main__":

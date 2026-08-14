@@ -5,8 +5,8 @@ import unittest
 import numpy as np
 
 from pico_body_tianji.controller_frame import ControllerFrame
-from pico_body_tianji.controller_source import ControllerSample
-from pico_body_tianji.pico_link_probe import PicoLinkProbeStats
+from pico_body_tianji.full_body.controller_source import ControllerSample
+from pico_body_tianji.full_body.pico_link_probe import PicoLinkProbeStats
 
 
 def _sample(timestamp_ns: int, offset: float = 0.0) -> ControllerSample:

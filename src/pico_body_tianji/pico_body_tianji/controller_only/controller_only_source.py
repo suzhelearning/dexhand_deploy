@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .controller_frame import ControllerFrame
+from ..controller_frame import ControllerFrame
 
 
 @dataclass(frozen=True)

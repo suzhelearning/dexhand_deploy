@@ -14,4 +14,4 @@ printf '%s\n' \
   '只读检测 PICO 输入；不会启动 IK、仿真或 Marvin 真机。' \
   '检测期间请勿同时运行 sim、real 或其他 XRoboToolkit SDK 客户端。'
 
-python -m pico_body_tianji.pico_link_probe "$@"
+python -m pico_body_tianji.full_body.pico_link_probe "$@"

@@ -110,7 +110,120 @@ pixi run test
 这三个步骤不会连接或驱动实体机械臂。`doctor` 会离线加载 Marvin SDK
 检查文件与 ABI，但不会建立控制器连接。
 
-### 3. 准备 PICO 输入
+普通使用者不需要在系统中安装 ROS 2。本项目从
+`runtime/ros/humble` 加载随包 ROS 运行时；前提是拿到完整项目，不能只
+复制 `src`、`pixi.toml` 和 `pixi.lock`。完整项目至少应保留
+`runtime/ros/humble`、`runtime/pico_body_tianji`、`runtime/pin`、
+`runtime/abi` 和 `vendor`。
+
+`pixi install --locked` 一次只安装 `default` 环境，不会安装或检查
+`ik-build`。直接运行 `pixi run sim` 也会自动安装缺失的默认环境，但首次
+使用仍建议显式执行上面的安装和检查命令。两套 Pixi 环境的用途如下：
+
+| Pixi 环境 | 安装命令 | 是否要求系统 ROS 2 |
+| --- | --- | --- |
+| 普通运行 `default` | `pixi install --locked` | 否，使用项目内置 ROS |
+| 重新编译 `ik-build` | `pixi install --locked -e ik-build` | 安装本身不要求；执行 `build-ik` 时要求系统 ROS Humble |
+
+普通使用者不要执行 `pixi install --all`，也不需要执行 `build-ik`。只有修改
+C++ IK 源码并准备重新编译的开发者，才需要下一节。
+
+### 3. 可选：替换 IK、重新编译并运行
+
+本节是 IK 开发流程，普通使用者可以直接跳到“准备 PICO 输入”。所有 IK
+切换、编译、部署和启动命令集中放在这里。不要直接修改 `runtime` 下的
+YAML 或二进制：`runtime` 是实际运行目录，其 IK 内容由 `src` 编译并通过
+`deploy-ik` 部署。
+
+重新编译要求 Ubuntu 22.04 x86_64，并在系统中准备：
+
+- `/opt/ros/humble` 下的 ROS Humble 开发环境；
+- GCC/G++ 11、CMake 和 colcon；
+- 与工程检查脚本匹配的 ROS 开发包版本。
+
+Pixi 只负责锁定 Python 和 Pinocchio 构建依赖，不会替代系统 ROS。没有
+安装系统 ROS 时，普通运行不受影响，但执行 `build-ik` 会明确报告缺少
+`/opt/ros/humble/setup.bash`。
+
+先根据运行模式修改对应源码配置：
+
+| 运行模式 | 修改的配置文件 | Sim 命令 | Real 命令 |
+| --- | --- | --- | --- |
+| PICO + SMPL 全身链路 | `src/pico_body_tianji/config/preview.yaml` | `pixi run sim` | `pixi run real` |
+| 纯手柄链路 | `src/pico_body_tianji/config/controller_only_ik.yaml` | `pixi run sim_controller_only` | `pixi run real_controller_only` |
+
+在对应 YAML 的 `tianji_kinematic_sim.ros__parameters` 中选择 IK。使用
+Pinocchio：
+
+```yaml
+ik_backend: pinocchio_cpp
+official_ik_library: ""
+official_ik_config: ""
+```
+
+使用天机官方 IK：
+
+```yaml
+ik_backend: tianji_official
+official_ik_library: ""
+official_ik_config: ""
+```
+
+官方库路径和机型配置保持空字符串即可，运行时包装器会使用项目内的
+`runtime/tianji_official`。修改完成后，在项目根目录依次执行：
+
+```bash
+# 首次配置 ik-build 或 pixi.lock 更新后执行
+pixi install --locked -e ik-build
+
+# 编译 src 下的 C++ IK，产物先进入 staging/ik
+pixi run -e ik-build build-ik
+
+# 把新二进制、官方 SDK 和两份 IK YAML 部署到 runtime
+pixi run -e ik-build deploy-ik
+
+# 检查部署后的运行环境和 ROS 数据链路
+pixi run doctor
+pixi run test
+```
+
+如果只修改了 YAML，且 `staging/ik` 中已有上一次的完整编译产物，可以
+跳过 `build-ik`，只执行 `pixi run -e ik-build deploy-ik`。修改了
+`src/pico_body_tianji/src/`、头文件或 `CMakeLists.txt` 时，必须重新执行
+`build-ik` 和 `deploy-ik`。
+
+全身模式编译部署完成后，终端 1 和终端 2 分别执行：
+
+```bash
+# 终端 1
+pixi run sim
+
+# 终端 2：确认仿真正常后再执行
+pixi run real -- \
+  --confirm-real \
+  --velocity-ratio 20 \
+  --acceleration-ratio 20
+```
+
+纯手柄模式使用：
+
+```bash
+# 终端 1
+pixi run sim_controller_only
+
+# 终端 2：确认仿真正常后再执行
+pixi run real_controller_only -- \
+  --confirm-real \
+  --velocity-ratio 20 \
+  --acceleration-ratio 20
+```
+
+Real 不会再启动一套 IK，只复用对应 Sim 发布的 14 关节目标。真机前必须
+确认只有一套 Sim 在运行、FxStation 已关闭、实体急停已释放，并等待 Real
+显示 `phase=armed_idle` 后再单击右手柄 A。结束时先在 Real 终端按
+`Ctrl+C`，看到 `Robot released` 后再关闭 Sim。
+
+### 4. 准备 PICO 输入
 
 1. 在同一台电脑启动 PXREA Unity/XRoboToolkit 服务；
 2. 戴上并唤醒 PICO；
@@ -139,7 +252,7 @@ pixi run pico-probe -- --duration 15
 `body_data_received: false`、`motion_tracker_count: 0` 是关闭腿部 Tracker
 后的预期结果，不会导致检测失败。
 
-### 4. 运行纯手柄到 IK 输出
+### 5. 运行纯手柄到 IK 输出
 
 确认 `pico-probe` 通过后，继续保持 XRoboToolkit 的 Controller 和 Send
 开启，关闭 Body Tracking。确认没有运行 `sim`、`real` 或其他 SDK
@@ -176,7 +289,7 @@ pixi run sim_controller_only
 
 松开再单击右手柄 A 后，小幅移动左右手柄即可观察对应机械臂。
 
-### 5. 先验收仿真
+### 6. 先验收仿真
 
 ```bash
 pixi run sim
@@ -200,7 +313,7 @@ PICO + SMPL → 可配置 IK → 仿真 JointState → RViz/MuJoCo
 
 只有仿真方向、姿态、关节连续性和回零行为都正确，才能继续真机步骤。
 
-### 6. 启动真机
+### 7. 启动真机
 
 保持已经验收的仿真任务运行：普通模式使用 `pixi run sim`，纯手柄模式
 使用 `pixi run sim_controller_only`。真机任务只启动 Marvin 安全桥，
@@ -215,7 +328,7 @@ Marvin SDK 会话在运行。
 图中恰好只有一个 PICO 输入节点和一个 IK 节点。外部旧节点
 不会被冒险误杀，而会触发拒绝启动。
 
-#### 6.1 配置天机有线网口
+#### 7.1 配置天机有线网口
 
 调试网线连接控制器 ETH1 或 ETH3。官方调试网段使用：
 
@@ -280,7 +393,7 @@ sudo nmcli connection modify tianji-static \
 sudo nmcli connection up tianji-static
 ```
 
-#### 6.2 启动真机桥
+#### 7.2 启动真机桥
 
 首次在新电脑联调，推荐从较低控制器比例开始：
 
@@ -341,7 +454,7 @@ phase=armed_idle
 SDK 会话，但不会关闭仿真。结束全部工作时，先关闭真机终端并等待
 `Robot released`，再到仿真终端按 `Ctrl+C`。
 
-#### 6.3 启动纯手柄真机桥（不使用 Body/Tracker）
+#### 7.3 启动纯手柄真机桥（不使用 Body/Tracker）
 
 终端 1 保持纯手柄仿真运行：
 
@@ -374,7 +487,7 @@ pixi run real_controller_only -- \
 缓慢回安全位。结束时先在终端 2 按 `Ctrl+C` 并等待 `Robot released`，
 再关闭终端 1 的仿真。
 
-### 7. 另开终端监控真机状态
+### 8. 另开终端监控真机状态
 
 进入同一解压目录后执行：
 

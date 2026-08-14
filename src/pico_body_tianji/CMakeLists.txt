@@ -39,8 +39,8 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 add_library(
   arm_ik
   src/arm_ik_factory.cpp
-  src/pinocchio_arm_ik.cpp
-  src/tianji_official_arm_ik_proxy.cpp
+  src/pinocchio_cpp/pinocchio_arm_ik.cpp
+  src/tianji_official/tianji_official_arm_ik_proxy.cpp
 )
 target_compile_features(arm_ik PUBLIC cxx_std_17)
 target_compile_options(
@@ -58,7 +58,10 @@ target_link_libraries(
 
 # 厂商 libKine 与 Pinocchio 的依赖闭包不能安全共存。native 库只链接
 # Eigen/dl，供独立 worker 和 probe 使用；ROS 主节点内使用 IPC proxy。
-add_library(tianji_official_native STATIC src/tianji_official_arm_ik.cpp)
+add_library(
+  tianji_official_native STATIC
+  src/tianji_official/tianji_official_arm_ik.cpp
+)
 target_compile_features(tianji_official_native PUBLIC cxx_std_17)
 target_compile_options(tianji_official_native PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(
@@ -76,10 +79,12 @@ add_executable(
   tianji_kinematic_sim src/tianji_kinematic_sim_node.cpp
 )
 add_executable(
-  tianji_official_ik_probe src/tianji_official_ik_probe.cpp
+  tianji_official_ik_probe
+  src/tianji_official/tianji_official_ik_probe.cpp
 )
 add_executable(
-  tianji_official_ik_worker src/tianji_official_ik_worker.cpp
+  tianji_official_ik_worker
+  src/tianji_official/tianji_official_ik_worker.cpp
 )
 target_compile_features(tianji_kinematic_sim PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_probe PUBLIC cxx_std_17)

@@ -6,7 +6,7 @@ import numpy as np
 
 from pico_input.incremental_controller import IncrementalController
 
-from .controller_frame import ControllerFrame
+from ..controller_frame import ControllerFrame
 
 
 @dataclass(frozen=True)

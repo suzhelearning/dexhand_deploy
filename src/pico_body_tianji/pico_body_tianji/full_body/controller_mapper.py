@@ -7,7 +7,7 @@ import numpy as np
 from pico_input.incremental_controller import IncrementalController
 
 from .body_frame import BodyFrame
-from .controller_frame import ControllerFrame
+from ..controller_frame import ControllerFrame
 from .elbow_retargeting import (
     ArmAngleConstraintResult,
     SMPLArmAngleConstraint,

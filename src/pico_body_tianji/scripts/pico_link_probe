@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from pico_body_tianji.pico_link_probe import main
+from pico_body_tianji.full_body.pico_link_probe import main
 
 
 if __name__ == "__main__":

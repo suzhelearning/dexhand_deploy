@@ -5,10 +5,10 @@ import unittest
 import numpy as np
 
 from pico_body_tianji.controller_frame import ControllerFrame
-from pico_body_tianji.controller_only_mapper import (
+from pico_body_tianji.controller_only.controller_only_mapper import (
     ControllerOnlyTeleopMapper,
 )
-from pico_body_tianji.controller_only_source import (
+from pico_body_tianji.controller_only.controller_only_source import (
     XRoboControllerOnlySource,
 )
 from tianji_world_output.config_loader import TianjiConfig
