@@ -6,6 +6,18 @@ pico_controller_only_input:
     allow_unstamped_input: false
     min_cutoff: 1.0
     beta: 0.7
+    # 相对手柄目标先经过尺度、椭球软工作空间、速度和加速度整形。
+    translation_gain: [0.75, 0.75, 0.75]
+    rotation_gain: 0.85
+    workspace_relative_radii_m: [0.32, 0.28, 0.28]
+    workspace_soft_zone_ratio: 0.80
+    maximum_linear_speed_m_s: 0.18
+    maximum_angular_speed_rad_s: 0.80
+    maximum_linear_acceleration_m_s2: 1.20
+    maximum_angular_acceleration_rad_s2: 4.0
+    # 厂商 FK_NSP 在左右 Home 返回的参考平面方向，用于稳定第七自由度。
+    left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
+    right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
 
 tianji_kinematic_sim:
   ros__parameters:
@@ -18,10 +30,11 @@ tianji_kinematic_sim:
     home_minimum_duration: 2.0
     home_max_speed_deg_s: 25.0
     joint_limit_margin_deg: 5.0
-    max_joint_step_deg: 0.68
+    # 0.20° @ 90 Hz = 18°/s，低于真机桥默认的 22.5°/s，避免目标积压。
+    max_joint_step_deg: 0.62
     position_tolerance_m: 0.001
     orientation_tolerance_deg: 0.6
-    # 纯手柄没有人体肘部方向，因此三种 IK 均禁用臂角目标。
+    # Pinocchio 不使用人体臂角；官方 IK 由下面的固定 ZSP 单独稳定冗余支路。
     arm_angle_gain: 0.0
     arm_angle_tolerance_deg: 2.0
     arm_angle_merit_weight: 0.0
@@ -31,6 +44,19 @@ tianji_kinematic_sim:
     # 天机官方 IK。留空时 runtime 包装器使用项目内置 SDK 和机型配置。
     official_ik_library: ""
     official_ik_config: ""
+    official_use_zsp: true
+    # dgr1/2/3 保持厂商原始单位；只有掌握对应 SDK 定义后才调整。
+    official_dgr1: 0.05
+    official_dgr2: 0.05
+    official_dgr3: 0.0
+    official_joint_limit_soft_margin_deg: 5.0
+    official_candidate_continuity_weight: 1.0
+    official_candidate_limit_weight: 0.20
+    official_candidate_posture_weight: 0.02
+    official_orientation_relaxation_steps: 3
+    official_workspace_backoff_iterations: 8
+    official_worker_timeout_ms: 25
+    official_worker_restart_attempts: 1
 
     # pinocchio_cpp：迭代 DLS、冗余选解和奇异规避参数。
     max_iterations: 24

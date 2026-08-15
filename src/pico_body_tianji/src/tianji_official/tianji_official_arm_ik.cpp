@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace pico_body_tianji
 {
@@ -115,6 +117,19 @@ struct TianjiOfficialArmIk::Impl
     }
     if (settings.maximum_joint_step_rad <= 0.0) {
       throw std::invalid_argument("maximum_joint_step_rad 必须为正数");
+    }
+    if (
+      settings.official_joint_limit_soft_margin_rad < 0.0 ||
+      settings.official_orientation_relaxation_steps < 0 ||
+      settings.official_workspace_backoff_iterations < 0 ||
+      settings.official_candidate_continuity_weight < 0.0 ||
+      settings.official_candidate_limit_weight < 0.0 ||
+      settings.official_candidate_posture_weight < 0.0 ||
+      !std::isfinite(settings.official_dgr1) ||
+      !std::isfinite(settings.official_dgr2) ||
+      !std::isfinite(settings.official_dgr3))
+    {
+      throw std::invalid_argument("官方 IK 软限位与回退参数非法");
     }
 
     // 官方接口由运行时动态解析，使得 pinocchio_cpp 后端
@@ -288,6 +303,7 @@ IkResult TianjiOfficialArmIk::solve(
   const ArmJointVector & current_joints_rad,
   const Eigen::Vector3d & elbow_ik_direction) const
 {
+  const auto solve_started = std::chrono::steady_clock::now();
   if (!finite_pose(target_pose)) {
     throw std::invalid_argument("官方 IK 目标位姿含有非有限值");
   }
@@ -296,109 +312,342 @@ IkResult TianjiOfficialArmIk::solve(
   }
 
   const std::lock_guard<std::mutex> lock(impl_->mutex);
-  FxInvKineSolvePara parameters{};
-  for (Eigen::Index row = 0; row < 4; ++row) {
-    for (Eigen::Index column = 0; column < 4; ++column) {
-      parameters.input_target_tcp[row][column] =
-        target_pose.matrix()(row, column);
-    }
-  }
-  for (Eigen::Index row = 0; row < 3; ++row) {
-    parameters.input_target_tcp[row][3] *= 1.0e3;
-  }
-  for (Eigen::Index index = 0; index < current_joints_rad.size(); ++index) {
-    parameters.input_reference_joint[index] =
-      current_joints_rad[index] * kRadiansToDegrees;
-  }
-  const bool use_elbow_direction =
-    impl_->settings.arm_angle_gain > 0.0 &&
-    elbow_ik_direction.allFinite() && elbow_ik_direction.norm() > 1.0e-8;
-  parameters.input_zsp_type = use_elbow_direction ? 1 : 0;
-  if (use_elbow_direction) {
-    const Eigen::Vector3d normalized = elbow_ik_direction.normalized();
-    for (Eigen::Index index = 0; index < normalized.size(); ++index) {
-      parameters.input_zsp_parameter[index] = normalized[index];
-    }
-  }
-  parameters.dgr1 = 0.05;
-  parameters.dgr2 = 0.05;
+  struct Attempt
+  {
+    FxInvKineSolvePara parameters{};
+    ArmJointVector candidate{ArmJointVector::Zero()};
+    bool success{false};
+    bool singular{false};
+    bool out_of_range{false};
+    bool joint_limit_exceeded{false};
+    int candidate_count{0};
+    int selected_candidate_index{-1};
+    std::string status{"solve_failed"};
+  };
 
-  const bool solved = impl_->inverse_kinematics(
-    serial(side), &parameters) != 0;
-  const bool singular = std::any_of(
-    std::begin(parameters.output_is_singular),
-    std::end(parameters.output_is_singular),
-    [](FxBool value) {return value != 0;});
-  const bool out_of_range = parameters.output_is_out_of_range != 0;
-  const bool joint_limit_exceeded =
-    parameters.output_is_joint_limit_exceeded != 0;
+  const Eigen::Isometry3d current_pose =
+    impl_->forward_unlocked(side, current_joints_rad);
+  const ArmJointVector & nominal = side == ArmSide::kLeft ?
+    impl_->settings.official_left_nominal_rad :
+    impl_->settings.official_right_nominal_rad;
+
+  auto run_attempt = [&](const Eigen::Isometry3d & requested_pose) {
+      Attempt attempt;
+      for (Eigen::Index row = 0; row < 4; ++row) {
+        for (Eigen::Index column = 0; column < 4; ++column) {
+          attempt.parameters.input_target_tcp[row][column] =
+            requested_pose.matrix()(row, column);
+        }
+      }
+      for (Eigen::Index row = 0; row < 3; ++row) {
+        attempt.parameters.input_target_tcp[row][3] *= 1.0e3;
+      }
+      for (Eigen::Index index = 0; index < current_joints_rad.size(); ++index) {
+        attempt.parameters.input_reference_joint[index] =
+          current_joints_rad[index] * kRadiansToDegrees;
+      }
+      const bool use_elbow_direction =
+        impl_->settings.official_use_zsp &&
+        elbow_ik_direction.allFinite() &&
+        elbow_ik_direction.norm() > 1.0e-8;
+      attempt.parameters.input_zsp_type = use_elbow_direction ? 1 : 0;
+      if (use_elbow_direction) {
+        const Eigen::Vector3d normalized = elbow_ik_direction.normalized();
+        for (Eigen::Index index = 0; index < normalized.size(); ++index) {
+          attempt.parameters.input_zsp_parameter[index] = normalized[index];
+        }
+      }
+      attempt.parameters.dgr1 = impl_->settings.official_dgr1;
+      attempt.parameters.dgr2 = impl_->settings.official_dgr2;
+      attempt.parameters.dgr3 = impl_->settings.official_dgr3;
+
+      const bool solved = impl_->inverse_kinematics(
+        serial(side), &attempt.parameters) != 0;
+      attempt.singular = std::any_of(
+        std::begin(attempt.parameters.output_is_singular),
+        std::end(attempt.parameters.output_is_singular),
+        [](FxBool value) {return value != 0;});
+      attempt.out_of_range =
+        attempt.parameters.output_is_out_of_range != 0;
+      attempt.joint_limit_exceeded =
+        attempt.parameters.output_is_joint_limit_exceeded != 0;
+      if (!solved || attempt.out_of_range ||
+        attempt.joint_limit_exceeded || attempt.singular)
+      {
+        attempt.status = attempt.out_of_range ? "out_of_range" :
+          attempt.joint_limit_exceeded ? "joint_limit" :
+          attempt.singular ? "singular" : "solve_failed";
+        return attempt;
+      }
+
+      struct ScoredCandidate
+      {
+        ArmJointVector joints{ArmJointVector::Zero()};
+        double cost{0.0};
+        int source_index{-1};
+      };
+      std::vector<ScoredCandidate> candidates;
+      const double validation_position_tolerance = std::max(
+        5.0 * impl_->settings.position_tolerance_m, 5.0e-3);
+      const double validation_orientation_tolerance = std::max(
+        5.0 * impl_->settings.orientation_tolerance_rad,
+        2.0 * kPi / 180.0);
+
+      auto add_candidate = [&](const ArmJointVector & joints, int source_index,
+          bool validate_fk) {
+          if (!joints.allFinite()) {
+            return;
+          }
+          for (Eigen::Index index = 0; index < joints.size(); ++index) {
+            const double degrees_value = joints[index] * kRadiansToDegrees;
+            const double lower = attempt.parameters.output_negative_limits[index];
+            const double upper = attempt.parameters.output_positive_limits[index];
+            if (
+              std::isfinite(lower) && std::isfinite(upper) && lower < upper &&
+              (degrees_value < lower - 1.0e-6 ||
+              degrees_value > upper + 1.0e-6))
+            {
+              return;
+            }
+          }
+          if (validate_fk) {
+            const Eigen::Isometry3d pose = impl_->forward_unlocked(side, joints);
+            if (
+              (pose.translation() - requested_pose.translation()).norm() >
+              validation_position_tolerance ||
+              orientation_error(pose, requested_pose) >
+              validation_orientation_tolerance)
+            {
+              return;
+            }
+          }
+          for (const auto & existing : candidates) {
+            if ((existing.joints - joints).cwiseAbs().maxCoeff() < 1.0e-7) {
+              return;
+            }
+          }
+          double limit_penalty = 0.0;
+          for (Eigen::Index index = 0; index < joints.size(); ++index) {
+            const double lower =
+              attempt.parameters.output_negative_limits[index] *
+              kDegreesToRadians;
+            const double upper =
+              attempt.parameters.output_positive_limits[index] *
+              kDegreesToRadians;
+            if (std::isfinite(lower) && std::isfinite(upper) && lower < upper) {
+              const double margin = std::min(
+                upper - joints[index], joints[index] - lower);
+              const double scale = std::max(
+                impl_->settings.official_joint_limit_soft_margin_rad, 1.0e-6);
+              const double deficit = std::max(0.0, 2.0 - margin / scale);
+              limit_penalty += deficit * deficit;
+            }
+          }
+          const double continuity =
+            (joints - current_joints_rad).squaredNorm();
+          const double posture = (joints - nominal).squaredNorm();
+          candidates.push_back(ScoredCandidate{
+            joints,
+            impl_->settings.official_candidate_continuity_weight * continuity +
+            impl_->settings.official_candidate_limit_weight * limit_penalty +
+            impl_->settings.official_candidate_posture_weight * posture,
+            source_index});
+        };
+
+      ArmJointVector primary;
+      for (Eigen::Index index = 0; index < primary.size(); ++index) {
+        primary[index] =
+          attempt.parameters.output_joint[index] * kDegreesToRadians;
+      }
+      add_candidate(primary, 0, false);
+
+      const int reported_count = std::clamp(
+        attempt.parameters.output_result_count, 0, 8);
+      for (int candidate_index = 0; candidate_index < reported_count;
+        ++candidate_index)
+      {
+        ArmJointVector row_candidate;
+        ArmJointVector column_candidate;
+        for (Eigen::Index joint_index = 0; joint_index < 7; ++joint_index) {
+          row_candidate[joint_index] =
+            attempt.parameters.output_all_joint[candidate_index][joint_index] *
+            kDegreesToRadians;
+          column_candidate[joint_index] =
+            attempt.parameters.output_all_joint[joint_index][candidate_index] *
+            kDegreesToRadians;
+        }
+        add_candidate(row_candidate, 1 + candidate_index, true);
+        // 同时验证转置布局；只有 FK 符合目标的解释才会进入候选集合。
+        add_candidate(column_candidate, 9 + candidate_index, true);
+      }
+      if (candidates.empty()) {
+        throw std::runtime_error("天机官方 IK 返回非有限或无效候选解");
+      }
+      const auto selected = std::min_element(
+        candidates.begin(), candidates.end(),
+        [](const ScoredCandidate & left, const ScoredCandidate & right) {
+          return left.cost < right.cost;
+        });
+      attempt.candidate = selected->joints;
+      attempt.candidate_count = static_cast<int>(candidates.size());
+      attempt.selected_candidate_index = selected->source_index;
+      attempt.success = true;
+      attempt.status = "solved";
+      return attempt;
+    };
+
+  Attempt selected = run_attempt(target_pose);
+  const Attempt requested_attempt = selected;
+  bool orientation_relaxed = false;
+  bool workspace_backoff = false;
+  double backoff_fraction = 1.0;
+
+  if (!selected.success &&
+    impl_->settings.official_orientation_relaxation_steps > 0)
+  {
+    const Eigen::Quaterniond current_rotation(current_pose.rotation());
+    const Eigen::Quaterniond requested_rotation(target_pose.rotation());
+    for (int step = impl_->settings.official_orientation_relaxation_steps;
+      step >= 0 && !selected.success; --step)
+    {
+      const double fraction = static_cast<double>(step) /
+        static_cast<double>(
+        impl_->settings.official_orientation_relaxation_steps + 1);
+      Eigen::Isometry3d relaxed = target_pose;
+      relaxed.linear() =
+        current_rotation.slerp(fraction, requested_rotation).toRotationMatrix();
+      Attempt attempt = run_attempt(relaxed);
+      if (attempt.success) {
+        selected = std::move(attempt);
+        orientation_relaxed = true;
+      }
+    }
+  }
+
+  if (!selected.success &&
+    impl_->settings.official_workspace_backoff_iterations > 0)
+  {
+    const Eigen::Quaterniond current_rotation(current_pose.rotation());
+    const Eigen::Quaterniond requested_rotation(target_pose.rotation());
+    double lower = 0.0;
+    double upper = 1.0;
+    Attempt best;
+    for (int iteration = 0;
+      iteration < impl_->settings.official_workspace_backoff_iterations;
+      ++iteration)
+    {
+      const double fraction = 0.5 * (lower + upper);
+      Eigen::Isometry3d backed_off = Eigen::Isometry3d::Identity();
+      backed_off.translation() =
+        current_pose.translation() +
+        fraction * (target_pose.translation() - current_pose.translation());
+      backed_off.linear() =
+        current_rotation.slerp(fraction, requested_rotation).toRotationMatrix();
+      Attempt attempt = run_attempt(backed_off);
+      if (attempt.success) {
+        lower = fraction;
+        best = std::move(attempt);
+      } else {
+        upper = fraction;
+      }
+    }
+    if (best.success && lower > 1.0e-3) {
+      selected = std::move(best);
+      workspace_backoff = true;
+      backoff_fraction = lower;
+    }
+  }
 
   IkResult result;
   result.joints_rad = current_joints_rad;
-  result.achieved_pose = impl_->forward_unlocked(side, current_joints_rad);
-  result.singularity_active = singular;
-  result.saturated = !solved || out_of_range || joint_limit_exceeded || singular;
+  result.achieved_pose = current_pose;
+  result.singularity_active = requested_attempt.singular;
+  result.orientation_relaxed = orientation_relaxed;
+  result.workspace_backoff_active = workspace_backoff;
+  result.workspace_backoff_fraction = backoff_fraction;
 
-  if (!solved || result.saturated) {
+  if (!selected.success) {
+    result.saturated = true;
+    result.status = requested_attempt.status;
     result.position_error_m =
-      (target_pose.translation() - result.achieved_pose.translation()).norm();
-    result.orientation_error_rad =
-      orientation_error(result.achieved_pose, target_pose);
-    if (out_of_range) {
-      result.status = "out_of_range";
-    } else if (joint_limit_exceeded) {
-      result.status = "joint_limit";
-    } else if (singular) {
-      result.status = "singular";
-    } else {
-      result.status = "solve_failed";
-    }
+      (target_pose.translation() - current_pose.translation()).norm();
+    result.orientation_error_rad = orientation_error(current_pose, target_pose);
+    result.solve_time_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - solve_started).count();
     return result;
   }
 
-  ArmJointVector candidate;
-  for (Eigen::Index index = 0; index < candidate.size(); ++index) {
-    candidate[index] =
-      parameters.output_joint[index] * kDegreesToRadians;
-  }
-  if (!candidate.allFinite()) {
-    throw std::runtime_error("天机官方 IK 返回非有限关节角");
-  }
-
-  ArmJointVector delta = candidate - current_joints_rad;
-  const double requested_step = delta.cwiseAbs().maxCoeff();
-  if (requested_step > impl_->settings.maximum_joint_step_rad) {
-    delta *= impl_->settings.maximum_joint_step_rad / requested_step;
+  ArmJointVector delta = selected.candidate - current_joints_rad;
+  result.requested_maximum_joint_step_rad = delta.cwiseAbs().maxCoeff();
+  if (
+    result.requested_maximum_joint_step_rad >
+    impl_->settings.maximum_joint_step_rad)
+  {
+    delta *= impl_->settings.maximum_joint_step_rad /
+      result.requested_maximum_joint_step_rad;
     result.joint_step_limited = true;
   }
-  result.joints_rad = current_joints_rad + delta;
-  result.maximum_joint_step_rad = delta.cwiseAbs().maxCoeff();
+  ArmJointVector proposed = current_joints_rad + delta;
+  for (Eigen::Index index = 0; index < proposed.size(); ++index) {
+    const double lower =
+      selected.parameters.output_negative_limits[index] * kDegreesToRadians +
+      impl_->settings.official_joint_limit_soft_margin_rad;
+    const double upper =
+      selected.parameters.output_positive_limits[index] * kDegreesToRadians -
+      impl_->settings.official_joint_limit_soft_margin_rad;
+    if (!std::isfinite(lower) || !std::isfinite(upper) || lower >= upper) {
+      continue;
+    }
+    const double before = proposed[index];
+    if (current_joints_rad[index] < lower) {
+      proposed[index] = std::max(proposed[index], current_joints_rad[index]);
+    } else if (current_joints_rad[index] > upper) {
+      proposed[index] = std::min(proposed[index], current_joints_rad[index]);
+    } else {
+      proposed[index] = std::clamp(proposed[index], lower, upper);
+    }
+    result.soft_limit_active = result.soft_limit_active ||
+      std::abs(before - proposed[index]) > 1.0e-12;
+  }
+
+  result.joints_rad = proposed;
+  result.maximum_joint_step_rad =
+    (result.joints_rad - current_joints_rad).cwiseAbs().maxCoeff();
   result.achieved_pose = impl_->forward_unlocked(side, result.joints_rad);
   result.position_error_m =
     (target_pose.translation() - result.achieved_pose.translation()).norm();
   result.orientation_error_rad =
     orientation_error(result.achieved_pose, target_pose);
   result.accepted = true;
+  result.saturated = orientation_relaxed || workspace_backoff ||
+    result.soft_limit_active;
   result.converged =
+    !result.saturated &&
     result.position_error_m <= impl_->settings.position_tolerance_m &&
     result.orientation_error_rad <=
     impl_->settings.orientation_tolerance_rad;
-  result.status = result.converged ? "converged" : "tracking";
+  result.status = result.soft_limit_active ? "soft_joint_limit" :
+    orientation_relaxed ? "orientation_relaxed" :
+    workspace_backoff ? "workspace_backoff" :
+    result.converged ? "converged" : "tracking";
+  result.candidate_count = selected.candidate_count;
+  result.selected_candidate_index = selected.selected_candidate_index;
 
   double minimum_margin_degrees = std::numeric_limits<double>::infinity();
   for (Eigen::Index index = 0; index < result.joints_rad.size(); ++index) {
-    const double joint_degrees =
-      result.joints_rad[index] * kRadiansToDegrees;
+    const double joint_degrees = result.joints_rad[index] * kRadiansToDegrees;
     minimum_margin_degrees = std::min(
       minimum_margin_degrees,
       std::min(
-        parameters.output_positive_limits[index] - joint_degrees,
-        joint_degrees - parameters.output_negative_limits[index]));
+        selected.parameters.output_positive_limits[index] - joint_degrees,
+        joint_degrees - selected.parameters.output_negative_limits[index]));
   }
   if (std::isfinite(minimum_margin_degrees)) {
     result.minimum_limit_margin_rad =
       minimum_margin_degrees * kDegreesToRadians;
   }
+  result.solve_time_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - solve_started).count();
   return result;
 }
 

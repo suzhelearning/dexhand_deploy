@@ -767,6 +767,7 @@ IkResult PinocchioArmIk::solve(
   result.converged = pose_converged;
   result.saturated = stalled && !pose_converged;
   result.joint_step_limited = joint_step_limited;
+  result.requested_maximum_joint_step_rad = requested_maximum_step;
   result.singularity_active =
     final_minimum_singular_value < settings.singular_value_threshold;
   result.position_error_m = final_evaluation.position_error_m;

@@ -918,6 +918,7 @@ IkResult PinocchioQpArmIk::solve(
   result.arm_angle_error_rad = achieved_arm_angle_error.value_or(0.0);
   result.minimum_limit_margin_rad = impl_->minimum_limit_margin(side, candidate);
   result.maximum_joint_step_rad = maximum_step;
+  result.requested_maximum_joint_step_rad = maximum_step;
   result.joint_step_limited = maximum_step >=
     settings.maximum_joint_step_rad - 1.0e-8;
   result.accepted = true;

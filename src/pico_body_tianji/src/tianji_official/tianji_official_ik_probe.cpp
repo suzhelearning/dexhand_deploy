@@ -9,6 +9,7 @@ namespace
 {
 
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kProbeMaximumJointStepRad = 0.2 * kPi / 180.0;
 
 pico_body_tianji::ArmJointVector radians(
   std::initializer_list<double> degrees)
@@ -62,12 +63,12 @@ void check_common_step_limit(
   if (!result.accepted || !result.joint_step_limited) {
     throw std::runtime_error("official adapter did not apply common step limit");
   }
-  if (result.maximum_joint_step_rad > 3.0 * kPi / 180.0 + 1.0e-10) {
+  if (result.maximum_joint_step_rad > kProbeMaximumJointStepRad + 1.0e-10) {
     throw std::runtime_error("official adapter exceeded common step limit");
   }
 }
 
-void check_unreachable_target_is_rejected(
+void check_unreachable_target_backs_off_safely(
   pico_body_tianji::TianjiOfficialArmIk & solver)
 {
   const auto reference =
@@ -79,11 +80,21 @@ void check_unreachable_target_is_rejected(
     target,
     reference,
     Eigen::Vector3d::Zero());
-  if (result.accepted || !result.saturated) {
-    throw std::runtime_error("official adapter accepted unreachable target");
+  if (
+    !result.accepted || !result.saturated ||
+    !result.workspace_backoff_active ||
+    !(result.workspace_backoff_fraction > 0.0 &&
+    result.workspace_backoff_fraction < 1.0))
+  {
+    throw std::runtime_error(
+            "official adapter did not back off unreachable target");
   }
-  if ((result.joints_rad - reference).cwiseAbs().maxCoeff() > 1.0e-12) {
-    throw std::runtime_error("official adapter moved after rejected target");
+  if (
+    (result.joints_rad - reference).cwiseAbs().maxCoeff() >
+    kProbeMaximumJointStepRad + 1.0e-10)
+  {
+    throw std::runtime_error(
+            "official adapter exceeded step limit during workspace backoff");
   }
 }
 
@@ -98,6 +109,14 @@ int main(int argc, char ** argv)
   try {
     pico_body_tianji::IkSettings settings;
     settings.arm_angle_gain = 0.8;
+    // 覆盖纯手柄 0.20° 边界：proxy 必须无损地把该弧度值传给 worker，
+    // 否则 worker 限幅会略大于主进程契约并被外层安全检查连续拒绝。
+    settings.maximum_joint_step_rad = kProbeMaximumJointStepRad;
+    settings.official_use_zsp = true;
+    settings.official_left_nominal_rad =
+      radians({55.0, -65.0, -70.0, -60.0, 60.0, 0.0, 0.0});
+    settings.official_right_nominal_rad =
+      radians({-55.0, -65.0, 70.0, -60.0, -60.0, 0.0, 0.0});
     pico_body_tianji::TianjiOfficialArmIk solver(argv[1], argv[2], settings);
     check_round_trip(
       solver,
@@ -120,7 +139,7 @@ int main(int argc, char ** argv)
       radians({-55.0, -65.0, 70.0, -60.0, -60.0, 0.0, 0.0}),
       Eigen::Vector3d(0.45638698, 0.74604902, -0.48489358));
     check_common_step_limit(solver);
-    check_unreachable_target_is_rejected(solver);
+    check_unreachable_target_backs_off_safely(solver);
     std::cout << "tianji official IK adapter round trip passed\n";
     return 0;
   } catch (const std::exception & exception) {

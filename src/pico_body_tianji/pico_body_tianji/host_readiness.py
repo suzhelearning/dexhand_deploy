@@ -178,11 +178,11 @@ class HostReadinessGate:
             source.get("source") == "live"
             and source.get("input") == "pico_controllers_only"
             and source.get("mapping")
-            == "controller_relative_end_pose_fixed_reference"
+            == "controller_relative_end_pose_conditioned_v1"
             and source.get("body_tracking") == "disabled"
             and source.get("motion_trackers_required") is False
             and source.get("elbow_constraint")
-            == "disabled_in_controller_only_ik_config"
+            == "published_default_zsp_backend_selected"
             and source.get("smpl_used") is False
             and source.get("scope") == "controller_only_ik"
             and source.get("at_safe_home") is True

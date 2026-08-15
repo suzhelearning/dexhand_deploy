@@ -1,17 +1,22 @@
 marvin_hardware_bridge:
   ros__parameters:
     robot_ip: "192.168.1.190"
-    rate: 30.0
-    velocity_ratio: 10
-    acceleration_ratio: 10
+    # 与纯手柄输入和官方 IK 同频，降低主机目标到真机下发的采样延迟。
+    rate: 90.0
+    # 与 real_controller_only 启动脚本默认值保持一致。
+    velocity_ratio: 50
+    acceleration_ratio: 70
     host_input_mode: controller_only
     host_status_timeout_s: 1.0
     command_timeout_s: 0.15
     state_timeout_s: 1.0
     feedback_timeout_s: 0.15
     maximum_pair_skew_s: 0.03
-    maximum_output_step_deg: 0.25
-    maximum_teleop_speed_deg_s: 55.0
+    # 该值以 velocity_ratio=10 为参考；ratio=50 时实际为
+    # 0.05 * 50 / 10 = 0.25°/帧，即 22.5°/s，略高于 IK 的 18°/s。
+    maximum_output_step_deg: 0.13333
+    # 独立物理速度保险；即使继续提高 velocity_ratio，也不超过 25°/s。
+    maximum_teleop_speed_deg_s: 60.0
     maximum_tracking_error_deg: 8.0
     return_minimum_duration_s: 2.0
     return_max_speed_deg_s: 10.0

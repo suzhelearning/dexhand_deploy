@@ -9,6 +9,7 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -59,11 +60,28 @@ void respond_error(Response & response, const std::exception & exception)
   std::strncpy(response.error, exception.what(), sizeof(response.error) - 1);
 }
 
+pico_body_tianji::ArmJointVector parse_joints(const std::string & text)
+{
+  pico_body_tianji::ArmJointVector output;
+  std::istringstream stream(text);
+  std::string item;
+  for (Eigen::Index index = 0; index < output.size(); ++index) {
+    if (!std::getline(stream, item, ',')) {
+      throw std::invalid_argument("官方 IK worker nominal 关节数量不足");
+    }
+    output[index] = std::stod(item);
+  }
+  if (std::getline(stream, item, ',')) {
+    throw std::invalid_argument("官方 IK worker nominal 关节数量过多");
+  }
+  return output;
+}
+
 }  // namespace
 
 int main(int argc, char ** argv)
 {
-  if (argc != 8) {
+  if (argc != 19) {
     return 2;
   }
   const int socket_fd = std::stoi(argv[1]);
@@ -72,7 +90,18 @@ int main(int argc, char ** argv)
     settings.maximum_joint_step_rad = std::stod(argv[4]);
     settings.position_tolerance_m = std::stod(argv[5]);
     settings.orientation_tolerance_rad = std::stod(argv[6]);
-    settings.arm_angle_gain = std::stod(argv[7]);
+    settings.official_use_zsp = std::stoi(argv[7]) != 0;
+    settings.official_dgr1 = std::stod(argv[8]);
+    settings.official_dgr2 = std::stod(argv[9]);
+    settings.official_dgr3 = std::stod(argv[10]);
+    settings.official_joint_limit_soft_margin_rad = std::stod(argv[11]);
+    settings.official_candidate_continuity_weight = std::stod(argv[12]);
+    settings.official_candidate_limit_weight = std::stod(argv[13]);
+    settings.official_candidate_posture_weight = std::stod(argv[14]);
+    settings.official_orientation_relaxation_steps = std::stoi(argv[15]);
+    settings.official_workspace_backoff_iterations = std::stoi(argv[16]);
+    settings.official_left_nominal_rad = parse_joints(argv[17]);
+    settings.official_right_nominal_rad = parse_joints(argv[18]);
     pico_body_tianji::TianjiOfficialArmIk solver(argv[2], argv[3], settings);
     while (true) {
       Request request;
@@ -119,6 +148,16 @@ int main(int argc, char ** argv)
           response.arm_angle_error_rad = result.arm_angle_error_rad;
           response.minimum_limit_margin_rad = result.minimum_limit_margin_rad;
           response.maximum_joint_step_rad = result.maximum_joint_step_rad;
+          response.requested_maximum_joint_step_rad =
+            result.requested_maximum_joint_step_rad;
+          response.solve_time_ms = result.solve_time_ms;
+          response.workspace_backoff_fraction =
+            result.workspace_backoff_fraction;
+          response.candidate_count = result.candidate_count;
+          response.selected_candidate_index = result.selected_candidate_index;
+          response.soft_limit_active = result.soft_limit_active;
+          response.workspace_backoff_active = result.workspace_backoff_active;
+          response.orientation_relaxed = result.orientation_relaxed;
           std::strncpy(response.status, result.status.c_str(), sizeof(response.status) - 1);
         } else {
           throw std::runtime_error("未知 IPC 操作");

@@ -73,6 +73,24 @@ struct IkSettings
   double qp_singularity_escape_speed_rad_s{0.15};
   int qp_max_active_set_iterations{48};
   double qp_active_set_tolerance{1.0e-9};
+
+  // 天机官方 libKine 后端。ZSP 使用显式开关，避免把 arm_angle_gain
+  // 这个连续增益误当成厂商接口的二值模式。dgr 保留厂商原始单位。
+  bool official_use_zsp{false};
+  double official_dgr1{0.05};
+  double official_dgr2{0.05};
+  double official_dgr3{0.0};
+  double official_joint_limit_soft_margin_rad{
+    5.0 * 3.14159265358979323846 / 180.0};
+  double official_candidate_continuity_weight{1.0};
+  double official_candidate_limit_weight{0.20};
+  double official_candidate_posture_weight{0.02};
+  ArmJointVector official_left_nominal_rad{ArmJointVector::Zero()};
+  ArmJointVector official_right_nominal_rad{ArmJointVector::Zero()};
+  int official_orientation_relaxation_steps{3};
+  int official_workspace_backoff_iterations{8};
+  int official_worker_timeout_ms{25};
+  int official_worker_restart_attempts{1};
 };
 
 struct IkResult
@@ -95,12 +113,23 @@ struct IkResult
   double minimum_limit_margin_rad{
     std::numeric_limits<double>::quiet_NaN()};
   double maximum_joint_step_rad{0.0};
+  double requested_maximum_joint_step_rad{0.0};
+  double solve_time_ms{std::numeric_limits<double>::quiet_NaN()};
+  double transport_time_ms{std::numeric_limits<double>::quiet_NaN()};
+  double workspace_backoff_fraction{1.0};
   double position_velocity_residual_m_s{
     std::numeric_limits<double>::quiet_NaN()};
   double orientation_velocity_residual_rad_s{
     std::numeric_limits<double>::quiet_NaN()};
   int solver_iterations{0};
   int active_joint_constraints{0};
+  int candidate_count{0};
+  int selected_candidate_index{-1};
+  int transport_restart_count{0};
+  bool soft_limit_active{false};
+  bool workspace_backoff_active{false};
+  bool orientation_relaxed{false};
+  bool transport_recovered{false};
   std::string status;
 };
 

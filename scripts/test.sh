@@ -30,13 +30,39 @@ assert_no_conflicting_teleop_nodes
 python -m unittest \
   tests.test_pico_link_probe \
   tests.test_controller_only_mapper \
-  tests.test_controller_only_host_readiness
+  tests.test_controller_only_trace \
+  tests.test_controller_only_host_readiness \
+  tests.test_controller_only_real_profile
 
 IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
+IK_NODE_BIN="${IK_NODE}.bin"
 if [[ ! -x "${IK_NODE}" ]]; then
   printf '错误：可配置 IK 节点未生成：%s\n' "${IK_NODE}" >&2
   exit 1
 fi
+CONTROLLER_ONLY_CONFIG="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml"
+HANGING_WORKER="${BUNDLE_ROOT}/tests/fake_hanging_official_ik_worker.sh"
+worker_timeout_log="$(mktemp)"
+set +e
+TIANJI_OFFICIAL_IK_WORKER="${HANGING_WORKER}" \
+TIANJI_OFFICIAL_IK_LIBRARY="${BUNDLE_ROOT}/runtime/tianji_official/kinematicsSDK/libKine.so" \
+TIANJI_OFFICIAL_IK_CONFIG="${BUNDLE_ROOT}/runtime/tianji_official/CommonConfig/ccs_m6_40.MvKDCfg" \
+  timeout 2 "${IK_NODE_BIN}" --ros-args \
+  --params-file "${CONTROLLER_ONLY_CONFIG}" \
+  -p ik_backend:=tianji_official \
+  >"${worker_timeout_log}" 2>&1
+worker_timeout_exit=$?
+set -e
+if [[ "${worker_timeout_exit}" -eq 124 ]] ||
+   ! grep -Fq '官方 IK worker 恢复失败' "${worker_timeout_log}"
+then
+  cat "${worker_timeout_log}" >&2
+  rm -f -- "${worker_timeout_log}"
+  printf '%s\n' '错误：官方 IK worker deadline/重启保护未按时生效。' >&2
+  exit 1
+fi
+rm -f -- "${worker_timeout_log}"
+
 PREVIEW_CONFIG="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/full_body/preview.yaml"
 IK_BACKEND="$(
   awk '$1 == "ik_backend:" {print $2; exit}' "${PREVIEW_CONFIG}"

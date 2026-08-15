@@ -31,6 +31,18 @@ tianji_kinematic_sim:
     # 天机官方 IK。留空时 runtime 包装器使用项目内置 SDK 和机型配置。
     official_ik_library: ""
     official_ik_config: ""
+    official_use_zsp: true
+    official_dgr1: 0.05
+    official_dgr2: 0.05
+    official_dgr3: 0.0
+    official_joint_limit_soft_margin_deg: 5.0
+    official_candidate_continuity_weight: 1.0
+    official_candidate_limit_weight: 0.20
+    official_candidate_posture_weight: 0.02
+    official_orientation_relaxation_steps: 3
+    official_workspace_backoff_iterations: 8
+    official_worker_timeout_ms: 25
+    official_worker_restart_attempts: 1
 
     # pinocchio_cpp：迭代 DLS、冗余选解和奇异规避参数。
     max_iterations: 24

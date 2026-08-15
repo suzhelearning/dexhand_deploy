@@ -149,6 +149,7 @@ install(
     scripts/pico_controller_input
     scripts/pico_controller_only_input
     scripts/pico_link_probe
+    scripts/controller_only_trace
     scripts/marvin_hardware_bridge
   DESTINATION lib/${PROJECT_NAME}
 )

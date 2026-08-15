@@ -172,6 +172,18 @@ public:
     declare_parameter("ik_backend", "pinocchio_cpp");
     declare_parameter("official_ik_library", "");
     declare_parameter("official_ik_config", "");
+    declare_parameter("official_use_zsp", false);
+    declare_parameter("official_dgr1", 0.05);
+    declare_parameter("official_dgr2", 0.05);
+    declare_parameter("official_dgr3", 0.0);
+    declare_parameter("official_joint_limit_soft_margin_deg", 5.0);
+    declare_parameter("official_candidate_continuity_weight", 1.0);
+    declare_parameter("official_candidate_limit_weight", 0.20);
+    declare_parameter("official_candidate_posture_weight", 0.02);
+    declare_parameter("official_orientation_relaxation_steps", 3);
+    declare_parameter("official_workspace_backoff_iterations", 8);
+    declare_parameter("official_worker_timeout_ms", 25);
+    declare_parameter("official_worker_restart_attempts", 1);
     declare_parameter("rate", 30.0);
     declare_parameter("home_minimum_duration", 2.0);
     declare_parameter("home_max_speed_deg_s", 25.0);
@@ -325,7 +337,31 @@ public:
       get_parameter("left_home_deg").as_double_array(), "left_home_deg");
     settings.qp_right_nominal_rad = joint_vector_from_degrees(
       get_parameter("right_home_deg").as_double_array(), "right_home_deg");
-    arm_angle_required_ = settings.arm_angle_gain > 0.0;
+    settings.official_use_zsp =
+      get_parameter("official_use_zsp").as_bool();
+    settings.official_dgr1 = get_parameter("official_dgr1").as_double();
+    settings.official_dgr2 = get_parameter("official_dgr2").as_double();
+    settings.official_dgr3 = get_parameter("official_dgr3").as_double();
+    settings.official_joint_limit_soft_margin_rad = radians(
+      get_parameter("official_joint_limit_soft_margin_deg").as_double());
+    settings.official_candidate_continuity_weight =
+      get_parameter("official_candidate_continuity_weight").as_double();
+    settings.official_candidate_limit_weight =
+      get_parameter("official_candidate_limit_weight").as_double();
+    settings.official_candidate_posture_weight =
+      get_parameter("official_candidate_posture_weight").as_double();
+    settings.official_orientation_relaxation_steps = static_cast<int>(
+      get_parameter("official_orientation_relaxation_steps").as_int());
+    settings.official_workspace_backoff_iterations = static_cast<int>(
+      get_parameter("official_workspace_backoff_iterations").as_int());
+    settings.official_worker_timeout_ms = static_cast<int>(
+      get_parameter("official_worker_timeout_ms").as_int());
+    settings.official_worker_restart_attempts = static_cast<int>(
+      get_parameter("official_worker_restart_attempts").as_int());
+    settings.official_left_nominal_rad = settings.qp_left_nominal_rad;
+    settings.official_right_nominal_rad = settings.qp_right_nominal_rad;
+    arm_angle_required_ = backend == "tianji_official" ?
+      settings.official_use_zsp : settings.arm_angle_gain > 0.0;
 
     const std::string package_share =
       ament_index_cpp::get_package_share_directory("pico_body_tianji");
@@ -399,6 +435,7 @@ private:
     std::optional<Eigen::Isometry3d> achieved;
     std::optional<IkResult> result;
     std::optional<std::string> error;
+    int consecutive_rejections{0};
     ReturnTrajectory return_trajectory;
   };
 
@@ -491,6 +528,7 @@ private:
       for (ArmState & arm : arms_) {
         arm.return_trajectory.active = false;
         arm.error.reset();
+        arm.consecutive_rejections = 0;
       }
       publish_at_home(false);
       return;
@@ -551,11 +589,16 @@ private:
       try {
         const Eigen::Vector3d elbow_direction =
           arm.elbow_direction.value_or(Eigen::Vector3d::Zero());
+        const auto solve_started = std::chrono::steady_clock::now();
         IkResult result = solver_->solve(
           arm.side,
           *arm.target,
           arm.current,
           elbow_direction);
+        if (!std::isfinite(result.solve_time_ms)) {
+          result.solve_time_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - solve_started).count();
+        }
         if (!result.joints_rad.allFinite()) {
           throw std::runtime_error("IK 后端返回非有限关节角");
         }
@@ -570,6 +613,9 @@ private:
         }
         if (result.accepted) {
           arm.current = result.joints_rad;
+          arm.consecutive_rejections = 0;
+        } else {
+          ++arm.consecutive_rejections;
         }
         arm.achieved = solver_->forward(arm.side, arm.current);
         if (!arm.achieved->matrix().allFinite()) {
@@ -578,10 +624,11 @@ private:
         arm.result = result;
         arm.error = result.saturated ?
           std::optional<std::string>(
-          "目标暂不可达，保持在连续安全边界并等待恢复") :
+          "IK 降级跟踪：" + result.status) :
           std::nullopt;
         publish_solved_pose(index);
       } catch (const std::exception & exception) {
+        ++arm.consecutive_rejections;
         arm.error = exception.what();
         arm.achieved = solver_->forward(arm.side, arm.current);
       }
@@ -830,6 +877,21 @@ private:
       std::optional<double>(
       degrees(arm.result->maximum_joint_step_rad)) :
       std::nullopt;
+    const std::optional<double> requested_step_deg =
+      arm.result.has_value() ?
+      std::optional<double>(
+      degrees(arm.result->requested_maximum_joint_step_rad)) :
+      std::nullopt;
+    const std::optional<double> solve_time_ms =
+      arm.result.has_value() ?
+      std::optional<double>(arm.result->solve_time_ms) : std::nullopt;
+    const std::optional<double> transport_time_ms =
+      arm.result.has_value() ?
+      std::optional<double>(arm.result->transport_time_ms) : std::nullopt;
+    const std::optional<double> backoff_fraction =
+      arm.result.has_value() ?
+      std::optional<double>(arm.result->workspace_backoff_fraction) :
+      std::nullopt;
     const std::optional<double> minimum_singular_value =
       arm.result.has_value() ?
       std::optional<double>(arm.result->minimum_singular_value) :
@@ -861,6 +923,14 @@ private:
       arm.result.has_value() && arm.result->saturated;
     const bool singularity_active =
       arm.result.has_value() && arm.result->singularity_active;
+    const bool soft_limit_active =
+      arm.result.has_value() && arm.result->soft_limit_active;
+    const bool workspace_backoff_active =
+      arm.result.has_value() && arm.result->workspace_backoff_active;
+    const bool orientation_relaxed =
+      arm.result.has_value() && arm.result->orientation_relaxed;
+    const bool transport_recovered =
+      arm.result.has_value() && arm.result->transport_recovered;
     const std::optional<std::string> elbow_source =
       arm.elbow_direction.has_value() ?
       std::optional<std::string>("smpl_nullspace") :
@@ -880,7 +950,7 @@ private:
       << json_quote(prefix + "_max_joint_step_deg") << ':'
       << json_optional_number(maximum_step_deg) << ','
       << json_quote(prefix + "_requested_max_joint_step_deg") << ':'
-      << json_optional_number(maximum_step_deg) << ','
+      << json_optional_number(requested_step_deg) << ','
       << json_quote(prefix + "_joint_step_limited") << ':'
       << json_bool(step_limited) << ','
       << json_quote(prefix + "_elbow_constraint_source") << ':'
@@ -904,7 +974,31 @@ private:
       << json_quote(prefix + "_active_joint_constraints") << ':'
       << active_joint_constraints << ','
       << json_quote(prefix + "_singularity_active") << ':'
-      << json_bool(singularity_active);
+      << json_bool(singularity_active) << ','
+      << json_quote(prefix + "_ik_status") << ':'
+      << (arm.result.has_value() ? json_quote(arm.result->status) : "null") << ','
+      << json_quote(prefix + "_solve_time_ms") << ':'
+      << json_optional_number(solve_time_ms) << ','
+      << json_quote(prefix + "_transport_time_ms") << ':'
+      << json_optional_number(transport_time_ms) << ','
+      << json_quote(prefix + "_candidate_count") << ':'
+      << (arm.result.has_value() ? arm.result->candidate_count : 0) << ','
+      << json_quote(prefix + "_selected_candidate_index") << ':'
+      << (arm.result.has_value() ? arm.result->selected_candidate_index : -1) << ','
+      << json_quote(prefix + "_soft_limit_active") << ':'
+      << json_bool(soft_limit_active) << ','
+      << json_quote(prefix + "_workspace_backoff_active") << ':'
+      << json_bool(workspace_backoff_active) << ','
+      << json_quote(prefix + "_workspace_backoff_fraction") << ':'
+      << json_optional_number(backoff_fraction) << ','
+      << json_quote(prefix + "_orientation_relaxed") << ':'
+      << json_bool(orientation_relaxed) << ','
+      << json_quote(prefix + "_transport_restart_count") << ':'
+      << (arm.result.has_value() ? arm.result->transport_restart_count : 0) << ','
+      << json_quote(prefix + "_transport_recovered") << ':'
+      << json_bool(transport_recovered) << ','
+      << json_quote(prefix + "_consecutive_rejections") << ':'
+      << arm.consecutive_rejections;
     return stream.str();
   }
 

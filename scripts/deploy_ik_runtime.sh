@@ -8,6 +8,13 @@ RUNTIME_BIN="${BUNDLE_ROOT}/runtime/pico_body_tianji/lib/pico_body_tianji"
 NEW_IK="${STAGING_BIN}/tianji_kinematic_sim"
 NEW_PROBE="${STAGING_BIN}/tianji_official_ik_probe"
 NEW_WORKER="${STAGING_BIN}/tianji_official_ik_worker"
+RUNTIME_PROGRAMS=(
+  pico_controller_input
+  pico_controller_only_input
+  pico_link_probe
+  controller_only_trace
+  marvin_hardware_bridge
+)
 BACKUP_DIR="${BUNDLE_ROOT}/staging/runtime-backup"
 SDK_SOURCE_ROOT="${TIANJI_OFFICIAL_SDK_ROOT:-/home/ice/TJ_FX_ROBOT_CONTRL_SDK}"
 SDK_RUNTIME_ROOT="${BUNDLE_ROOT}/runtime/tianji_official"
@@ -22,6 +29,12 @@ for binary in "${NEW_IK}" "${NEW_PROBE}" "${NEW_WORKER}"; do
   if [[ ! -x "${binary}" ]]; then
     printf '错误：请先执行 pixi run -e ik-build build-ik；缺少 %s\n' \
       "${binary}" >&2
+    exit 1
+  fi
+done
+for program in "${RUNTIME_PROGRAMS[@]}"; do
+  if [[ ! -x "${STAGING_BIN}/${program}" ]]; then
+    printf '错误：staging 缺少 Python 入口：%s\n' "${program}" >&2
     exit 1
   fi
 done
@@ -52,6 +65,9 @@ for path in \
   "${RUNTIME_BIN}/tianji_official_ik_probe.bin" \
   "${RUNTIME_BIN}/tianji_official_ik_worker" \
   "${RUNTIME_BIN}/tianji_official_ik_worker.bin" \
+  "${RUNTIME_BIN}/pico_controller_only_input" \
+  "${RUNTIME_BIN}/pico_link_probe" \
+  "${RUNTIME_BIN}/controller_only_trace" \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so" \
   "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg" \
   "${RUNTIME_SHARE}/launch/controller_only_ik.launch.py" \
@@ -111,6 +127,9 @@ install -m 0755 \
 install -m 0755 \
   "${BUNDLE_ROOT}/scripts/runtime_tianji_official_ik_worker.sh" \
   "${RUNTIME_BIN}/tianji_official_ik_worker"
+for program in "${RUNTIME_PROGRAMS[@]}"; do
+  install -m 0755 "${STAGING_BIN}/${program}" "${RUNTIME_BIN}/${program}"
+done
 # config 是一个整体：每次部署都让 runtime 与 src 递归一致。
 # --delete 会清理已从源码删除的旧 profile，避免便携包留下过期配置。
 rsync -a --delete \
@@ -123,6 +142,7 @@ fi
 for launch_file in \
   controller_only_ik.launch.py \
   controller_only_sim.launch.py \
+  controller_only_replay.launch.py \
   preview.launch.py \
   real_teleop.launch.py
 do

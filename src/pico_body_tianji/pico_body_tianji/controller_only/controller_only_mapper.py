@@ -7,6 +7,11 @@ import numpy as np
 from pico_input.incremental_controller import IncrementalController
 
 from ..controller_frame import ControllerFrame
+from .target_conditioner import (
+    ControllerTargetConditioner,
+    TargetConditioningDiagnostics,
+    TargetConditioningSettings,
+)
 
 
 @dataclass(frozen=True)
@@ -17,6 +22,8 @@ class ControllerOnlyTargets:
     right_pose: np.ndarray
     left_default_elbow_direction: np.ndarray
     right_default_elbow_direction: np.ndarray
+    left_conditioning: TargetConditioningDiagnostics
+    right_conditioning: TargetConditioningDiagnostics
 
 
 class ControllerOnlyTeleopMapper:
@@ -29,6 +36,8 @@ class ControllerOnlyTeleopMapper:
         rate: float = 90.0,
         min_cutoff: float = 1.0,
         beta: float = 0.7,
+        conditioning_settings: TargetConditioningSettings | None = None,
+        default_zsp_directions: dict[str, object] | None = None,
     ):
         self._controller = IncrementalController(
             config,
@@ -38,19 +47,46 @@ class ControllerOnlyTeleopMapper:
         )
         self._default_elbow_directions = {
             side: self._unit_direction(
-                config.get_default_zsp_direction(side),
+                (
+                    default_zsp_directions[side]
+                    if default_zsp_directions is not None
+                    else config.get_default_zsp_direction(side)
+                ),
                 side,
+            )
+            for side in ("left", "right")
+        }
+        if conditioning_settings is None:
+            conditioning_settings = TargetConditioningSettings(
+                rate_hz=rate,
+                translation_gain=np.ones(3),
+                rotation_gain=1.0,
+                workspace_relative_radii_m=np.full(3, 10.0),
+                workspace_soft_zone_ratio=0.99,
+                maximum_linear_speed_m_s=100.0,
+                maximum_angular_speed_rad_s=100.0,
+                maximum_linear_acceleration_m_s2=10000.0,
+                maximum_angular_acceleration_rad_s2=10000.0,
+            )
+        self._conditioners = {
+            side: ControllerTargetConditioner(
+                config.init_pos[side],
+                config.init_quat[side],
+                conditioning_settings,
             )
             for side in ("left", "right")
         }
 
     def initialize(self, frame: ControllerFrame) -> set[str]:
         """记录按下 A 时的左右手柄位姿作为相对运动零点。"""
+        for conditioner in self._conditioners.values():
+            conditioner.reset()
         return self._controller.initialize(frame.virtual_trackers())
 
     def map_frame(self, frame: ControllerFrame) -> ControllerOnlyTargets:
         virtual_trackers = frame.virtual_trackers()
         poses = {}
+        conditioning = {}
         for side, role in (
             ("left", "pico_left_wrist"),
             ("right", "pico_right_wrist"),
@@ -63,7 +99,11 @@ class ControllerOnlyTeleopMapper:
                 raise RuntimeError(
                     f"{side} controller-only mapper is not initialized"
                 )
+            position, quaternion, diagnostics = self._conditioners[
+                side
+            ].condition(position, quaternion)
             poses[side] = np.concatenate((position, quaternion))
+            conditioning[side] = diagnostics
 
         return ControllerOnlyTargets(
             left_pose=poses["left"],
@@ -74,6 +114,8 @@ class ControllerOnlyTeleopMapper:
             right_default_elbow_direction=(
                 self._default_elbow_directions["right"].copy()
             ),
+            left_conditioning=conditioning["left"],
+            right_conditioning=conditioning["right"],
         )
 
     @staticmethod

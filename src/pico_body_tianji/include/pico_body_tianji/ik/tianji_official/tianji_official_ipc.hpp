@@ -7,7 +7,7 @@ namespace pico_body_tianji::official_ipc
 {
 
 constexpr std::uint32_t kMagic = 0x544a494b;
-constexpr std::uint32_t kVersion = 1;
+constexpr std::uint32_t kVersion = 2;
 
 enum class Operation : std::uint32_t
 {
@@ -48,6 +48,15 @@ struct Response
   double arm_angle_error_rad{std::numeric_limits<double>::quiet_NaN()};
   double minimum_limit_margin_rad{std::numeric_limits<double>::quiet_NaN()};
   double maximum_joint_step_rad{0.0};
+  double requested_maximum_joint_step_rad{0.0};
+  double solve_time_ms{std::numeric_limits<double>::quiet_NaN()};
+  double workspace_backoff_fraction{1.0};
+  std::int32_t candidate_count{0};
+  std::int32_t selected_candidate_index{-1};
+  std::uint8_t soft_limit_active{0};
+  std::uint8_t workspace_backoff_active{0};
+  std::uint8_t orientation_relaxed{0};
+  std::uint8_t reserved_diagnostics{0};
   char status[64]{};
 };
 

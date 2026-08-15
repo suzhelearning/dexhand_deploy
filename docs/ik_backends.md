@@ -148,3 +148,8 @@ runtime/pico_body_tianji/lib/pico_body_tianji/tianji_official_ik_probe
 
 首次在真机使用官方后端前，还应运行现有仿真，小范围移动手柄并比较目标
 TCP、求解 TCP 和 14 关节输出，再按项目安全检查表连接实体机械臂。
+
+纯手柄官方 IK 还包含目标软工作空间、固定 Home ZSP、多候选连续选解、
+5°软关节限位、不可达目标边界回退、worker deadline/restart，以及 JSONL
+记录和 preview-only replay。参数含义、指标和验收顺序见
+[纯手柄天机官方 IK：结构、调参与回放](controller_only_official_ik_tuning.md)。

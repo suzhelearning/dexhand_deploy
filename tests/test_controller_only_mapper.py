@@ -11,6 +11,10 @@ from pico_body_tianji.controller_only.controller_only_mapper import (
 from pico_body_tianji.controller_only.controller_only_source import (
     XRoboControllerOnlySource,
 )
+from pico_body_tianji.controller_only.target_conditioner import (
+    ControllerTargetConditioner,
+    TargetConditioningSettings,
+)
 from tianji_world_output.config_loader import TianjiConfig
 
 
@@ -107,6 +111,51 @@ class ControllerOnlyMapperTest(unittest.TestCase):
                 initial_targets.right_pose,
                 moved_targets.right_pose,
             )
+        )
+
+    def test_target_conditioner_soft_limits_workspace_and_speed(self) -> None:
+        settings = TargetConditioningSettings(
+            rate_hz=100.0,
+            translation_gain=np.ones(3),
+            rotation_gain=1.0,
+            workspace_relative_radii_m=np.array([0.2, 0.2, 0.2]),
+            workspace_soft_zone_ratio=0.8,
+            maximum_linear_speed_m_s=0.1,
+            maximum_angular_speed_rad_s=0.5,
+            maximum_linear_acceleration_m_s2=10.0,
+            maximum_angular_acceleration_rad_s2=50.0,
+        )
+        conditioner = ControllerTargetConditioner(
+            np.zeros(3), [0.0, 0.0, 0.0, 1.0], settings
+        )
+        position, quaternion, diagnostics = conditioner.condition(
+            [2.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]
+        )
+
+        self.assertLessEqual(np.linalg.norm(position), 0.001000001)
+        self.assertAlmostEqual(np.linalg.norm(quaternion), 1.0)
+        self.assertTrue(diagnostics.workspace_soft_limited)
+        self.assertTrue(diagnostics.linear_speed_limited)
+        self.assertTrue(diagnostics.angular_speed_limited)
+
+    def test_explicit_home_zsp_overrides_legacy_default(self) -> None:
+        mapper = ControllerOnlyTeleopMapper(
+            self.config,
+            default_zsp_directions={
+                "left": [1.0, 2.0, 3.0],
+                "right": [-1.0, 2.0, 3.0],
+            },
+        )
+        mapper.initialize(self.initial_frame)
+        targets = mapper.map_frame(self.initial_frame)
+
+        np.testing.assert_allclose(
+            targets.left_default_elbow_direction,
+            np.array([1.0, 2.0, 3.0]) / np.sqrt(14.0),
+        )
+        np.testing.assert_allclose(
+            targets.right_default_elbow_direction,
+            np.array([-1.0, 2.0, 3.0]) / np.sqrt(14.0),
         )
 
     def test_source_can_skip_body_api_completely(self) -> None:

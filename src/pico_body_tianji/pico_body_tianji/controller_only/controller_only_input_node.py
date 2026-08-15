@@ -16,6 +16,7 @@ from .controller_only_mapper import (
     ControllerOnlyTeleopMapper,
 )
 from .controller_only_source import XRoboControllerOnlySource
+from .target_conditioner import TargetConditioningSettings
 from ..freshness import FreshnessGate
 from ..qos import LATCHED_QOS
 from ..teleop_state import TeleopStateMachine
@@ -32,6 +33,26 @@ class PicoControllerOnlyInputNode(Node):
         self.declare_parameter("allow_unstamped_input", False)
         self.declare_parameter("min_cutoff", 1.0)
         self.declare_parameter("beta", 0.7)
+        self.declare_parameter("translation_gain", [0.75, 0.75, 0.75])
+        self.declare_parameter("rotation_gain", 0.85)
+        self.declare_parameter(
+            "workspace_relative_radii_m", [0.32, 0.28, 0.28]
+        )
+        self.declare_parameter("workspace_soft_zone_ratio", 0.80)
+        self.declare_parameter("maximum_linear_speed_m_s", 0.18)
+        self.declare_parameter("maximum_angular_speed_rad_s", 0.80)
+        self.declare_parameter("maximum_linear_acceleration_m_s2", 1.20)
+        self.declare_parameter(
+            "maximum_angular_acceleration_rad_s2", 4.0
+        )
+        self.declare_parameter(
+            "left_default_zsp_direction",
+            [0.45638698, -0.74604902, -0.48489358],
+        )
+        self.declare_parameter(
+            "right_default_zsp_direction",
+            [0.45638698, 0.74604902, -0.48489358],
+        )
 
         rate = float(self.get_parameter("rate").value)
         if rate <= 0.0:
@@ -46,6 +67,43 @@ class PicoControllerOnlyInputNode(Node):
             rate=rate,
             min_cutoff=float(self.get_parameter("min_cutoff").value),
             beta=float(self.get_parameter("beta").value),
+            conditioning_settings=TargetConditioningSettings(
+                rate_hz=rate,
+                translation_gain=self.get_parameter(
+                    "translation_gain"
+                ).value,
+                rotation_gain=float(
+                    self.get_parameter("rotation_gain").value
+                ),
+                workspace_relative_radii_m=self.get_parameter(
+                    "workspace_relative_radii_m"
+                ).value,
+                workspace_soft_zone_ratio=float(
+                    self.get_parameter("workspace_soft_zone_ratio").value
+                ),
+                maximum_linear_speed_m_s=float(
+                    self.get_parameter("maximum_linear_speed_m_s").value
+                ),
+                maximum_angular_speed_rad_s=float(
+                    self.get_parameter("maximum_angular_speed_rad_s").value
+                ),
+                maximum_linear_acceleration_m_s2=float(
+                    self.get_parameter(
+                        "maximum_linear_acceleration_m_s2"
+                    ).value
+                ),
+                maximum_angular_acceleration_rad_s2=float(
+                    self.get_parameter(
+                        "maximum_angular_acceleration_rad_s2"
+                    ).value
+                ),
+            ),
+            default_zsp_directions={
+                side: self.get_parameter(
+                    f"{side}_default_zsp_direction"
+                ).value
+                for side in ("left", "right")
+            },
         )
         # 该模式从 SDK 层就不访问 Body，避免其状态影响手柄链路。
         self._source = XRoboControllerOnlySource()
@@ -66,6 +124,7 @@ class PicoControllerOnlyInputNode(Node):
         self._last_source_state = "unavailable"
         self._last_timestamp_ns = 0
         self._last_error = None
+        self._last_conditioning = {"left": None, "right": None}
         self._right_a_pressed = False
 
         self._left_pose_pub = self.create_publisher(
@@ -74,8 +133,8 @@ class PicoControllerOnlyInputNode(Node):
         self._right_pose_pub = self.create_publisher(
             PoseStamped, "/pico_body/right_arm_target_pose", 10
         )
-        # 当前 IK 节点保留该接口；controller-only 配置将 arm_angle_gain
-        # 设为 0，因此固定方向不会作为求解约束。
+        # 始终发布安全初始位对应的固定 ZSP。Pinocchio 可忽略它，官方 IK
+        # 通过 official_use_zsp 显式决定是否用它稳定第七自由度。
         self._left_elbow_pub = self.create_publisher(
             Vector3Stamped, "/pico_body/left_arm_elbow_direction", 10
         )
@@ -193,6 +252,10 @@ class PicoControllerOnlyInputNode(Node):
         self._state_pub.publish(String(data=state))
 
     def _publish_targets(self, targets: ControllerOnlyTargets) -> None:
+        self._last_conditioning = {
+            "left": targets.left_conditioning.as_dict(),
+            "right": targets.right_conditioning.as_dict(),
+        }
         stamp = self.get_clock().now().to_msg()
         self._left_pose_pub.publish(
             self._pose_message(targets.left_pose, "left_chest", stamp)
@@ -248,12 +311,13 @@ class PicoControllerOnlyInputNode(Node):
             "at_safe_home": self._at_home,
             "error": self._last_error,
             "input": "pico_controllers_only",
-            "mapping": "controller_relative_end_pose_fixed_reference",
+            "mapping": "controller_relative_end_pose_conditioned_v1",
             "body_tracking": "disabled",
             "motion_trackers_required": False,
-            "elbow_constraint": "disabled_in_controller_only_ik_config",
+            "elbow_constraint": "published_default_zsp_backend_selected",
             "smpl_used": False,
             "scope": "controller_only_ik",
+            "target_conditioning": self._last_conditioning,
         }
         self._status_pub.publish(
             String(data=json.dumps(status, ensure_ascii=False))
