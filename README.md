@@ -235,8 +235,8 @@ pixi run real_controller_only -- \
   --acceleration-ratio 20
 ```
 
-低速验收完成后，常规跟随 profile 可直接使用脚本默认的 60% 速度、80%
-加速度；纯手柄 IK 限制为 64.8°/s，真机桥限制为 70°/s：
+低速验收完成后，常规跟随 profile 可直接使用脚本默认的 65% 速度、85%
+加速度；纯手柄 IK 限制为 75.6°/s，真机桥限制为 80°/s：
 
 ```bash
 pixi run real_controller_only -- --confirm-real

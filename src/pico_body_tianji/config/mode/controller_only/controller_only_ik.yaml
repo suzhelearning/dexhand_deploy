@@ -4,16 +4,21 @@ pico_controller_only_input:
     stale_timeout: 0.5
     require_reliable_timestamp: true
     allow_unstamped_input: false
-    min_cutoff: 1.5
-    beta: 0.9
+    # 第二轮真机诊断发现右 J6 存在满速追赶后快速反向；提高静态跟随带宽，
+    # 同时降低高速自适应增益，抑制手柄快速变化被近乎原样送入 IK。
+    min_cutoff: 1.2
+    beta: 0.45
     # 相对手柄目标先经过尺度、椭球软工作空间、速度和加速度整形。
     translation_gain: [0.90, 0.90, 0.90]
     rotation_gain: 1.0
-    workspace_relative_radii_m: [0.32, 0.28, 0.28]
-    workspace_soft_zone_ratio: 0.80
-    maximum_linear_speed_m_s: 0.30
-    maximum_angular_speed_rad_s: 1.40
-    maximum_linear_acceleration_m_s2: 3.0
+    # 第一轮真机诊断中左右臂分别有 83.3% / 93.3% 的样本进入软压缩；
+    # 扩大相对工作空间并推迟软区起点，仍保留椭球边界的渐进压缩。
+    workspace_relative_radii_m: [0.42, 0.38, 0.38]
+    workspace_soft_zone_ratio: 0.90
+    # 适度提高跟随速度和加速度；手柄目标偶有大跳变，仍需保留整形保护。
+    maximum_linear_speed_m_s: 0.36
+    maximum_angular_speed_rad_s: 1.55
+    maximum_linear_acceleration_m_s2: 3.5
     maximum_angular_acceleration_rad_s2: 9.0
     # 厂商 FK_NSP 在左右 Home 返回的参考平面方向，用于稳定第七自由度。
     left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
@@ -30,8 +35,9 @@ tianji_kinematic_sim:
     home_minimum_duration: 2.0
     home_max_speed_deg_s: 25.0
     joint_limit_margin_deg: 5.0
-    # 0.72° @ 90 Hz = 64.8°/s，低于真机桥默认的 70°/s，避免目标积压。
-    max_joint_step_deg: 0.72
+    # 0.76° @ 90 Hz = 68.4°/s，低于真机桥的 72°/s；
+    # 避免右 J6 以 75.6°/s 满速追赶后立即反向。
+    max_joint_step_deg: 0.76
     position_tolerance_m: 0.001
     orientation_tolerance_deg: 0.6
     # Pinocchio 不使用人体臂角；官方 IK 由下面的固定 ZSP 单独稳定冗余支路。

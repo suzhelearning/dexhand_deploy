@@ -4,19 +4,20 @@ marvin_hardware_bridge:
     # 与纯手柄输入和官方 IK 同频，降低主机目标到真机下发的采样延迟。
     rate: 90.0
     # 与 real_controller_only 启动脚本默认值保持一致。
-    velocity_ratio: 60
-    acceleration_ratio: 80
+    velocity_ratio: 65
+    acceleration_ratio: 85
     host_input_mode: controller_only
     host_status_timeout_s: 1.0
     command_timeout_s: 0.15
     state_timeout_s: 1.0
     feedback_timeout_s: 0.15
     maximum_pair_skew_s: 0.03
-    # 该值以 velocity_ratio=10 为参考；ratio=60 时实际约为
-    # 0.12963 * 60 / 10 = 0.77778°/帧，即 70°/s，略高于 IK 的 64.8°/s。
-    maximum_output_step_deg: 0.12963
-    # 独立物理速度保险；即使继续提高 velocity_ratio，也不超过 70°/s。
-    maximum_teleop_speed_deg_s: 70.0
+    # 该值以 velocity_ratio=10 为参考；ratio=65 时约为
+    # 0.12308 * 65 / 10 = 0.80002°/帧，即约 72°/s，略高于 IK 的 68.4°/s。
+    maximum_output_step_deg: 0.12308
+    # 第二轮诊断发现右 J6 无法平滑跟随 80°/s，回调至 72°/s。
+    maximum_teleop_speed_deg_s: 72.0
+    # 9° 只扩大了目标积压；恢复 8°，更早压制追赶后的反向抽动。
     maximum_tracking_error_deg: 8.0
     return_minimum_duration_s: 2.0
     return_max_speed_deg_s: 10.0
