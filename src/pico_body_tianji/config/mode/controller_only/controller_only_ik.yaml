@@ -11,7 +11,7 @@ tianji_kinematic_sim:
   ros__parameters:
     # 仅手柄模式只在这里选择 IK：
     # pinocchio_cpp / pinocchio_qp / tianji_official。
-    ik_backend: pinocchio_cpp
+    ik_backend: tianji_official
 
     # 仅手柄模式公共频率、回零和安全契约。
     rate: 90.0
