@@ -235,6 +235,13 @@ pixi run real_controller_only -- \
   --acceleration-ratio 20
 ```
 
+低速验收完成后，常规跟随 profile 可直接使用脚本默认的 60% 速度、80%
+加速度；纯手柄 IK 限制为 64.8°/s，真机桥限制为 70°/s：
+
+```bash
+pixi run real_controller_only -- --confirm-real
+```
+
 验证 QP 时，在对应的公共 YAML 中把 `ik_backend` 改为
 `pinocchio_qp`，部署后仍使用上面的同一条 Sim 命令。QP profile 是基于
 90 Hz、现有 0.68° 公共单步契约和离线轨迹得到的保守初值；连接真机前
@@ -503,6 +510,18 @@ pixi run status
 - `error`：启动失败或安全停机的直接软件判据；
 - `readiness`：主机链路尚未就绪时的原因。
 
+复现纯手柄真机跟随迟滞、左右臂不同步或空间边界问题时，另开终端执行：
+
+```bash
+pixi run controller-only-real-diagnostic -- --duration 60
+```
+
+在 60 秒内完成单臂、双臂同时运动和问题位置复现。诊断器只订阅 ROS
+话题，不发布控制命令；结束后会打印输入速度/加速度、椭球工作空间、IK
+单步、奇异/回退、软关节限位、真机输出斜坡、90 Hz 漏期和逐轴跟踪误差，
+并将原始 JSONL 保存到 `diagnostics/`。传入 `--duration 0` 可一直采集到
+`Ctrl+C`。
+
 ## 四个运行入口
 
 | 命令 | 作用 | 是否连接真机 |
@@ -512,8 +531,9 @@ pixi run status
 | `pixi run sim_controller_only` | 纯手柄 IK 的 RViz + MuJoCo 仿真 | 否 |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
 
-`doctor`、`test`、`pico-probe`、`status` 和 `controller-only-joints` 是检查/
-观测工具，不是新的运行模式。`sim` 两个入口均可追加
+`doctor`、`test`、`pico-probe`、`status`、`controller-only-joints` 和
+`controller-only-real-diagnostic` 是检查/观测工具，不是新的运行模式。
+`sim` 两个入口均可追加
 `-- --rviz-only`、`-- --mujoco-only` 或 `-- --topics-only`，但入口名不变。
 
 ## 控制原理

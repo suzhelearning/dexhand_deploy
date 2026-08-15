@@ -4,17 +4,17 @@ pico_controller_only_input:
     stale_timeout: 0.5
     require_reliable_timestamp: true
     allow_unstamped_input: false
-    min_cutoff: 1.0
-    beta: 0.7
+    min_cutoff: 1.5
+    beta: 0.9
     # 相对手柄目标先经过尺度、椭球软工作空间、速度和加速度整形。
-    translation_gain: [0.75, 0.75, 0.75]
-    rotation_gain: 0.85
+    translation_gain: [0.90, 0.90, 0.90]
+    rotation_gain: 1.0
     workspace_relative_radii_m: [0.32, 0.28, 0.28]
     workspace_soft_zone_ratio: 0.80
-    maximum_linear_speed_m_s: 0.18
-    maximum_angular_speed_rad_s: 0.80
-    maximum_linear_acceleration_m_s2: 1.20
-    maximum_angular_acceleration_rad_s2: 4.0
+    maximum_linear_speed_m_s: 0.30
+    maximum_angular_speed_rad_s: 1.40
+    maximum_linear_acceleration_m_s2: 3.0
+    maximum_angular_acceleration_rad_s2: 9.0
     # 厂商 FK_NSP 在左右 Home 返回的参考平面方向，用于稳定第七自由度。
     left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
     right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
@@ -30,8 +30,8 @@ tianji_kinematic_sim:
     home_minimum_duration: 2.0
     home_max_speed_deg_s: 25.0
     joint_limit_margin_deg: 5.0
-    # 0.20° @ 90 Hz = 18°/s，低于真机桥默认的 22.5°/s，避免目标积压。
-    max_joint_step_deg: 0.62
+    # 0.72° @ 90 Hz = 64.8°/s，低于真机桥默认的 70°/s，避免目标积压。
+    max_joint_step_deg: 0.72
     position_tolerance_m: 0.001
     orientation_tolerance_deg: 0.6
     # Pinocchio 不使用人体臂角；官方 IK 由下面的固定 ZSP 单独稳定冗余支路。

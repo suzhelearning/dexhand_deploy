@@ -7,8 +7,8 @@ source "${SCRIPT_DIR}/common.sh"
 
 CONFIRMED=false
 ROBOT_IP=""
-VELOCITY_RATIO=50
-ACCELERATION_RATIO=70
+VELOCITY_RATIO=60
+ACCELERATION_RATIO=80
 
 usage() {
   cat <<'EOF'
@@ -20,9 +20,9 @@ usage() {
 
 选项：
   --robot-ip IP              覆盖厂商配置中的控制器地址
-  --velocity-ratio 1..100    关节速度百分比，默认 50
+  --velocity-ratio 1..100    关节速度百分比，默认 60
   --acceleration-ratio 1..100
-                             关节加速度百分比，默认 70
+                             关节加速度百分比，默认 80
   -h, --help
 EOF
 }

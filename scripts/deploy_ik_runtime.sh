@@ -13,6 +13,7 @@ RUNTIME_PROGRAMS=(
   pico_controller_only_input
   pico_link_probe
   controller_only_trace
+  controller_only_real_diagnostic
   marvin_hardware_bridge
 )
 BACKUP_DIR="${BUNDLE_ROOT}/staging/runtime-backup"

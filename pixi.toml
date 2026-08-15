@@ -24,6 +24,7 @@ status = { cmd = "bash scripts/status.sh", depends-on = ["doctor"] }
 pico-probe = "bash scripts/probe_pico.sh"
 controller-only-joints = "bash scripts/watch_controller_only_joints.sh"
 controller-only-trace = "bash scripts/run_controller_only_trace.sh"
+controller-only-real-diagnostic = "bash scripts/run_controller_only_real_diagnostic.sh"
 replay-controller-only = { cmd = "bash scripts/run_controller_only_replay.sh", depends-on = ["doctor"] }
 sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --both", depends-on = ["doctor"] }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }

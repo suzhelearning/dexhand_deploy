@@ -211,6 +211,7 @@ class MarvinHardwareBridge(Node):
         self._tracking_error_detail = None
         self._command_count = 0
         self._latest_feedback: MarvinFeedback | None = None
+        self._reset_runtime_diagnostics()
         self._create_ros_interfaces()
         self.get_logger().warning(
             "真机桥已确认启动，但尚未连接 Marvin；"
@@ -287,6 +288,66 @@ class MarvinHardwareBridge(Node):
         if values.shape != (7,) or not np.isfinite(values).all():
             raise ValueError(f"{name} 必须包含 7 个有限数值")
         return values
+
+    def _reset_runtime_diagnostics(self) -> None:
+        self._decision_counts: dict[str, int] = {}
+        self._last_sent_output: np.ndarray | None = None
+        self._last_output_step_deg = 0.0
+        self._maximum_observed_output_step_deg = 0.0
+        self._last_tracking_error_abs_deg = np.zeros(14, dtype=np.float64)
+        self._maximum_tracking_error_abs_deg = np.zeros(
+            14, dtype=np.float64
+        )
+        self._tick_count = 0
+        self._first_tick_started_at: float | None = None
+        self._last_tick_started_at: float | None = None
+        self._last_tick_interval_ms = 0.0
+        self._maximum_tick_interval_ms = 0.0
+        self._deadline_miss_count = 0
+
+    def _observe_tick_timing(self, started_at: float) -> None:
+        if self._first_tick_started_at is None:
+            self._first_tick_started_at = started_at
+        if self._last_tick_started_at is not None:
+            interval_s = started_at - self._last_tick_started_at
+            self._last_tick_interval_ms = 1000.0 * interval_s
+            self._maximum_tick_interval_ms = max(
+                self._maximum_tick_interval_ms,
+                self._last_tick_interval_ms,
+            )
+            if interval_s > 1.5 / self._rate_hz:
+                self._deadline_miss_count += 1
+        self._last_tick_started_at = started_at
+        self._tick_count += 1
+
+    def _observe_decision(self, decision, feedback: MarvinFeedback) -> None:
+        key = f"{decision.action}:{decision.reason}"
+        self._decision_counts[key] = self._decision_counts.get(key, 0) + 1
+        if (
+            decision.left_joints_deg is None
+            or decision.right_joints_deg is None
+        ):
+            return
+        output = np.concatenate(
+            [decision.left_joints_deg, decision.right_joints_deg]
+        )
+        if self._last_sent_output is not None:
+            self._last_output_step_deg = float(
+                np.max(np.abs(output - self._last_sent_output), initial=0.0)
+            )
+            self._maximum_observed_output_step_deg = max(
+                self._maximum_observed_output_step_deg,
+                self._last_output_step_deg,
+            )
+        self._last_sent_output = output.copy()
+        measured = np.concatenate(
+            [feedback.left_joints_deg, feedback.right_joints_deg]
+        )
+        self._last_tracking_error_abs_deg = np.abs(output - measured)
+        self._maximum_tracking_error_abs_deg = np.maximum(
+            self._maximum_tracking_error_abs_deg,
+            self._last_tracking_error_abs_deg,
+        )
 
     def _create_ros_interfaces(self) -> None:
         for side in SIDES:
@@ -400,6 +461,7 @@ class MarvinHardwareBridge(Node):
             return
         if self._session is None:
             return
+        self._observe_tick_timing(time.monotonic())
         try:
             feedback = self._session.read_feedback()
             self._latest_feedback = feedback
@@ -428,6 +490,7 @@ class MarvinHardwareBridge(Node):
                 return
             decision = self._safety.decide(now=now)
             self._last_action = f"{decision.action}:{decision.reason}"
+            self._observe_decision(decision, feedback)
             if decision.action == "soft_stop":
                 if decision.reason == "tracking_error":
                     detail = self._safety.tracking_error_detail()
@@ -525,6 +588,7 @@ class MarvinHardwareBridge(Node):
                 ),
             )
             self._phase = "waiting_for_post_home_snapshot"
+            self._reset_runtime_diagnostics()
             self._last_error = None
             self.get_logger().warning(
                 "Marvin 双臂已在低速位置模式缓慢到达安全零位；"
@@ -615,6 +679,12 @@ class MarvinHardwareBridge(Node):
 
     def _publish_status(self) -> None:
         feedback = self._latest_feedback
+        observed_duration_s = (
+            0.0
+            if self._first_tick_started_at is None
+            or self._last_tick_started_at is None
+            else self._last_tick_started_at - self._first_tick_started_at
+        )
         payload = {
             "phase": self._phase,
             "readiness": self._readiness_reason,
@@ -639,6 +709,25 @@ class MarvinHardwareBridge(Node):
                 None if feedback is None else feedback.frame_serials
             ),
             "commands_sent": self._command_count,
+            "decision_counts": dict(self._decision_counts),
+            "last_output_step_deg": self._last_output_step_deg,
+            "maximum_observed_output_step_deg": (
+                self._maximum_observed_output_step_deg
+            ),
+            "last_tracking_error_abs_deg": (
+                self._last_tracking_error_abs_deg.tolist()
+            ),
+            "maximum_tracking_error_abs_deg": (
+                self._maximum_tracking_error_abs_deg.tolist()
+            ),
+            "observed_tick_rate_hz": (
+                (self._tick_count - 1) / observed_duration_s
+                if self._tick_count >= 2 and observed_duration_s > 0.0
+                else None
+            ),
+            "last_tick_interval_ms": self._last_tick_interval_ms,
+            "maximum_tick_interval_ms": self._maximum_tick_interval_ms,
+            "deadline_miss_count": self._deadline_miss_count,
             "tracking_error_detail": self._tracking_error_detail,
             "maximum_output_step_deg": self._maximum_output_step_deg,
             "maximum_output_speed_deg_s": (

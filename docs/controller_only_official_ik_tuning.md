@@ -7,8 +7,8 @@
 PICO 相对位姿
 → TargetConditioner（尺度、软工作空间、速度/加速度）
 → TianjiOfficialArmIk（ZSP、多候选、软限位、可达边界）
-→ 公共 0.20°/帧契约（90 Hz，18°/s）
-→ Marvin 真机桥 90 Hz 独立限速（默认有效 0.25°/帧，22.5°/s）
+→ 公共 0.72°/帧契约（90 Hz，64.8°/s）
+→ Marvin 真机桥 90 Hz 独立限速（默认约 0.778°/帧，70°/s）
 → Marvin 反馈安全检查
 ```
 
@@ -20,14 +20,14 @@ PICO 相对位姿
 
 | 参数 | 含义 | 当前保守初值 |
 | --- | --- | --- |
-| `translation_gain` | 手柄 XYZ 相对位移增益 | `[0.75, 0.75, 0.75]` |
-| `rotation_gain` | 相对旋转增益 | `0.85` |
+| `translation_gain` | 手柄 XYZ 相对位移增益 | `[0.90, 0.90, 0.90]` |
+| `rotation_gain` | 相对旋转增益 | `1.0` |
 | `workspace_relative_radii_m` | 以 Home TCP 为中心的相对椭球半径 | `[0.32, 0.28, 0.28]` |
 | `workspace_soft_zone_ratio` | 从椭球利用率何处开始渐近压缩 | `0.80` |
-| `maximum_linear_speed_m_s` | 送入 IK 的最大末端线速度 | `0.18` |
-| `maximum_angular_speed_rad_s` | 最大末端角速度 | `0.80` |
-| `maximum_linear_acceleration_m_s2` | 最大线加速度 | `1.20` |
-| `maximum_angular_acceleration_rad_s2` | 最大角加速度 | `4.0` |
+| `maximum_linear_speed_m_s` | 送入 IK 的最大末端线速度 | `0.30` |
+| `maximum_angular_speed_rad_s` | 最大末端角速度 | `1.40` |
+| `maximum_linear_acceleration_m_s2` | 最大线加速度 | `3.0` |
+| `maximum_angular_acceleration_rad_s2` | 最大角加速度 | `9.0` |
 
 软工作空间不是把目标硬裁到一个平面，而是在利用率超过阈值后连续压缩，
 并渐近接近椭球边界。输入节点在 `/pico_body/status` 的
@@ -144,14 +144,27 @@ pixi run replay-controller-only -- \
 `source=offline_replay`，且启动前拒绝与真机桥或实时输入节点共存；它不能
 满足真机 readiness，禁止把 replay 当作真机输入源。
 
+### 真机在线只读诊断
+
+保持纯手柄 Sim 和 Real 正常运行，另开终端执行：
+
+```bash
+pixi run controller-only-real-diagnostic -- --duration 60
+```
+
+采集期间依次复现左臂、右臂、双臂同时运动和到达不了的位置。工具不会发布
+任何控制消息，结束时根据累计计数区分输入整形、椭球工作空间、IK 单步、
+奇异/回退、软关节限位、真机输出斜坡、周期漏期与实际跟踪误差，并把原始
+JSONL 写入 `diagnostics/`。使用 `--duration 0` 时按 `Ctrl+C` 结束并打印。
+
 ## 推荐验收顺序
 
 1. 运行官方 probe 和完整测试；
 2. replay 对比默认参数与候选参数；
 3. RViz/MuJoCo 做低速边界测试；
-4. 真机保持默认 `velocity/acceleration ratio=50/70`，只做小幅、空载动作验收；
+4. 真机保持默认 `velocity/acceleration ratio=60/80`，只做小幅、空载动作验收；
 5. 确认实际循环稳定、没有连续拒绝、换支或小于 5° 的限位裕度后，
-   再逐步放大工作空间和手柄增益；软件输出仍由 22.5°/s 默认限幅约束。
+   再逐步放大工作空间和手柄增益；软件输出仍由 70°/s 默认限幅约束。
 
 每次只改变一组参数并保留 trace。`official_dgr1/2/3` 使用厂商原始单位，
 在没有对应 SDK 定义和 sweep 证据前保持 `0.05/0.05/0.0`。
