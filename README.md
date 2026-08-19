@@ -330,11 +330,16 @@ PICO 遥操作一样跟踪这条轨迹：
 pixi run sim_mocap -- /home/current/data/20260819/20260819_151737_102784_take003.h5
 ```
 
-回放经过与在线 PICO 完全相同的末端映射（增量相对参考帧、One-Euro
-滤波、尺度/工作空间/速度整形），参考帧等效于按右手柄 A 的时刻，
-结束后自动回 Home 并退出。支持 `--speed` 倍速、`--yaw-deg` 朝向标定
-和 `--topics-only` 等模式；单侧手腕完全无效（如该 take 左手全 NaN）
-时该侧机械臂保持 Home。详细说明见 [docs/mocap_replay.md](docs/mocap_replay.md)。
+回放经过与在线 PICO 相同的映射链路（增量相对参考帧、One-Euro 滤波、
+工作空间/速度整形），默认 **1:1 目标整形**（`translation_gain=1.0`）：
+命令 +x 移动 50mm，目标位移即 50.0mm、solved 位移 49.9–50.0mm；
+在线 PICO 链路刻意保留 0.90 安全缩放。参考帧等效于按右手柄 A 的
+时刻，结束后自动回 Home 并退出。支持 `--speed` 倍速、`--yaw-deg`
+朝向标定和 `--topics-only` 等模式；单侧手腕完全无效（如该 take
+左手全 NaN）时该侧机械臂保持 Home。可用
+`pixi run mocap-step-h5 -- --output step.h5 --axis z --dir neg --mm 50`
+生成“机器人 +x 移动 50mm”的合成验收轨迹。
+详细说明见 [docs/mocap_replay.md](docs/mocap_replay.md)。
 
 ### 7. 启动真机
 

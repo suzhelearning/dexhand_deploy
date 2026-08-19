@@ -30,6 +30,7 @@ controller-only-trace = "bash scripts/run_controller_only_trace.sh"
 controller-only-real-diagnostic = "bash scripts/run_controller_only_real_diagnostic.sh"
 replay-controller-only = { cmd = "bash scripts/run_controller_only_replay.sh", depends-on = ["doctor"] }
 sim_mocap = { cmd = "bash scripts/run_mocap_sim.sh --mujoco-only", description = "mocap HDF5 手腕轨迹回放为轨迹跟踪仿真（MuJoCo）" }
+mocap-step-h5 = { cmd = "bash scripts/run_mocap_step_h5.sh", description = "生成 mocap 合成台阶轨迹 HDF5（轨迹跟踪 1:1 验收）" }
 sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --mujoco-only", depends-on = ["doctor"] }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
 

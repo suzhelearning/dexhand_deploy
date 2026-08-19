@@ -162,6 +162,7 @@ install(
     scripts/controller_only_real_diagnostic
     scripts/marvin_hardware_bridge
     scripts/mocap_h5_replay
+    scripts/mocap_step_h5
   DESTINATION lib/${PROJECT_NAME}
 )
 install(

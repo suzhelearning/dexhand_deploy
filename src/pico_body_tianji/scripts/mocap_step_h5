@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+
+from pico_body_tianji.controller_only.mocap_step_h5 import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -33,7 +33,8 @@ python -m unittest \
   tests.test_controller_only_trace \
   tests.test_controller_only_host_readiness \
   tests.test_controller_only_real_profile \
-  tests.test_mocap_h5
+  tests.test_mocap_h5 \
+  tests.test_mocap_step_h5
 
 IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
 IK_NODE_BIN="${IK_NODE}.bin"

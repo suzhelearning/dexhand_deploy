@@ -393,8 +393,9 @@ def main(argv=None) -> int:
     node = rclpy.create_node("mocap_h5_replay")
     node.declare_parameter("min_cutoff", 1.0)
     node.declare_parameter("beta", 0.7)
-    node.declare_parameter("translation_gain", [0.75, 0.75, 0.75])
-    node.declare_parameter("rotation_gain", 0.85)
+    # 默认 1:1：命令位移 → 目标位移严格 1:1（轨迹跟踪验收/标定模式）。
+    node.declare_parameter("translation_gain", [1.0, 1.0, 1.0])
+    node.declare_parameter("rotation_gain", 1.0)
     node.declare_parameter(
         "workspace_relative_radii_m", [0.32, 0.28, 0.28]
     )

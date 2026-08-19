@@ -24,13 +24,16 @@ pico_controller_only_input:
     left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
     right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
 
-# mocap HDF5 轨迹回放节点。目标整形参数必须与 pico_controller_only_input
-# 保持一致（回放链路与在线 PICO 共用同一套 Conditioning），修改时同步两处。
+# mocap HDF5 轨迹回放节点。默认 1:1 目标整形（translation_gain=1.0）：
+# 命令位移 → 目标位移严格 1:1，用于轨迹跟踪验收与标定
+# （如 +x 移动 50mm，目标即移动 50mm）。需要复现在线 PICO 行为时，
+# 把 translation_gain 改回 [0.90, 0.90, 0.90]（在线链路的安全缩放
+# 刻意保留 0.90，不改动）。
 mocap_h5_replay:
   ros__parameters:
     min_cutoff: 1.2
     beta: 0.45
-    translation_gain: [0.90, 0.90, 0.90]
+    translation_gain: [1.0, 1.0, 1.0]
     rotation_gain: 1.0
     workspace_relative_radii_m: [0.42, 0.38, 0.38]
     workspace_soft_zone_ratio: 0.90

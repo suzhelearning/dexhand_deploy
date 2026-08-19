@@ -91,6 +91,62 @@ Home（`tianji_robot.yaml` 的 `init_pos`/`init_quat`，即 FK 安全初始位�
 位，不阻碍另一侧回放**。启动日志会警告缺失侧，`/pico_body/status` 的
 `recording.hands.<side>.valid_frames` 可查看有效率。
 
+## 1:1 目标整形与 50mm 位移验收
+
+mocap 回放默认 **1:1 目标整形**（`mocap_h5_replay.translation_gain =
+[1.0, 1.0, 1.0]`）：命令位移 → IK 目标位移严格 1:1。例如命令
+“+x 移动 50mm”，目标位移即 50.0mm（实测 solved/FK 位移 49.9–50.0mm，
+误差来自 IK 位置容差 ~1mm）。映射链中唯一的尺度因子就是
+`translation_gain`（`pico_to_robot` 与 world→chest 均为无缩放正交
+变换）；工作空间软区在目标利用率 >0.90 时才压缩，速度/加速度整形只在
+快速移动时介入，50mm 量级渐变台阶均不触发。在线 PICO 链路刻意保留
+0.90 安全缩放，需要复现其行为时把该参数改回 `[0.90, 0.90, 0.90]`。
+
+### 合成台阶轨迹生成与验收
+
+用内置生成器制作一条“移动 N mm → 保持 → 回程”的合成轨迹：
+
+```bash
+# 输入（手腕）系 +x 移动 50mm
+pixi run mocap-step-h5 -- --output /tmp/step50mm_x.h5 --axis x --mm 50
+
+# 机器人 chest +x（前）方向移动 50mm：输入 −z
+pixi run mocap-step-h5 -- --output /tmp/forward50mm.h5 \
+  --axis z --dir neg --mm 50
+```
+
+然后回放并观测目标/求解位移：
+
+```bash
+pixi run sim_mocap -- /tmp/step50mm_x.h5 --topics-only
+# 另开终端查看 /pico_body/{left,right}_arm_target_pose 与
+# /pico_body_sim/{left,right}_arm/solved_pose 的位移
+```
+
+输入（手腕/Motive）系 → 机器人 chest 系的轴映射（默认
+`pico_to_robot`）：
+
+| 输入轴 | 机器人世界 | left_chest | right_chest |
+| --- | --- | --- | --- |
+| +x | −y（右） | (0, 0, −1) | (0, 0, +1) |
+| +y | +z（上） | (0, −1, 0) | (0, +1, 0) |
+| +z | −x（后） | (−1, 0, 0) | (−1, 0, 0) |
+
+参数：`--axis {x,y,z}`、`--dir {pos,neg}`、`--mm N`、`--ramp-s` /
+`--hold-s` / `--return-s` / `--rate`。生成器无 ROS 依赖，产物与采集端
+v4.0 布局一致，`load_mocap_h5` 可直接读取。
+
+### 已验收结果（本机实测）
+
+| 命令 | 目标位移峰值 | solved 位移峰值 | 方向 |
+| --- | --- | --- | --- |
+| 输入 +x 50mm | 50.0mm | 49.9mm | left (0,0,−50) / right (0,0,+50) |
+| 机器人 +x 50mm（输入 −z） | 50.0mm | 50.0mm | 双侧 (+,0,0) |
+
+单元测试 `tests/test_mocap_step_h5.py` 固化了两项：gain=1.0 时
+50mm 命令 → 50mm 目标；gain=0.90 时 → 45mm（回归证明 gain 是
+唯一尺度因子）。
+
 ## 观测与验证
 
 - `/pico_body_sim/status`（0.5 Hz）：IK 每侧位置/姿态误差、软限位、
