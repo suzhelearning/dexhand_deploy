@@ -510,6 +510,13 @@ assert_single_controller_only_simulation_host_chain() {
     fi
     return 0
   fi
+  if ((controller_only_count == 0 && smpl_count == 0)); then
+    printf '%s\n' \
+      '拒绝连接真机：未检测到仿真主机链路。' \
+      '请先运行 pixi run sim_mocap_step / sim_mocap_live（mocap 主机）' \
+      '或 pixi run sim_controller_only（纯手柄主机），并关闭其他仿真任务。' >&2
+    return 1
+  fi
   if ((controller_only_count != 1 || smpl_count != 0 || ik_count != 1)); then
     printf '%s\n' \
       '拒绝连接真机：主机侧必须恰好运行一套纯手柄 + IK。' \
