@@ -10,6 +10,7 @@ WITH_MUJOCO=true
 REPLAY_SPEED=1.0
 YAW_DEG=0.0
 REFERENCE_FRAME=-1
+HOLD_ARM=0.0
 H5_FILE=""
 MUJOCO_PID=""
 LAUNCH_PID=""
@@ -18,9 +19,9 @@ usage() {
   cat <<'EOF'
 用法：
   pixi run sim_mocap -- H5.h5 [模式] [--speed N] [--yaw-deg N]
-                      [--reference-frame N]
+                      [--reference-frame N] [--hold-arm N]
   bash scripts/run_mocap_sim.sh H5.h5 [模式] [--speed N] [--yaw-deg N]
-                                     [--reference-frame N]
+                                     [--reference-frame N] [--hold-arm N]
 
 模式：
   --both          同时启动 RViz 与 MuJoCo（默认）
@@ -33,12 +34,16 @@ usage() {
   --speed N             回放倍速（默认 1.0）
   --yaw-deg N           绕竖直轴旋转整条轨迹的朝向标定（度，默认 0）
   --reference-frame N   参考帧下标（等效按 A 时刻，默认第一个有效帧）
+  --hold-arm N          回放前保持 idle 的秒数（默认 0；真机验收时
+                        等真机桥进入 armed_idle）
 
 说明：
   把 mocap-acquisition HDF5（v4.0）里录制的手腕位姿作为轨迹跟踪
   仿真输入，经与在线 PICO 相同的映射送入可配置 IK；只启动纯运动学
-  仿真，不加载 Marvin SDK，不连接实体机械臂。该运行锁和输入身份
-  均不能用于启动真机桥。
+  仿真，不加载 Marvin SDK，不连接实体机械臂。配合 --hold-arm 时
+  可作为真机桥（real_controller_only）的主机输入，用于确定性轨迹
+  真机验收（见 docs/mocap_real_acceptance.md）；不得与其他输入
+  身份同时运行。
 EOF
 }
 
@@ -90,6 +95,14 @@ while (($#)); do
         exit 2
       fi
       REFERENCE_FRAME="$1"
+      ;;
+    --hold-arm)
+      shift
+      if (($# == 0)); then
+        printf '%s\n' '错误：--hold-arm 缺少数值。' >&2
+        exit 2
+      fi
+      HOLD_ARM="$1"
       ;;
     *)
       printf '错误：未知参数 %s\n' "$1" >&2
@@ -156,6 +169,7 @@ setsid python "${ROS2_BIN}" launch \
   "replay_speed:=${REPLAY_SPEED}" \
   "yaw_deg:=${YAW_DEG}" \
   "reference_frame:=${REFERENCE_FRAME}" \
+  "hold_arm:=${HOLD_ARM}" \
   "with_rviz:=${with_rviz}" &
 LAUNCH_PID=$!
 register_teleop_process_group \

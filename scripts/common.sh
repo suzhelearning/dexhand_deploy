@@ -389,6 +389,8 @@ assert_managed_teleop_guard_alive() {
     local host_command="pixi run sim"
     if [[ "${mode}" == "controller-only-simulation" ]]; then
       host_command="pixi run sim_controller_only"
+    elif [[ "${mode}" == "mocap-replay" ]]; then
+      host_command="pixi run sim_mocap -- TAKE.h5"
     fi
     printf '%s\n' \
       "拒绝连接真机：未检测到新版受管 ${mode} 主机任务。" \
@@ -437,6 +439,7 @@ assert_single_simulation_host_chain() {
 assert_single_controller_only_simulation_host_chain() {
   local node_list=""
   local controller_only_count=0
+  local mocap_replay_count=0
   local smpl_count=0
   local ik_count=0
   if [[ -v PICO_TIANJI_NODE_LIST_OVERRIDE ]]; then
@@ -449,12 +452,15 @@ assert_single_controller_only_simulation_host_chain() {
       '拒绝连接真机：真机模式禁止跳过主机 ROS 链路检查。' >&2
     return 1
   fi
-  assert_managed_teleop_guard_alive controller-only-simulation
   if ! node_list="$(read_teleop_node_list)"; then
     printf '%s\n' \
       '错误：无法检查纯手柄仿真主机链路，拒绝连接真机。' >&2
     return 1
   fi
+  mocap_replay_count="$(
+    awk '$0 == "/mocap_h5_replay" {count++} END {print count + 0}' \
+      <<<"${node_list}"
+  )"
   controller_only_count="$(
     awk '$0 == "/pico_controller_only_input" {count++} END {print count + 0}' \
       <<<"${node_list}"
@@ -467,6 +473,20 @@ assert_single_controller_only_simulation_host_chain() {
     awk '$0 == "/tianji_kinematic_sim" {count++} END {print count + 0}' \
       <<<"${node_list}"
   )"
+  if ((mocap_replay_count == 1)); then
+    # mocap HDF5 确定性轨迹回放主机（真机 50mm 位移验收）：
+    # 输入身份为 /mocap_h5_replay，运行锁为 mocap-replay。
+    assert_managed_teleop_guard_alive mocap-replay
+    if ((controller_only_count != 0 || smpl_count != 0 || ik_count != 1)); then
+      printf '%s\n' \
+        '拒绝连接真机：mocap 回放主机必须恰好运行一套回放 + IK。' \
+        "  当前计数：回放=${mocap_replay_count} 纯手柄=${controller_only_count} SMPL=${smpl_count} IK=${ik_count}" \
+        '请先运行 pixi run sim_mocap -- TAKE.h5，并关闭其他仿真任务。' >&2
+      return 1
+    fi
+    return 0
+  fi
+  assert_managed_teleop_guard_alive controller-only-simulation
   if ((controller_only_count != 1 || smpl_count != 0 || ik_count != 1)); then
     printf '%s\n' \
       '拒绝连接真机：主机侧必须恰好运行一套纯手柄 + IK。' \

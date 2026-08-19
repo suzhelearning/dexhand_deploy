@@ -36,6 +36,7 @@ def generate_launch_description():
     replay_speed = LaunchConfiguration("replay_speed")
     yaw_deg = LaunchConfiguration("yaw_deg")
     reference_frame = LaunchConfiguration("reference_frame")
+    hold_arm = LaunchConfiguration("hold_arm")
     with_rviz = LaunchConfiguration("with_rviz")
 
     return LaunchDescription(
@@ -45,6 +46,10 @@ def generate_launch_description():
             DeclareLaunchArgument("yaw_deg", default_value="0.0"),
             DeclareLaunchArgument(
                 "reference_frame", default_value="-1"
+            ),
+            DeclareLaunchArgument(
+                "hold_arm", default_value="0.0",
+                description="回放前保持 idle 的秒数（真机验收等待 armed_idle）",
             ),
             DeclareLaunchArgument(
                 "with_rviz",
@@ -87,6 +92,8 @@ def generate_launch_description():
                     yaw_deg,
                     "--reference-frame",
                     reference_frame,
+                    "--hold-arm",
+                    hold_arm,
                 ],
                 on_exit=Shutdown(reason="mocap h5 replay exited"),
             ),

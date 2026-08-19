@@ -17,14 +17,17 @@
 安全约束：
 
 - 与 trace replay 一样拒绝在存在真机桥/实时输入节点的 ROS 图中启动；
-- 运行锁与输入身份不能用于启动真机桥（preview-only）；
+- 默认 preview-only；配合 ``--hold-arm`` 时作为真机桥主机输入做
+  确定性轨迹真机验收（host_readiness 显式接受 mocap_h5_replay
+  身份，见 docs/mocap_real_acceptance.md），真机桥的全部安全
+  保护（回零、新鲜度、跟踪误差、急停）保持不变；
 - 单侧完全无效（如 take003 左手全 NaN）时该侧保持机器人 Home，
   不阻碍另一侧回放。
 
 用法（由 scripts/run_mocap_sim.sh 启动，也可直接）：
 
     mocap_h5_replay --h5 TAKE.h5 [--speed N] [--yaw-deg N]
-                    [--reference-frame N] [--rate N]
+                    [--reference-frame N] [--rate N] [--hold-arm N]
 """
 
 from __future__ import annotations
@@ -61,17 +64,21 @@ class MocapH5ReplayNode:
     """非 Node 子类的回放驱动：由调用方创建 rclpy 节点并注入。"""
 
     def __init__(self, node, recording: MocapRecording, *, speed: float,
-                 yaw_deg: float, reference_frame: int, rate: float):
+                 yaw_deg: float, reference_frame: int, rate: float,
+                 hold_arm_s: float = 0.0):
         from rclpy.node import Node
 
         if speed <= 0.0:
             raise ValueError("replay speed must be positive")
         if rate <= 0.0:
             raise ValueError("mapper rate must be positive")
+        if hold_arm_s < 0.0:
+            raise ValueError("hold_arm_s must be non-negative")
         self.node: Node = node
         self.recording = recording
         self.speed = speed
         self.rate = rate
+        self._hold_arm_s = float(hold_arm_s)
 
         # 目标整形参数与在线纯手柄输入节点共用 YAML。
         conditioning_settings = TargetConditioningSettings(
@@ -222,6 +229,14 @@ class MocapH5ReplayNode:
                         "source": "offline_replay",
                         "input": "mocap_h5_replay",
                         "scope": "mocap_replay",
+                        "mapping":
+                            "controller_relative_end_pose_conditioned_v1",
+                        "body_tracking": "disabled",
+                        "motion_trackers_required": False,
+                        "elbow_constraint":
+                            "published_default_zsp_backend_selected",
+                        "smpl_used": False,
+                        "at_safe_home": state == "idle",
                         "recording": self.recording.summary(),
                         "yaw_deg": self._yaw_deg,
                         "speed": self.speed,
@@ -272,7 +287,8 @@ class MocapH5ReplayNode:
         now = time.monotonic()
         if self._phase == "arming":
             self._publish_state("idle")
-            if now - self._phase_started >= 1.0:
+            # arming 持续 1s + --hold-arm（真机验收时等真机桥就绪）。
+            if now - self._phase_started >= 1.0 + self._hold_arm_s:
                 self._phase = "replaying"
                 self._phase_started = now
                 # 以参考帧初始化映射器：此后相对增量以该帧为零点。
@@ -382,6 +398,10 @@ def main(argv=None) -> int:
                         help="参考帧下标（等效按 A 时刻，默认第一个有效帧）")
     parser.add_argument("--rate", type=float, default=60.0,
                         help="映射器采样率 Hz（默认 60，与 h5 对齐）")
+    parser.add_argument("--hold-arm", type=float, default=0.0,
+                        dest="hold_arm_s",
+                        help="开始回放前保持 idle 的秒数（默认 0；"
+                             "真机验收时等真机桥进入 armed_idle）")
     args = parser.parse_args(app_argv)
 
     h5_path = args.h5_opt if args.h5_opt is not None else args.h5
@@ -423,6 +443,7 @@ def main(argv=None) -> int:
             yaw_deg=args.yaw_deg,
             reference_frame=args.reference_frame,
             rate=args.rate,
+            hold_arm_s=args.hold_arm_s,
         )
         node.get_logger().warning(
             "开始 preview-only mocap 轨迹回放；"

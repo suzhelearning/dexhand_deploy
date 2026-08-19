@@ -58,11 +58,15 @@ pixi run sim_mocap -- TAKE.h5 --speed 1.0 --yaw-deg 0 --reference-frame -1
 | `--speed N` | `1.0` | 回放倍速（按 h5 时间轴缩放） |
 | `--yaw-deg N` | `0` | 整条轨迹绕竖直轴旋转的朝向标定（度）。录制时人的朝向与机器人正前方有夹角时使用；经 `pico_to_robot` 映射后等价于绕机器人世界 Z 轴旋转 |
 | `--reference-frame N` | `-1` | 参考帧下标，等效于在线链路“按右手柄 A”的时刻；`-1` = 第一个有效帧 |
+| `--hold-arm N` | `0` | 回放前保持 idle 的秒数；真机验收时等真机桥进入 `armed_idle` 后再开始回放 |
 
-回放状态机与 `replay-controller-only` 一致：`arming`（1 s，idle）
-→ `replaying`（发布 `teleop`，按录制时间轴发布目标）→ `returning`
-（3 s，请求回 Home）→ 自动退出。回放身份为 preview-only，**不能**用于
-启动真机桥；启动时会拒绝存在真机桥/实时输入节点的 ROS 图。
+回放状态机与 `replay-controller-only` 一致：`arming`（1 s + `--hold-arm`，
+idle）→ `replaying`（发布 `teleop`，按录制时间轴发布目标）→ `returning`
+（3 s，请求回 Home）→ 自动退出。默认 preview-only，启动时会拒绝存在
+真机桥/实时输入节点的 ROS 图；配合 `--hold-arm` 时 `mocap_h5_replay`
+可作为真机桥主机输入做**确定性轨迹真机验收**（readiness 显式接受该
+身份，真机桥全部安全保护不变），完整流程见
+[docs/mocap_real_acceptance.md](mocap_real_acceptance.md)。
 
 ## 数据链路
 

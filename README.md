@@ -559,8 +559,9 @@ pixi run controller-only-real-diagnostic -- --duration 60
 `controller-only-real-diagnostic` 是检查/观测工具，不是新的运行模式。
 `sim` 两个入口均可追加
 `-- --rviz-only`、`-- --mujoco-only` 或 `-- --topics-only`，但入口名不变。
-`sim_mocap` 是 preview-only 离线回放仿真，其运行锁和输入身份不能用于
-启动真机桥。
+`sim_mocap` 默认是 preview-only 离线回放仿真；配合 `--hold-arm` 时
+可作为真机桥主机输入做确定性轨迹真机验收（见
+[docs/mocap_real_acceptance.md](docs/mocap_real_acceptance.md)）。
 
 ## 控制原理
 

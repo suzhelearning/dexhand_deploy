@@ -174,6 +174,25 @@ class HostReadinessGate:
                 and source.get("error") is None
             ):
                 return HostReadiness(False, "pico_smpl_not_live")
+        elif source.get("input") == "mocap_h5_replay":
+            # mocap HDF5 确定性轨迹回放主机（真机 50mm 验收用）：
+            # 要求回放就绪字段与 preview-only 身份，接受离线来源。
+            if not (
+                source.get("source") == "offline_replay"
+                and source.get("mapping")
+                == "controller_relative_end_pose_conditioned_v1"
+                and source.get("body_tracking") == "disabled"
+                and source.get("motion_trackers_required") is False
+                and source.get("elbow_constraint")
+                == "published_default_zsp_backend_selected"
+                and source.get("smpl_used") is False
+                and source.get("scope") == "mocap_replay"
+                and source.get("at_safe_home") is True
+                and source.get("error") is None
+            ):
+                return HostReadiness(
+                    False, "mocap_replay_not_ready"
+                )
         elif not (
             source.get("source") == "live"
             and source.get("input") == "pico_controllers_only"

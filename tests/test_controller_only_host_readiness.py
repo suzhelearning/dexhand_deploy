@@ -37,6 +37,22 @@ def _controller_only_status() -> dict:
     }
 
 
+def _mocap_replay_status() -> dict:
+    return {
+        "state": "idle",
+        "source": "offline_replay",
+        "input": "mocap_h5_replay",
+        "mapping": "controller_relative_end_pose_conditioned_v1",
+        "body_tracking": "disabled",
+        "motion_trackers_required": False,
+        "elbow_constraint": "published_default_zsp_backend_selected",
+        "smpl_used": False,
+        "scope": "mocap_replay",
+        "at_safe_home": True,
+        "error": None,
+    }
+
+
 def _observe_safe_host(
     gate: HostReadinessGate,
     input_status: dict,
@@ -172,6 +188,37 @@ class ControllerOnlyHostReadinessTest(unittest.TestCase):
 
         self.assertTrue(decision.ready)
         self.assertEqual(decision.reason, "ready")
+
+    def test_mocap_replay_host_is_ready(self) -> None:
+        gate = _gate("controller_only")
+        _observe_safe_host(gate, _mocap_replay_status())
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertTrue(decision.ready)
+        self.assertEqual(decision.reason, "ready")
+
+    def test_mocap_replay_host_rejected_without_ready_fields(self) -> None:
+        gate = _gate("controller_only")
+        status = _mocap_replay_status()
+        status["at_safe_home"] = False
+        _observe_safe_host(gate, status)
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertFalse(decision.ready)
+        self.assertEqual(decision.reason, "mocap_replay_not_ready")
+
+    def test_mocap_replay_host_rejected_when_not_idle(self) -> None:
+        gate = _gate("controller_only")
+        status = _mocap_replay_status()
+        status["state"] = "teleop"
+        _observe_safe_host(gate, status)
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertFalse(decision.ready)
+        self.assertEqual(decision.reason, "host_not_idle")
 
 
 if __name__ == "__main__":
