@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# 直接 bash 运行（不经 pixi）时系统 python 缺少 zenoh；自动经
+# pixi run 重新执行本脚本（doctor / activate_bundle_runtime 均需
+# zenoh 环境）。pixi run 下 PATH 已含 zenoh 环境，不会递归。
+if ! python -c 'import zenoh' 2>/dev/null; then
+  if command -v pixi >/dev/null 2>&1; then
+    exec pixi run bash "${BASH_SOURCE[0]}" "$@"
+  fi
+fi
+
 # mocap 键盘步进仿真（Zenoh 通讯版，无 ROS）。
 #
 # 结构：IK 与 MuJoCo 后台（setsid + 受管进程组），步进节点**前台**
@@ -14,7 +25,6 @@ set -euo pipefail
 #   pixi run sim_mocap_step -- --topics-only   # 无界面
 #   bash scripts/run_mocap_step.sh --step-mm 5 --side both
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common.sh"
 
