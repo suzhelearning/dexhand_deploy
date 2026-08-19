@@ -33,6 +33,7 @@ def generate_launch_description():
         robot_description = urdf_file.read()
 
     step_mm = LaunchConfiguration("step_mm")
+    side = LaunchConfiguration("side")
     with_rviz = LaunchConfiguration("with_rviz")
 
     return LaunchDescription(
@@ -40,6 +41,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "step_mm", default_value="10.0",
                 description="每次按键位移毫米",
+            ),
+            DeclareLaunchArgument(
+                "side", default_value="right",
+                description="控制侧：right（仅右臂）/ both（双臂同步）",
             ),
             DeclareLaunchArgument(
                 "with_rviz",
@@ -73,7 +78,7 @@ def generate_launch_description():
                 name="mocap_keyboard_step",
                 output="screen",
                 parameters=[str(parameters)],
-                arguments=["--step-mm", step_mm],
+                arguments=["--step-mm", step_mm, "--side", side],
                 on_exit=Shutdown(reason="mocap keyboard step exited"),
             ),
             Node(

@@ -67,16 +67,22 @@ _AXIS_LABELS = {
 class MocapKeyboardStepNode:
     """非 Node 子类的步进控制驱动：由调用方创建 rclpy 节点并注入。"""
 
-    def __init__(self, node, *, step_mm: float = 10.0, rate: float = 60.0):
+    def __init__(self, node, *, step_mm: float = 10.0, rate: float = 60.0,
+                 side: str = "right"):
         from rclpy.node import Node
 
         if step_mm <= 0.0:
             raise ValueError("step_mm must be positive")
         if rate <= 0.0:
             raise ValueError("rate must be positive")
+        if side not in ("right", "both"):
+            raise ValueError(f"side 必须是 right/both 之一，实际 {side!r}")
         self.node: Node = node
         self._step_mm = float(step_mm)
         self._rate = rate
+        self._side = side
+        # 默认只控制右臂；both 时双臂同步。
+        self._sides = ("right",) if side == "right" else ("left", "right")
 
         conditioning_settings = TargetConditioningSettings(
             rate_hz=rate,
@@ -163,9 +169,10 @@ class MocapKeyboardStepNode:
 
         self.node.create_timer(1.0 / 60.0, self._tick)
         self.node.create_timer(0.5, self._publish_status)
+        side_label = "仅右臂" if side == "right" else "双臂同步"
         self.node.get_logger().info(
             f"mocap 键盘步进已就绪：每次按键 {step_mm:g} mm（动捕系），"
-            "按 s 开始，步进中再按 s 结束回 Home"
+            f"控制 {side_label}；按 s 开始，步进中再按 s 结束回 Home"
         )
 
     # -- 键盘 -----------------------------------------------------------------
@@ -183,6 +190,8 @@ class MocapKeyboardStepNode:
             if self._phase == "armed":
                 self._phase = "stepping"
                 self._phase_started = time.monotonic()
+                # 只控制右臂时，左臂恒用参考位姿（增量恒为零，左目标
+                # 不发布，IK 左臂保持 Home）。
                 self._mapper.initialize(
                     ControllerFrame.from_poses(
                         self._accumulator.pose(),
@@ -237,6 +246,7 @@ class MocapKeyboardStepNode:
                         "smpl_used": False,
                         "at_safe_home": state == "idle",
                         "step_mm": self._step_mm,
+                        "side": self._side,
                         "error": None,
                     },
                     ensure_ascii=False,
@@ -244,9 +254,17 @@ class MocapKeyboardStepNode:
             )
         )
 
+    def _frame(self, pose: np.ndarray) -> ControllerFrame:
+        """构造映射帧：只控制右臂时左臂恒用参考位姿。"""
+        left_pose = (
+            self._accumulator.reference_pose
+            if self._side == "right" else pose
+        )
+        return ControllerFrame.from_poses(left_pose, pose)
+
     def _publish_targets(self, targets: ControllerOnlyTargets) -> None:
         stamp = self.node.get_clock().now().to_msg()
-        for side in ("left", "right"):
+        for side in self._sides:
             pose = targets.left_pose if side == "left" else targets.right_pose
             message = PoseStamped()
             message.header.stamp = stamp
@@ -296,9 +314,7 @@ class MocapKeyboardStepNode:
             # settle：持续映射按键后的目标位姿，直到滤波/整形收敛。
             try:
                 targets = self._mapper.map_frame(
-                    ControllerFrame.from_poses(
-                        self._pending_pose, self._pending_pose
-                    )
+                    self._frame(self._pending_pose)
                 )
             except Exception as exc:
                 self.node.get_logger().error(f"步进映射失败：{exc}")
@@ -324,6 +340,7 @@ class MocapKeyboardStepNode:
             "input": "mocap_keyboard_step",
             "scope": "mocap_keyboard_step",
             "step_mm": self._step_mm,
+            "side": self._side,
             "accumulated_delta_mm": [
                 float(value) for value in delta_mm
             ],
@@ -360,6 +377,9 @@ def main(argv=None) -> int:
                         help="每次按键位移毫米（默认 10）")
     parser.add_argument("--rate", type=float, default=60.0,
                         help="映射器采样率 Hz（默认 60）")
+    parser.add_argument("--side", choices=("right", "both"), default="right",
+                        help="控制侧（默认 right：仅右臂，左臂保持 Home；"
+                             "both：双臂同步）")
     args = parser.parse_args(app_argv)
 
     rclpy.init(args=ros_args or None)
@@ -390,7 +410,7 @@ def main(argv=None) -> int:
     try:
         _assert_replay_graph_is_safe(node)
         driver = MocapKeyboardStepNode(
-            node, step_mm=args.step_mm, rate=args.rate
+            node, step_mm=args.step_mm, rate=args.rate, side=args.side
         )
         node.get_logger().warning(
             f"等待键盘 's' 开始步进；步进中方向键/1/0 每次移动 "

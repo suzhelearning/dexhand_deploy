@@ -82,9 +82,13 @@ pixi run sim_mocap -- TAKE.h5 --speed 1.0 --yaw-deg 0 --reference-frame -1
 | `1` | +y | `0` | -y |
 | `s` | 开始（armed 时） | `s` | 结束回 Home（步进中） |
 
+**默认只控制右臂**（左臂保持安全初始位）；`--side both` 恢复双臂同步：
+
 ```bash
-pixi run sim_mocap_step -- --topics-only            # 无界面
+pixi run sim_mocap_step -- --topics-only            # 无界面，仅右臂
+pixi run sim_mocap_step -- --side both              # 双臂同步
 pixi run sim_mocap_step -- --step-mm 5              # 每次 5mm
+bash scripts/run_mocap_step_dev.sh --topics-only    # 源码直跑，仅右臂
 ```
 
 方向键在 raw 模式是 `\x1b[A/B/C/D` 转义序列，由 `ArrowKeyParser`

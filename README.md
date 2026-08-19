@@ -563,7 +563,8 @@ pixi run controller-only-real-diagnostic -- --duration 60
 `-- --rviz-only`、`-- --mujoco-only` 或 `-- --topics-only`，但入口名不变。
 `sim_mocap` 默认是 preview-only 离线回放仿真，**键盘 's' 控制开始与
 结束**（替代 PICO A 键；`--control auto` 可恢复自动）；`sim_mocap_step`
-是键盘步进控制（上/下/左/右/1/0 = 动捕 ±z/∓z/±x/∓x/±y，每次 10mm）。
+是键盘步进控制（上/下/左/右/1/0 = 动捕 ±z/∓z/±x/∓x/±y，每次 10mm，
+**默认仅右臂**，左臂保持 Home；`--side both` 双臂同步）。
 两者都可作为真机桥主机输入做确定性轨迹真机验收（见
 [docs/mocap_real_acceptance.md](docs/mocap_real_acceptance.md)）。
 

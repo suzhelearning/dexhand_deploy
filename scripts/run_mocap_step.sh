@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/common.sh"
 WITH_RVIZ=true
 WITH_MUJOCO=true
 STEP_MM=10.0
+SIDE=right
 MUJOCO_PID=""
 LAUNCH_PID=""
 
@@ -27,7 +28,7 @@ usage() {
 步进参数：
   --step-mm N     每次按键位移毫米（默认 10）
 
-按键（动捕/Motive 系，y-up；raw 模式方向键）：
+按键（动捕/Motive 系，y-up；raw 模式方向键；默认仅右臂，左臂保持 Home）：
   上 ↑ = +z    下 ↓ = -z    左 ← = +x    右 → = -x
   '1' = +y     '0' = -y
   's' 开始步进（armed 时）/ 结束并回 Home（步进中）
@@ -57,6 +58,20 @@ while (($#)); do
     --topics-only)
       WITH_RVIZ=false
       WITH_MUJOCO=false
+      ;;
+    --side)
+      shift
+      if (($# == 0)); then
+        printf '%s\n' '错误：--side 缺少数值。' >&2
+        exit 2
+      fi
+      case "$1" in
+        right|both) SIDE="$1" ;;
+        *)
+          printf '错误：--side 必须是 right 或 both，实际 %s\n' "$1" >&2
+          exit 2
+          ;;
+      esac
       ;;
     --step-mm)
       shift
@@ -141,6 +156,7 @@ if [[ -n "${KEY_FIFO}" ]]; then
   setsid python "${ROS2_BIN}" launch \
     pico_body_tianji mocap_step.launch.py \
     "step_mm:=${STEP_MM}" \
+    "side:=${SIDE}" \
     "with_rviz:=${with_rviz}" \
     < "${KEY_FIFO}" &
   LAUNCH_PID=$!

@@ -21,6 +21,7 @@ fi
 
 WITH_MUJOCO=true
 STEP_MM=10.0
+SIDE=right
 IK_PID=""
 MUJOCO_PID=""
 
@@ -39,6 +40,14 @@ while (($#)); do
   case "$1" in
     --mujoco-only) WITH_MUJOCO=true ;;
     --topics-only) WITH_MUJOCO=false ;;
+    --side)
+      shift
+      if (($# == 0)); then printf '%s\n' '错误：--side 缺少数值。' >&2; exit 2; fi
+      case "$1" in
+        right|both) SIDE="$1" ;;
+        *) printf '错误：--side 必须是 right 或 both，实际 %s\n' "$1" >&2; exit 2 ;;
+      esac
+      ;;
     --step-mm)
       shift
       if (($# == 0)); then printf '%s\n' '错误：--step-mm 缺少数值。' >&2; exit 2; fi
@@ -89,13 +98,13 @@ sleep 2
 
 printf '%s\n' \
   '启动源码直跑键盘步进仿真（无需 build-ik/deploy-ik）' \
-  "  step_mm=${STEP_MM}  MuJoCo=${WITH_MUJOCO}" \
+  "  step_mm=${STEP_MM}  side=${SIDE}  MuJoCo=${WITH_MUJOCO}" \
   '按 s 开始；上/下/左/右/1/0 = 动捕 ±z/∓z/±x/∓x/±y；再按 s 结束。'
 
 # 节点前台运行：stdin 直连终端（raw 模式读键）。
 # 注意：不能经 ros2 launch——其子进程 stdin 不直连终端。
 python -m pico_body_tianji.controller_only.mocap_keyboard_step_node \
-  --step-mm "${STEP_MM}" --ros-args --params-file "${SRC_YAML}"
+  --step-mm "${STEP_MM}" --side "${SIDE}" --ros-args --params-file "${SRC_YAML}"
 NODE_EXIT=$?
 
 exit "${NODE_EXIT}"
