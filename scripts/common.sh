@@ -386,9 +386,13 @@ assert_managed_teleop_guard_alive() {
   fi
 
   if [[ "${owner_alive}" != true ]]; then
+    local host_command="pixi run sim"
+    if [[ "${mode}" == "controller-only-simulation" ]]; then
+      host_command="pixi run sim_controller_only"
+    fi
     printf '%s\n' \
       "拒绝连接真机：未检测到新版受管 ${mode} 主机任务。" \
-      '请从同一新版解压包先运行 pixi run sim。' >&2
+      "请从同一新版解压包先运行 ${host_command}。" >&2
     return 1
   fi
 }
