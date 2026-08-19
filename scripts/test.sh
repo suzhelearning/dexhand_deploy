@@ -35,7 +35,8 @@ python -m unittest \
   tests.test_controller_only_real_profile \
   tests.test_mocap_h5 \
   tests.test_mocap_step_h5 \
-  tests.test_raw_keyboard
+  tests.test_raw_keyboard \
+  tests.test_mocap_keyboard_step
 
 IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
 IK_NODE_BIN="${IK_NODE}.bin"

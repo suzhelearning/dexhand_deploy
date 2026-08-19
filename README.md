@@ -555,14 +555,16 @@ pixi run controller-only-real-diagnostic -- --duration 60
 | `pixi run sim_controller_only` | 纯手柄 IK 的 RViz + MuJoCo 仿真 | 否 |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
 | `pixi run sim_mocap -- TAKE.h5` | mocap HDF5 手腕轨迹回放为轨迹跟踪仿真 | 否 |
+| `pixi run sim_mocap_step` | 键盘步进控制（动捕系 10mm/键，s 启停） | 否 |
 
 `doctor`、`test`、`pico-probe`、`status`、`controller-only-joints` 和
 `controller-only-real-diagnostic` 是检查/观测工具，不是新的运行模式。
 `sim` 两个入口均可追加
 `-- --rviz-only`、`-- --mujoco-only` 或 `-- --topics-only`，但入口名不变。
 `sim_mocap` 默认是 preview-only 离线回放仿真，**键盘 's' 控制开始与
-结束**（替代 PICO A 键；`--control auto` 可恢复自动）；也可作为真机
-桥主机输入做确定性轨迹真机验收（见
+结束**（替代 PICO A 键；`--control auto` 可恢复自动）；`sim_mocap_step`
+是键盘步进控制（上/下/左/右/1/0 = 动捕 ±z/∓z/±x/∓x/±y，每次 10mm）。
+两者都可作为真机桥主机输入做确定性轨迹真机验收（见
 [docs/mocap_real_acceptance.md](docs/mocap_real_acceptance.md)）。
 
 ## 控制原理

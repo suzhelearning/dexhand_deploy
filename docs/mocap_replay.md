@@ -70,6 +70,40 @@ pixi run sim_mocap -- TAKE.h5 --speed 1.0 --yaw-deg 0 --reference-frame -1
 终端按 s 开始，真机桥自动跟随，回放中再按 s 结束回 Home，完整
 流程见 [docs/mocap_real_acceptance.md](mocap_real_acceptance.md)。
 
+## 键盘步进控制（sim_mocap_step）
+
+不回放 h5，用键盘在**动捕坐标系**（Motive，y-up）里给机器人末端目标
+增量，每次按键 10mm（`--step-mm` 可调），双臂同步跟随：
+
+| 按键 | 动捕系方向 | 按键 | 动捕系方向 |
+| --- | --- | --- | --- |
+| 上 ↑ | +z | 下 ↓ | -z |
+| 左 ← | +x | 右 → | -x |
+| `1` | +y | `0` | -y |
+| `s` | 开始（armed 时） | `s` | 结束回 Home（步进中） |
+
+```bash
+pixi run sim_mocap_step -- --topics-only            # 无界面
+pixi run sim_mocap_step -- --step-mm 5              # 每次 5mm
+```
+
+方向键在 raw 模式是 `\x1b[A/B/C/D` 转义序列，由 `ArrowKeyParser`
+解析；脚本侧以终端前台进程读键并经 FIFO 转发（launch 子进程无法
+直接读终端）。按键后节点保持 0.5s 连续映射（settle），让 One-Euro
+滤波与速度/加速度整形收敛——**每次按键机器人平滑移动恰好 10mm**
+（实测收敛位移 9.98mm，方向符合动捕→机器人映射）。
+
+动捕系 → 机器人 chest 系的轴映射（默认 `pico_to_robot`）：
+
+| 输入轴 | 机器人世界 | left_chest | right_chest |
+| --- | --- | --- | --- |
+| +x | −y（右） | (0, 0, −1) | (0, 0, +1) |
+| +y | +z（上） | (0, −1, 0) | (0, +1, 0) |
+| +z | −x（后） | (−1, 0, 0) | (−1, 0, 0) |
+
+步进模式同样可作为真机桥主机输入（身份 `mocap_keyboard_step` 被
+readiness 与主机链检查显式接受），用于键盘逐点驱动的真机位移验收。
+
 ## 数据链路
 
 ```

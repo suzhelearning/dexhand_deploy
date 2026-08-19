@@ -10,7 +10,7 @@
 
 ```
 命令（合成台阶 h5，+x 50mm，1:1 目标整形）
-  → mocap_h5_replay（主机输入，--hold-arm 等真机桥就绪）
+  → mocap_h5_replay / mocap_keyboard_step（主机输入，s 启停）
   → tianji_kinematic_sim（IK → 关节命令）
   → marvin_hardware_bridge（真机安全桥，--confirm-real）
   → 天机右臂实际运动
@@ -37,8 +37,16 @@
 
 ## 验收步骤
 
-回放开始/结束由**键盘 's'** 控制（替代 PICO A 键）：回放终端按 s
-开始，回放中再按 s 结束并回 Home。
+两种确定性命令方式（任选其一）：
+
+- **合成台阶回放**：`pixi run sim_mocap -- TAKE.h5 --topics-only`，
+  按 s 开始、回放中按 s 结束；
+- **键盘步进**：`pixi run sim_mocap_step -- --topics-only`，
+  按 s 开始后，用上/下/左/右/1/0 在动捕系逐点移动（每次 10mm），
+  再按 s 结束。适合逐点核对“按一次键动捕实测恰好 10mm”。
+
+回放/步进终端按 **s** 开始（替代 PICO A 键），回放中再按 **s** 结束
+并回 Home。
 
 1. **终端 1 — 启动回放主机（保持 idle 等待真机桥）**：
    ```bash
@@ -56,7 +64,8 @@
    pixi run real_controller_only -- --confirm-real \
      --velocity-ratio 20 --acceleration-ratio 20
    ```
-   真机桥会校验主机链路（接受 `/mocap_h5_replay` 主机）、回零并进入
+   真机桥会校验主机链路（接受 `/mocap_h5_replay` 或
+   `/mocap_keyboard_step` 主机）、回零并进入
    `phase=armed_idle`。**确认 `armed_idle` 后再继续**。
 
 4. **按 s 开始**：回到终端 1 按 **s**，回放进入 teleop，真机桥自动
@@ -78,7 +87,8 @@
 
 ## 安全说明
 
-- 回放主机身份（`mocap_h5_replay`）经 `host_readiness` 显式接受，
+- 回放/步进主机身份（`mocap_h5_replay` / `mocap_keyboard_step`）
+  经 `host_readiness` 显式接受，
   要求 idle 状态、Home 位姿与 preview-only 字段齐全；真机桥的
   回零、命令新鲜度、跟踪误差、软限位、急停等保护**全部不变**；
 - 键盘 's' 是唯一的启停手段：先等真机桥 `armed_idle`，再按 s 开始；

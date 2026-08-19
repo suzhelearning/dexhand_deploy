@@ -174,9 +174,15 @@ class HostReadinessGate:
                 and source.get("error") is None
             ):
                 return HostReadiness(False, "pico_smpl_not_live")
-        elif source.get("input") == "mocap_h5_replay":
-            # mocap HDF5 确定性轨迹回放主机（真机 50mm 验收用）：
-            # 要求回放就绪字段与 preview-only 身份，接受离线来源。
+        elif source.get("input") in ("mocap_h5_replay",
+                                     "mocap_keyboard_step"):
+            # mocap 主机（HDF5 确定性轨迹回放 / 键盘步进控制）：
+            # 要求就绪字段与 preview-only 身份，接受离线来源。
+            expected_scope = (
+                "mocap_replay"
+                if source.get("input") == "mocap_h5_replay"
+                else "mocap_keyboard_step"
+            )
             if not (
                 source.get("source") == "offline_replay"
                 and source.get("mapping")
@@ -186,7 +192,7 @@ class HostReadinessGate:
                 and source.get("elbow_constraint")
                 == "published_default_zsp_backend_selected"
                 and source.get("smpl_used") is False
-                and source.get("scope") == "mocap_replay"
+                and source.get("scope") == expected_scope
                 and source.get("at_safe_home") is True
                 and source.get("error") is None
             ):
