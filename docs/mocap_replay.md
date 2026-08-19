@@ -159,7 +159,8 @@ v4.0 布局一致，`load_mocap_h5` 可直接读取。
 
 ## 部署说明
 
-本功能新增了 Python 节点 `mocap_h5_replay`、launch 文件
+本功能新增了 Python 节点 `mocap_h5_replay`、台阶轨迹生成工具
+`mocap_step_h5`、launch 文件
 `mocap_replay.launch.py` 与 `h5py` 依赖。源码仓库需重新构建部署后，
 运行时的 `pixi run sim_mocap` 才会存在：
 
