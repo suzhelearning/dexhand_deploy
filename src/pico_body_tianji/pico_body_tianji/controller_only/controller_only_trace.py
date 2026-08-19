@@ -404,7 +404,10 @@ class TraceReplay:
             self._publish_state("returning")
             if now - self.started >= 3.0:
                 self.node.get_logger().info("离线 replay 完成并已请求回 Home")
-                self.node.context.try_shutdown()
+                # context.try_shutdown() 在本机 rclpy(Humble) 的 executor
+                # 回调内会死锁，导致回放结束不退出；改用 SystemExit 从
+                # spin 的 while 循环中直接抛出（main 中捕获并正常清理）。
+                raise SystemExit(0)
             return
         elapsed = (now - self.started) * self.speed
         base = self.frames[0].elapsed_s
@@ -476,7 +479,10 @@ def _run_replay(args) -> int:
         node.get_logger().warning(
             "开始 preview-only 离线 replay；该身份不能通过真机 readiness"
         )
-        rclpy.spin(node)
+        try:
+            rclpy.spin(node)
+        except SystemExit:
+            return 0
     finally:
         node.destroy_node()
         if rclpy.ok():

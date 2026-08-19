@@ -320,6 +320,21 @@ pixi run sim_controller_only
 
 松开再单击右手柄 A 后，小幅移动左右手柄即可观察对应机械臂。
 
+### 6. mocap 手腕轨迹回放仿真（可选）
+
+不需要 PICO/真机时，可以把 mocap-acquisition 采集的 HDF5（v4.0）里
+录制的左右手腕位姿按录制节奏回放成轨迹跟踪仿真，机器人会像在线
+PICO 遥操作一样跟踪这条轨迹：
+
+```bash
+pixi run sim_mocap -- /home/current/data/20260819/20260819_151737_102784_take003.h5
+```
+
+回放经过与在线 PICO 完全相同的末端映射（增量相对参考帧、One-Euro
+滤波、尺度/工作空间/速度整形），参考帧等效于按右手柄 A 的时刻，
+结束后自动回 Home 并退出。支持 `--speed` 倍速、`--yaw-deg` 朝向标定
+和 `--topics-only` 等模式；单侧手腕完全无效（如该 take 左手全 NaN）
+时该侧机械臂保持 Home。详细说明见 [docs/mocap_replay.md](docs/mocap_replay.md)。
 
 ### 7. 启动真机
 
@@ -533,11 +548,14 @@ pixi run controller-only-real-diagnostic -- --duration 60
 | `pixi run real -- --confirm-real` | 复用正在运行的 sim，启动真机桥 | **是** |
 | `pixi run sim_controller_only` | 纯手柄 IK 的 RViz + MuJoCo 仿真 | 否 |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
+| `pixi run sim_mocap -- TAKE.h5` | mocap HDF5 手腕轨迹回放为轨迹跟踪仿真 | 否 |
 
 `doctor`、`test`、`pico-probe`、`status`、`controller-only-joints` 和
 `controller-only-real-diagnostic` 是检查/观测工具，不是新的运行模式。
 `sim` 两个入口均可追加
 `-- --rviz-only`、`-- --mujoco-only` 或 `-- --topics-only`，但入口名不变。
+`sim_mocap` 是 preview-only 离线回放仿真，其运行锁和输入身份不能用于
+启动真机桥。
 
 ## 控制原理
 

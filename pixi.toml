@@ -14,6 +14,7 @@ mujoco = ">=3.2,<4"
 packaging = ">=24,<26"
 lark = ">=1.1,<2"
 netifaces = ">=0.11,<1"
+h5py = ">=3.10,<4"
 
 [tasks]
 doctor = "bash scripts/doctor.sh"
@@ -28,6 +29,7 @@ controller-only-joints = "bash scripts/watch_controller_only_joints.sh"
 controller-only-trace = "bash scripts/run_controller_only_trace.sh"
 controller-only-real-diagnostic = "bash scripts/run_controller_only_real_diagnostic.sh"
 replay-controller-only = { cmd = "bash scripts/run_controller_only_replay.sh", depends-on = ["doctor"] }
+sim_mocap = { cmd = "bash scripts/run_mocap_sim.sh --mujoco-only", description = "mocap HDF5 手腕轨迹回放为轨迹跟踪仿真（MuJoCo）" }
 sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --mujoco-only", depends-on = ["doctor"] }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
 
