@@ -11,6 +11,7 @@ REPLAY_SPEED=1.0
 YAW_DEG=0.0
 REFERENCE_FRAME=-1
 HOLD_ARM=0.0
+CONTROL=keyboard
 H5_FILE=""
 MUJOCO_PID=""
 LAUNCH_PID=""
@@ -19,9 +20,11 @@ usage() {
   cat <<'EOF'
 用法：
   pixi run sim_mocap -- H5.h5 [模式] [--speed N] [--yaw-deg N]
-                      [--reference-frame N] [--hold-arm N]
+                      [--reference-frame N] [--control keyboard|auto]
+                      [--hold-arm N]
   bash scripts/run_mocap_sim.sh H5.h5 [模式] [--speed N] [--yaw-deg N]
-                                     [--reference-frame N] [--hold-arm N]
+                                     [--reference-frame N]
+                                     [--control keyboard|auto] [--hold-arm N]
 
 模式：
   --both          同时启动 RViz 与 MuJoCo（默认）
@@ -34,8 +37,9 @@ usage() {
   --speed N             回放倍速（默认 1.0）
   --yaw-deg N           绕竖直轴旋转整条轨迹的朝向标定（度，默认 0）
   --reference-frame N   参考帧下标（等效按 A 时刻，默认第一个有效帧）
-  --hold-arm N          回放前保持 idle 的秒数（默认 0；真机验收时
-                        等真机桥进入 armed_idle）
+  --control MODE        开始/结束控制（默认 keyboard：按 s 开始，
+                        回放中再按 s 结束；auto：自动开始/结束）
+  --hold-arm N          auto 模式下开始回放前保持 idle 的秒数（默认 0）
 
 说明：
   把 mocap-acquisition HDF5（v4.0）里录制的手腕位姿作为轨迹跟踪
@@ -104,6 +108,20 @@ while (($#)); do
       fi
       HOLD_ARM="$1"
       ;;
+    --control)
+      shift
+      if (($# == 0)); then
+        printf '%s\n' '错误：--control 缺少数值。' >&2
+        exit 2
+      fi
+      case "$1" in
+        keyboard|auto) CONTROL="$1" ;;
+        *)
+          printf '错误：--control 必须是 keyboard 或 auto，实际 %s\n' "$1" >&2
+          exit 2
+          ;;
+      esac
+      ;;
     *)
       printf '错误：未知参数 %s\n' "$1" >&2
       usage >&2
@@ -155,7 +173,8 @@ fi
 printf '%s\n' \
   '启动 mocap 轨迹跟踪仿真：HDF5 手腕位姿 → 纯手柄映射 → 可配置 IK' \
   "  H5=${H5_FILE}  speed=${REPLAY_SPEED}  yaw_deg=${YAW_DEG}" \
-  "  reference_frame=${REFERENCE_FRAME}  RViz=${WITH_RVIZ}  MuJoCo=${WITH_MUJOCO}" \
+  "  reference_frame=${REFERENCE_FRAME}  control=${CONTROL}" \
+  "  RViz=${WITH_RVIZ}  MuJoCo=${WITH_MUJOCO}" \
   '该任务不会连接 Marvin 控制器。'
 
 with_rviz="false"
@@ -163,28 +182,86 @@ if [[ "${WITH_RVIZ}" == true ]]; then
   with_rviz="true"
 fi
 
-setsid python "${ROS2_BIN}" launch \
-  pico_body_tianji mocap_replay.launch.py \
-  "h5_file:=${H5_FILE}" \
-  "replay_speed:=${REPLAY_SPEED}" \
-  "yaw_deg:=${YAW_DEG}" \
-  "reference_frame:=${REFERENCE_FRAME}" \
-  "hold_arm:=${HOLD_ARM}" \
-  "with_rviz:=${with_rviz}" &
-LAUNCH_PID=$!
+# 键盘控制（默认）：脚本作为终端前台进程读取按键，经 FIFO 转发到
+# 回放节点 stdin（launch 以 setsid 启动，子进程无法直接读终端）。
+KEY_FIFO=""
+if [[ "${CONTROL}" == "keyboard" && -t 0 ]]; then
+  KEY_FIFO="$(mktemp -u /tmp/mocap-key-XXXXXX)"
+  mkfifo "${KEY_FIFO}"
+  printf '%s\n' \
+    '键盘控制：按 s 开始回放；回放中再按 s 结束并回 Home。' \
+    "（经 ${KEY_FIFO} 转发按键；auto 模式忽略）"
+fi
+
+if [[ -n "${KEY_FIFO}" ]]; then
+  setsid python "${ROS2_BIN}" launch \
+    pico_body_tianji mocap_replay.launch.py \
+    "h5_file:=${H5_FILE}" \
+    "replay_speed:=${REPLAY_SPEED}" \
+    "yaw_deg:=${YAW_DEG}" \
+    "reference_frame:=${REFERENCE_FRAME}" \
+    "control:=${CONTROL}" \
+    "hold_arm:=${HOLD_ARM}" \
+    "with_rviz:=${with_rviz}" \
+    < "${KEY_FIFO}" &
+  LAUNCH_PID=$!
+  # 常开写端：与 launch 的 fifo 读端会合，并保证读端永不 EOF。
+  exec 9>"${KEY_FIFO}"
+else
+  setsid python "${ROS2_BIN}" launch \
+    pico_body_tianji mocap_replay.launch.py \
+    "h5_file:=${H5_FILE}" \
+    "replay_speed:=${REPLAY_SPEED}" \
+    "yaw_deg:=${YAW_DEG}" \
+    "reference_frame:=${REFERENCE_FRAME}" \
+    "control:=${CONTROL}" \
+    "hold_arm:=${HOLD_ARM}" \
+    "with_rviz:=${with_rviz}" &
+  LAUNCH_PID=$!
+fi
 register_teleop_process_group \
   "${LAUNCH_PID}" ros-mocap-replay 5
 
-if [[ "${WITH_MUJOCO}" == true ]]; then
+forward_keypresses() {
+  # 前台轮询读键；子进程全部结束后退出（替换 wait -n 的等待语义）。
+  while kill -0 "${LAUNCH_PID}" 2>/dev/null ||
+        { [[ -n "${MUJOCO_PID}" ]] && kill -0 "${MUJOCO_PID}" 2>/dev/null; }
+  do
+    if read -rsn1 -t 0.05 key; then
+      if [[ "${key}" == "s" ]]; then
+        printf 's' >&9 2>/dev/null || true
+      fi
+    fi
+  done
+}
+
+if [[ -n "${KEY_FIFO}" ]]; then
   set +e
-  wait -n "${LAUNCH_PID}" "${MUJOCO_PID}"
-  task_exit=$?
+  forward_keypresses
+  task_exit=0
+  # 等待并收割子进程退出码。
+  if [[ "${WITH_MUJOCO}" == true ]]; then
+    wait "${LAUNCH_PID}" 2>/dev/null
+    task_exit=$?
+    wait "${MUJOCO_PID}" 2>/dev/null || true
+  else
+    wait "${LAUNCH_PID}" 2>/dev/null
+    task_exit=$?
+  fi
   set -e
+  rm -f -- "${KEY_FIFO}"
 else
-  set +e
-  wait "${LAUNCH_PID}"
-  task_exit=$?
-  set -e
+  if [[ "${WITH_MUJOCO}" == true ]]; then
+    set +e
+    wait -n "${LAUNCH_PID}" "${MUJOCO_PID}"
+    task_exit=$?
+    set -e
+  else
+    set +e
+    wait "${LAUNCH_PID}"
+    task_exit=$?
+    set -e
+  fi
 fi
 
 exit "${task_exit}"

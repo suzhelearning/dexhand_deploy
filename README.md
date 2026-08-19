@@ -334,9 +334,10 @@ pixi run sim_mocap -- /home/current/data/20260819/20260819_151737_102784_take003
 工作空间/速度整形），默认 **1:1 目标整形**（`translation_gain=1.0`）：
 命令 +x 移动 50mm，目标位移即 50.0mm、solved 位移 49.9–50.0mm；
 在线 PICO 链路刻意保留 0.90 安全缩放。参考帧等效于按右手柄 A 的
-时刻，结束后自动回 Home 并退出。支持 `--speed` 倍速、`--yaw-deg`
-朝向标定和 `--topics-only` 等模式；单侧手腕完全无效（如该 take
-左手全 NaN）时该侧机械臂保持 Home。可用
+时刻；**键盘 's' 控制开始与结束**（按 s 开始回放，回放中再按 s
+结束并回 Home；`--control auto` 恢复自动流程）。支持 `--speed`
+倍速、`--yaw-deg` 朝向标定和 `--topics-only` 等模式；单侧手腕
+完全无效（如该 take 左手全 NaN）时该侧机械臂保持 Home。可用
 `pixi run mocap-step-h5 -- --output step.h5 --axis z --dir neg --mm 50`
 生成“机器人 +x 移动 50mm”的合成验收轨迹。
 详细说明见 [docs/mocap_replay.md](docs/mocap_replay.md)。
@@ -559,8 +560,9 @@ pixi run controller-only-real-diagnostic -- --duration 60
 `controller-only-real-diagnostic` 是检查/观测工具，不是新的运行模式。
 `sim` 两个入口均可追加
 `-- --rviz-only`、`-- --mujoco-only` 或 `-- --topics-only`，但入口名不变。
-`sim_mocap` 默认是 preview-only 离线回放仿真；配合 `--hold-arm` 时
-可作为真机桥主机输入做确定性轨迹真机验收（见
+`sim_mocap` 默认是 preview-only 离线回放仿真，**键盘 's' 控制开始与
+结束**（替代 PICO A 键；`--control auto` 可恢复自动）；也可作为真机
+桥主机输入做确定性轨迹真机验收（见
 [docs/mocap_real_acceptance.md](docs/mocap_real_acceptance.md)）。
 
 ## 控制原理

@@ -27,7 +27,8 @@
 用法（由 scripts/run_mocap_sim.sh 启动，也可直接）：
 
     mocap_h5_replay --h5 TAKE.h5 [--speed N] [--yaw-deg N]
-                    [--reference-frame N] [--rate N] [--hold-arm N]
+                    [--reference-frame N] [--rate N] [--control keyboard]
+                    [--hold-arm N]
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -65,7 +67,7 @@ class MocapH5ReplayNode:
 
     def __init__(self, node, recording: MocapRecording, *, speed: float,
                  yaw_deg: float, reference_frame: int, rate: float,
-                 hold_arm_s: float = 0.0):
+                 hold_arm_s: float = 0.0, control: str = "keyboard"):
         from rclpy.node import Node
 
         if speed <= 0.0:
@@ -74,11 +76,16 @@ class MocapH5ReplayNode:
             raise ValueError("mapper rate must be positive")
         if hold_arm_s < 0.0:
             raise ValueError("hold_arm_s must be non-negative")
+        if control not in ("keyboard", "auto"):
+            raise ValueError(
+                f"control 必须是 keyboard/auto 之一，实际 {control!r}"
+            )
         self.node: Node = node
         self.recording = recording
         self.speed = speed
         self.rate = rate
         self._hold_arm_s = float(hold_arm_s)
+        self._control = control
 
         # 目标整形参数与在线纯手柄输入节点共用 YAML。
         conditioning_settings = TargetConditioningSettings(
@@ -196,12 +203,27 @@ class MocapH5ReplayNode:
         self._last_conditioning: dict[str, object] = {
             "left": None, "right": None
         }
+        # 键盘控制（默认）：'s' 开始回放，回放中再按 's' 结束。
+        self._key_started = False
+        self._key_ended = False
+        self._stop_event = threading.Event()
+        self._keyboard_thread: threading.Thread | None = None
+        if control == "keyboard":
+            from .raw_keyboard import raw_keyboard
+
+            self._keyboard_thread = threading.Thread(
+                target=raw_keyboard,
+                args=(self._on_key, self._stop_event),
+                daemon=True,
+            )
+            self._keyboard_thread.start()
         self.node.create_timer(1.0 / 60.0, self._tick)
         self.node.create_timer(0.5, self._publish_status)
         self.node.get_logger().info(
             "mocap HDF5 回放已加载："
             f"{json.dumps(recording.summary(), ensure_ascii=False)}"
             f" yaw_deg={yaw_deg} speed={speed} "
+            f"control={control} "
             f"reference_frame={reference_frame}"
         )
 
@@ -283,12 +305,35 @@ class MocapH5ReplayNode:
             ) = map(float, direction)
             self._elbow_publishers[side].publish(elbow)
 
+    def _on_key(self, key: str) -> None:
+        """键盘控制：'s' 开始回放；回放中再按 's' 结束（请求回 Home）。"""
+        if key != "s":
+            return
+        if self._phase == "arming":
+            self._key_started = True
+            self.node.get_logger().info("键盘 's'：开始 mocap 回放")
+        elif self._phase == "replaying":
+            self._key_ended = True
+            self.node.get_logger().info("键盘 's'：请求结束回放并回 Home")
+
+    def stop(self) -> None:
+        """停止键盘监听线程（退出前调用，确保终端恢复）。"""
+        self._stop_event.set()
+
     def _tick(self) -> None:
         now = time.monotonic()
         if self._phase == "arming":
             self._publish_state("idle")
-            # arming 持续 1s + --hold-arm（真机验收时等真机桥就绪）。
-            if now - self._phase_started >= 1.0 + self._hold_arm_s:
+            start_replay = False
+            if self._control == "keyboard":
+                # 等待键盘 's'（PICO A 键的替代，回放无 A 键概念）。
+                start_replay = self._key_started
+            else:
+                # auto：arming 持续 1s + --hold-arm（等真机桥就绪）。
+                start_replay = (
+                    now - self._phase_started >= 1.0 + self._hold_arm_s
+                )
+            if start_replay:
                 self._phase = "replaying"
                 self._phase_started = now
                 # 以参考帧初始化映射器：此后相对增量以该帧为零点。
@@ -309,6 +354,10 @@ class MocapH5ReplayNode:
                 raise SystemExit(0)
             return
         # replaying
+        if self._key_ended:
+            self._phase = "returning"
+            self._phase_started = now
+            return
         elapsed = (now - self._phase_started) * self.speed
         published = False
         while (
@@ -400,8 +449,13 @@ def main(argv=None) -> int:
                         help="映射器采样率 Hz（默认 60，与 h5 对齐）")
     parser.add_argument("--hold-arm", type=float, default=0.0,
                         dest="hold_arm_s",
-                        help="开始回放前保持 idle 的秒数（默认 0；"
-                             "真机验收时等真机桥进入 armed_idle）")
+                        help="auto 模式下开始回放前保持 idle 的秒数"
+                             "（默认 0；配合 --control auto 使用）")
+    parser.add_argument("--control", choices=("keyboard", "auto"),
+                        default="keyboard",
+                        help="回放开始/结束控制方式（默认 keyboard："
+                             "按 's' 开始，回放中再按 's' 结束；"
+                             "auto：arming 后自动开始，播完自动结束）")
     args = parser.parse_args(app_argv)
 
     h5_path = args.h5_opt if args.h5_opt is not None else args.h5
@@ -434,9 +488,10 @@ def main(argv=None) -> int:
         "right_default_zsp_direction",
         [0.45638698, 0.74604902, -0.48489358],
     )
+    replay_driver = None
     try:
         _assert_replay_graph_is_safe(node)
-        MocapH5ReplayNode(
+        replay_driver = MocapH5ReplayNode(
             node,
             recording,
             speed=args.speed,
@@ -444,16 +499,25 @@ def main(argv=None) -> int:
             reference_frame=args.reference_frame,
             rate=args.rate,
             hold_arm_s=args.hold_arm_s,
+            control=args.control,
         )
-        node.get_logger().warning(
-            "开始 preview-only mocap 轨迹回放；"
-            "该身份不能通过真机 readiness"
-        )
+        if args.control == "keyboard":
+            node.get_logger().warning(
+                "等待键盘 's' 开始回放（回放中再按 's' 结束回 Home）；"
+                "该身份经 --hold-arm/真机桥流程配合时可驱动真机验收"
+            )
+        else:
+            node.get_logger().warning(
+                f"auto 模式：{args.hold_arm_s}s 后自动开始回放；"
+                "该身份经 --hold-arm/真机桥流程配合时可驱动真机验收"
+            )
         try:
             rclpy.spin(node)
         except SystemExit:
             return 0
     finally:
+        if replay_driver is not None:
+            replay_driver.stop()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

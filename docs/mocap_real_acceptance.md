@@ -37,12 +37,14 @@
 
 ## 验收步骤
 
-1. **终端 1 — 启动回放主机（等待真机桥）**：
+回放开始/结束由**键盘 's'** 控制（替代 PICO A 键）：回放终端按 s
+开始，回放中再按 s 结束并回 Home。
+
+1. **终端 1 — 启动回放主机（保持 idle 等待真机桥）**：
    ```bash
-   pixi run sim_mocap -- /tmp/robot_forward_50mm.h5 --topics-only \
-     --hold-arm 120
+   pixi run sim_mocap -- /tmp/robot_forward_50mm.h5 --topics-only
    ```
-   `--hold-arm 120`：回放保持 idle 最多 120 s，等真机桥就绪。
+   默认 keyboard 控制：回放保持 idle，直到按 s。
 
 2. **终端 2 — 启动动捕记录**（`/home/current/syz/mocap` 目录）：
    ```bash
@@ -57,11 +59,12 @@
    真机桥会校验主机链路（接受 `/mocap_h5_replay` 主机）、回零并进入
    `phase=armed_idle`。**确认 `armed_idle` 后再继续**。
 
-4. **等待回放开始**：`--hold-arm` 到期后回放自动进入 teleop，真机桥
-   自动跟随（无 A 键，桥直接跟随 `/pico_body/teleop_state`）。机械臂
-   前移 50mm、保持、回程，回放结束请求回 Home，桥缓慢回零后软停止。
+4. **按 s 开始**：回到终端 1 按 **s**，回放进入 teleop，真机桥自动
+   跟随（无 A 键，桥直接跟随 `/pico_body/teleop_state`）。机械臂
+   前移 50mm、保持；确认到位后按 **s** 结束，回放请求回 Home，
+   桥缓慢回零后软停止。
 
-5. **测量**：回放结束后停止 `track-rigid`（Ctrl-C），报告位移：
+5. **测量**：结束后停止 `track-rigid`（Ctrl-C），报告位移：
    ```bash
    pixi run track-rigid measure /tmp/right_arm.jsonl \
      --start 2 --end 4        # 窗口须覆盖保持段（依实际时间调整）
@@ -78,7 +81,8 @@
 - 回放主机身份（`mocap_h5_replay`）经 `host_readiness` 显式接受，
   要求 idle 状态、Home 位姿与 preview-only 字段齐全；真机桥的
   回零、命令新鲜度、跟踪误差、软限位、急停等保护**全部不变**；
-- `--hold-arm` 是唯一的时序配合手段：先等 `armed_idle` 再开始回放；
+- 键盘 's' 是唯一的启停手段：先等真机桥 `armed_idle`，再按 s 开始；
+  回放中随时按 s 结束回 Home；
 - 首次验收务必低速（velocity/acceleration ratio 20），并在动捕
   记录中确认全程 `tracking_valid=true`；
 - 结束时真机终端 Ctrl+C 等待 `Robot released`，再关回放终端。

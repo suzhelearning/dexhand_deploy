@@ -37,6 +37,7 @@ def generate_launch_description():
     yaw_deg = LaunchConfiguration("yaw_deg")
     reference_frame = LaunchConfiguration("reference_frame")
     hold_arm = LaunchConfiguration("hold_arm")
+    control = LaunchConfiguration("control")
     with_rviz = LaunchConfiguration("with_rviz")
 
     return LaunchDescription(
@@ -49,7 +50,11 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "hold_arm", default_value="0.0",
-                description="回放前保持 idle 的秒数（真机验收等待 armed_idle）",
+                description="auto 模式下回放前保持 idle 的秒数",
+            ),
+            DeclareLaunchArgument(
+                "control", default_value="keyboard",
+                description="keyboard（按 s 开始/结束）或 auto（自动）",
             ),
             DeclareLaunchArgument(
                 "with_rviz",
@@ -92,6 +97,8 @@ def generate_launch_description():
                     yaw_deg,
                     "--reference-frame",
                     reference_frame,
+                    "--control",
+                    control,
                     "--hold-arm",
                     hold_arm,
                 ],
