@@ -45,6 +45,7 @@ packaging = ">=24,<26"
 pyyaml = ">=6,<7"
 cmake = ">=3.22"
 eigen = "*"
+urdfdom_headers = "*"
 
 [feature.ik-build.pypi-dependencies]
 pin = "==4.0.0"

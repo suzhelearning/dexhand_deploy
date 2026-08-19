@@ -584,13 +584,13 @@ std::string pose_json(const Eigen::Isometry3d & pose)
   const Eigen::Quaterniond quaternion(pose.rotation());
   std::ostringstream stream;
   stream << std::setprecision(10)
-         << "{\"position\":{\"x\":" << pose.translation().x()
+         << "\"position\":{\"x\":" << pose.translation().x()
          << ",\"y\":" << pose.translation().y()
          << ",\"z\":" << pose.translation().z() << "},"
          << "\"orientation\":{\"x\":" << quaternion.x()
          << ",\"y\":" << quaternion.y()
          << ",\"z\":" << quaternion.z()
-         << ",\"w\":" << quaternion.w() << "}}";
+         << ",\"w\":" << quaternion.w() << "}";
   return stream.str();
 }
 
@@ -612,13 +612,15 @@ public:
       [this](const zenoh::Query & query) {
         std::lock_guard<std::mutex> lock(mutex_);
         query.reply(key_expr_, zenoh::Bytes(value_));
-      });
+      },
+      []() {});
     subscriber_ = session_.declare_subscriber(
       key_expr_,
       [this](const zenoh::Sample & sample) {
         std::lock_guard<std::mutex> lock(mutex_);
         value_ = sample.get_payload().as_string();
-      });
+      },
+      []() {});
   }
 
   void put(const std::string & value)
@@ -635,8 +637,8 @@ private:
   zenoh::KeyExpr key_expr_;
   std::mutex mutex_;
   std::string value_;
-  zenoh::Queryable<void> queryable_;
-  zenoh::Subscriber<void> subscriber_;
+  std::optional<zenoh::Queryable<void>> queryable_;
+  std::optional<zenoh::Subscriber<void>> subscriber_;
 };
 
 // ---------------------------------------------------------------- 消息键
@@ -836,6 +838,26 @@ public:
               << "；未连接实体机械臂" << std::endl;
   }
 
+  void run()
+  {
+    const auto tick_interval =
+      std::chrono::duration<double>(1.0 / rate_hz_);
+    auto next_tick = std::chrono::steady_clock::now() + tick_interval;
+    auto next_status = next_tick + std::chrono::milliseconds(500);
+    while (true) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_tick) {
+        tick();
+        next_tick += tick_interval;
+      }
+      if (now >= next_status) {
+        publish_status();
+        next_status += std::chrono::milliseconds(500);
+      }
+      std::this_thread::sleep_until(std::min(next_tick, next_status));
+    }
+  }
+
 private:
   struct ReturnTrajectory
   {
@@ -876,13 +898,15 @@ private:
         zenoh::KeyExpr(topic_key("/pico_body/" + side + "_arm_target_pose")),
         [this, index](const zenoh::Sample & sample) {
           on_pose(index, sample.get_payload().as_string());
-        });
+        },
+        []() {});
       direction_subscriptions_[index] = session_.declare_subscriber(
         zenoh::KeyExpr(
           topic_key("/pico_body/" + side + "_arm_elbow_direction")),
         [this, index](const zenoh::Sample & sample) {
           on_direction(index, sample.get_payload().as_string());
-        });
+        },
+        []() {});
     }
 
     model_joint_publisher_ = session_.declare_publisher(
@@ -893,7 +917,8 @@ private:
       zenoh::KeyExpr(topic_key("/pico_body/teleop_state")),
       [this](const zenoh::Sample & sample) {
         on_teleop_state(sample.get_payload().as_string());
-      });
+      },
+      []() {});
   }
 
   void on_pose(std::size_t arm_index, const std::string & payload)
@@ -1105,16 +1130,15 @@ private:
     stream << "{\"stamp\":" << json_stamp(stamp_now())
            << ",\"frame_id\":" << json_quote(arm.side_name + "_chest")
            << ',' << pose_json(*arm.achieved) << '}';
-    solved_pose_publishers_[arm_index].put(zenoh::Bytes(stream.str()));
+    solved_pose_publishers_[arm_index]->put(zenoh::Bytes(stream.str()));
   }
 
   void publish_joint_states()
   {
     const Stamp stamp = stamp_now();
-    std::string model_name;
-    std::string model_position;
-    model_name.reserve(256);
-    model_position.reserve(256);
+    std::ostringstream model_name;
+    std::ostringstream model_position;
+    std::size_t model_count = 0;
 
     for (std::size_t arm_index = 0; arm_index < arms_.size(); ++arm_index) {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1127,14 +1151,19 @@ private:
       for (Eigen::Index joint_index = 0; joint_index < 7; ++joint_index) {
         if (joint_index > 0) {
           stream << ',';
-          model_name.push_back(',');
-          model_position.push_back(',');
         }
         stream << json_quote(
           arm.side_name + "_joint_" + std::to_string(joint_index + 1));
-        model_name += "\"Joint" + std::to_string(joint_index + 1) +
-          "_" + arm.suffix + "\"";
-        model_position += std::to_string(arm.current[joint_index]);
+        if (model_count > 0) {
+          model_name << ',';
+          model_position << ',';
+        }
+        model_name << json_quote(
+          "Joint" + std::to_string(joint_index + 1) +
+          "_" + arm.suffix);
+        model_position << std::setprecision(10)
+                       << arm.current[joint_index];
+        ++model_count;
       }
       stream << "],\"position\":[";
       for (Eigen::Index joint_index = 0; joint_index < 7; ++joint_index) {
@@ -1145,14 +1174,14 @@ private:
                << degrees(arm.current[joint_index]);
       }
       stream << "]}";
-      joint_publishers_[arm_index].put(zenoh::Bytes(stream.str()));
+      joint_publishers_[arm_index]->put(zenoh::Bytes(stream.str()));
     }
 
     std::ostringstream stream;
     stream << "{\"stamp\":" << json_stamp(stamp)
-           << ",\"name\":[" << model_name << "],\"position\":["
-           << model_position << "]}";
-    model_joint_publisher_.put(zenoh::Bytes(stream.str()));
+           << ",\"name\":[" << model_name.str() << "],\"position\":["
+           << model_position.str() << "]}";
+    model_joint_publisher_->put(zenoh::Bytes(stream.str()));
   }
 
   bool at_safe_home() const
@@ -1330,27 +1359,7 @@ private:
         << "\"scope\":\"preview_only\""
         << '}';
     }
-    status_publisher_.put(zenoh::Bytes(stream.str()));
-  }
-
-  void run()
-  {
-    const auto tick_interval =
-      std::chrono::duration<double>(1.0 / rate_hz_);
-    auto next_tick = std::chrono::steady_clock::now() + tick_interval;
-    auto next_status = next_tick + std::chrono::milliseconds(500);
-    while (true) {
-      const auto now = std::chrono::steady_clock::now();
-      if (now >= next_tick) {
-        tick();
-        next_tick += tick_interval;
-      }
-      if (now >= next_status) {
-        publish_status();
-        next_status += std::chrono::milliseconds(500);
-      }
-      std::this_thread::sleep_until(std::min(next_tick, next_status));
-    }
+    status_publisher_->put(zenoh::Bytes(stream.str()));
   }
 
   zenoh::Session & session_;
@@ -1365,14 +1374,15 @@ private:
   bool arm_angle_required_{false};
   std::mutex mutex_;
 
-  std::array<zenoh::Publisher, 2> joint_publishers_;
-  std::array<zenoh::Publisher, 2> solved_pose_publishers_;
-  zenoh::Publisher model_joint_publisher_;
-  zenoh::Publisher status_publisher_;
+  std::array<std::optional<zenoh::Publisher>, 2> joint_publishers_;
+  std::array<std::optional<zenoh::Publisher>, 2> solved_pose_publishers_;
+  std::optional<zenoh::Publisher> model_joint_publisher_;
+  std::optional<zenoh::Publisher> status_publisher_;
 
-  std::array<zenoh::Subscriber<void>, 2> pose_subscriptions_;
-  std::array<zenoh::Subscriber<void>, 2> direction_subscriptions_;
-  zenoh::Subscriber<void> teleop_state_subscription_;
+  std::array<std::optional<zenoh::Subscriber<void>>, 2> pose_subscriptions_;
+  std::array<std::optional<zenoh::Subscriber<void>>, 2>
+    direction_subscriptions_;
+  std::optional<zenoh::Subscriber<void>> teleop_state_subscription_;
 
   LatchedValue at_home_{session_, topic_key("/pico_body_sim/at_home"), "true"};
   LatchedValue return_complete_{
@@ -1389,7 +1399,8 @@ int main(int argc, char ** argv)
       assignments.emplace_back(argv[index]);
     }
     const pico_body_tianji::ParamMap params(assignments);
-    zenoh::Session session = zenoh::Session::open(zenoh::Config::create());
+    zenoh::Session session = zenoh::Session::open(
+      zenoh::Config::create_default());
     pico_body_tianji::TianjiKinematicSimNode node(session, params);
     node.run();
   } catch (const std::exception & exception) {

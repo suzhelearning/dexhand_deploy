@@ -36,58 +36,36 @@ if (( cc_major > 13 )); then
   exit 1
 fi
 
-# ROS Humble 开发环境来自 pixi ik-build（robostack-staging），
-# 必须通过 pixi run -e ik-build 执行本脚本。
+# 编译环境来自 pixi ik-build，必须通过 pixi run -e ik-build 执行本脚本。
 CONDA_PREFIX="${CONDA_PREFIX:-}"
 if [[ -z "${CONDA_PREFIX}" || ! -x "${CONDA_PREFIX}/bin/python" ]]; then
   printf '%s\n' '错误：请通过 pixi run -e ik-build 运行本脚本。' >&2
   exit 1
 fi
-ROS_SETUP="${CONDA_PREFIX}/setup.bash"
-if [[ ! -f "${ROS_SETUP}" ]]; then
-  printf '错误：缺少 pixi ROS Humble 环境：%s\n' "${ROS_SETUP}" >&2
-  exit 1
-fi
-for executable in "${CONDA_PREFIX}/bin/colcon" "${CONDA_PREFIX}/bin/cmake"; do
+for executable in "${CONDA_PREFIX}/bin/cmake"; do
   if [[ ! -x "${executable}" ]]; then
     printf '错误：缺少构建工具：%s\n' "${executable}" >&2
     exit 1
   fi
 done
 
-# robostack 的 setup.bash 不设置 PKG_CONFIG_PATH；
-# ROS 的 libyaml_vendor 等通过 pkg-config 找依赖，必须显式补上。
-export PKG_CONFIG_PATH="${CONDA_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
-
-# ROS 生成的 setup.bash 会读取若干可能未定义的跟踪变量。
-set +u
-# shellcheck disable=SC1091
-source "${ROS_SETUP}"
-set -u
-for package in \
-  ament_cmake \
-  ament_cmake_python \
-  ament_index_cpp \
-  geometry_msgs \
-  rclcpp \
-  sensor_msgs \
-  std_msgs \
-  tf2_ros \
-  visualization_msgs
-do
-  if [[ ! -f "${CONDA_PREFIX}/share/${package}/package.xml" ]]; then
-    printf '错误：缺少 ROS Humble 开发包：%s\n' "${package}" >&2
+# Zenoh C/C++ 绑定（vendored，不入 git）：libzenohc.so + 头文件。
+ZENOH_LIB="${BUNDLE_ROOT}/vendor/zenoh/lib/libzenohc.so"
+ZENOH_C_HEADER="${BUNDLE_ROOT}/vendor/zenoh/include/zenoh.h"
+ZENOH_CPP_HEADER="${BUNDLE_ROOT}/vendor/zenoh-cpp/include/zenoh.hxx"
+for required in "${ZENOH_LIB}" "${ZENOH_C_HEADER}" "${ZENOH_CPP_HEADER}"; do
+  if [[ ! -e "${required}" ]]; then
+    printf '错误：缺少 Zenoh 绑定：%s\n' "${required}" >&2
+    printf '%s\n' \
+      '  请从 eclipse-zenoh/zenoh-c release 1.10.0 下载' \
+      '  zenoh-c-1.10.0-x86_64-unknown-linux-gnu-standalone.zip 解压到' \
+      '  vendor/zenoh/（include/ 与 lib/），并把 zenoh-cpp 1.10.0 的' \
+      '  include/ 放到 vendor/zenoh-cpp/include/。' >&2
     exit 1
   fi
 done
-
-rclcpp_version="$({
-  sed -n 's/.*Found rclcpp: \([^ ]*\).*/\1/p' \
-    "${CONDA_PREFIX}/share/rclcpp/cmake/rclcppConfig.cmake"
-} | head -n 1)"
-if [[ "${rclcpp_version}" != 16.0.19 ]]; then
-  printf '错误：要求 rclcpp 16.0.19，当前为 %s。\n' \
-    "${rclcpp_version:-unknown}" >&2
+if ! "${CONDA_PREFIX}/bin/python" -c 'import zenoh' 2>/dev/null; then
+  printf '%s\n' '错误：ik-build 环境缺少 eclipse-zenoh（pixi install -e ik-build）。' >&2
   exit 1
 fi
 
@@ -151,4 +129,4 @@ if [[ "$(printf '%s\n%s\n' "3.4.29" "${runtime_cpp_max}" | sort -V | tail -n 1)"
 fi
 
 printf '%s\n' \
-  'IK 构建环境检查通过：Ubuntu 24.04 + GCC 13 + pixi ROS Humble 16.0.19 + Pinocchio 4.0.0。'
+  'IK 构建环境检查通过：Ubuntu 24.04 + GCC 13 + Pinocchio 4.0.0 + Zenoh 1.10.0。'
