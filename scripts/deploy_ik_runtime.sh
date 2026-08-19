@@ -92,12 +92,18 @@ mkdir -p \
   "${SDK_RUNTIME_ROOT}/CommonConfig" \
   "${RUNTIME_CONFIG}" \
   "${RUNTIME_SHARE}/launch"
-install -m 0755 \
-  "${SDK_LIBRARY}" \
-  "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so"
-install -m 0644 \
-  "${SDK_CONFIG}" \
-  "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
+# 允许 TIANJI_OFFICIAL_SDK_ROOT 指向 runtime 自身（自拷贝场景，
+# 例如 SDK 源机器不可用时）；源与目标相同则跳过。
+if [[ "$(realpath "${SDK_LIBRARY}")" != "$(realpath "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so")" ]]; then
+  install -m 0755 \
+    "${SDK_LIBRARY}" \
+    "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so"
+fi
+if [[ "$(realpath "${SDK_CONFIG}")" != "$(realpath "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg")" ]]; then
+  install -m 0644 \
+    "${SDK_CONFIG}" \
+    "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
+fi
 
 install -m 0755 "${NEW_IK}" "${RUNTIME_BIN}/tianji_kinematic_sim.bin.new"
 install -m 0755 "${NEW_PROBE}" "${RUNTIME_BIN}/tianji_official_ik_probe.bin.new"

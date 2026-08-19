@@ -62,6 +62,7 @@ target_link_libraries(
 add_library(
   tianji_official_native STATIC
   src/tianji_official/tianji_official_arm_ik.cpp
+  src/tianji_official/glibc_isoc23_strtol_shim.cpp
 )
 target_compile_features(tianji_official_native PUBLIC cxx_std_17)
 target_compile_options(tianji_official_native PRIVATE -Wall -Wextra -Wpedantic)
@@ -111,6 +112,14 @@ target_link_libraries(tianji_kinematic_sim arm_ik)
 target_link_libraries(tianji_official_ik_probe tianji_official_native)
 target_link_libraries(tianji_official_ik_worker tianji_official_native)
 target_link_libraries(pinocchio_qp_ik_probe arm_ik)
+# 便携 runtime 层为 glibc 2.35：把 glibc 2.38 的 __isoc23_strtol
+# 引用改接到 shim（见 glibc_isoc23_strtol_shim.cpp）。
+target_link_options(
+  tianji_official_ik_probe PRIVATE "-Wl,--wrap=__isoc23_strtol"
+)
+target_link_options(
+  tianji_official_ik_worker PRIVATE "-Wl,--wrap=__isoc23_strtol"
+)
 set_target_properties(
   tianji_official_ik_probe
   tianji_official_ik_worker

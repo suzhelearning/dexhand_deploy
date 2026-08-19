@@ -2,7 +2,7 @@
 name = "pico-tianji-real-teleop"
 version = "0.3.0"
 description = "PICO + SMPL + Pinocchio 到 Marvin 双臂遥操作与 RViz/MuJoCo 仿真"
-channels = ["conda-forge"]
+channels = ["conda-forge", "robostack-staging"]
 platforms = ["linux-64"]
 
 [dependencies]
@@ -22,23 +22,42 @@ real = { cmd = "bash scripts/run_real.sh", depends-on = ["doctor"] }
 real_controller_only = { cmd = "bash scripts/run_controller_only_real.sh", depends-on = ["doctor"] }
 status = { cmd = "bash scripts/status.sh", depends-on = ["doctor"] }
 pico-probe = "bash scripts/probe_pico.sh"
+pico-adb = { cmd = "bash scripts/adb_reverse.sh", description = "PICO 经 adb reverse 访问本机 XRoboToolkit 服务（60061/63901）" }
+pico-adb-down = { cmd = "bash scripts/adb_reverse.sh down", description = "移除 adb reverse 规则" }
 controller-only-joints = "bash scripts/watch_controller_only_joints.sh"
 controller-only-trace = "bash scripts/run_controller_only_trace.sh"
 controller-only-real-diagnostic = "bash scripts/run_controller_only_real_diagnostic.sh"
 replay-controller-only = { cmd = "bash scripts/run_controller_only_replay.sh", depends-on = ["doctor"] }
-sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --both", depends-on = ["doctor"] }
+sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --mujoco-only", depends-on = ["doctor"] }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
 
 # C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。
-# ROS Humble 开发包和 GCC 11 来自 Ubuntu 22.04 系统；脚本会在编译前
-# 严格检查它们与 runtime 的 ABI 版本。
+# ROS Humble 开发包来自 pixi（robostack-staging），编译器使用
+# Ubuntu 24.04 系统 GCC 13；脚本会在编译前严格检查它们与
+# runtime 的 ABI 版本。
 [feature.ik-build.dependencies]
-python = "3.10.*"
+python = "3.12.*"
+numpy = ">=2,<3"
 packaging = ">=24,<26"
 catkin_pkg = ">=1,<2"
 empy = "3.3.*"
 setuptools = "<80"
 pyyaml = ">=6,<7"
+cmake = ">=3.22"
+colcon-common-extensions = "*"
+eigen = "*"
+yaml = "*"
+ros-humble-ament-cmake = "*"
+ros-humble-ament-cmake-python = "*"
+ros-humble-ament-index-cpp = "*"
+ros-humble-geometry-msgs = "*"
+ros-humble-rclcpp = "*"
+ros-humble-sensor-msgs = "*"
+ros-humble-std-msgs = "*"
+ros-humble-tf2-ros = "*"
+urdfdom = "*"
+urdfdom_headers = "*"
+ros-humble-visualization-msgs = "*"
 
 [feature.ik-build.pypi-dependencies]
 pin = "==4.0.0"
