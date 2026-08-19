@@ -566,7 +566,8 @@ class MarvinHardwareBridge:
         if readiness.ready:
             self._phase = "armed_idle"
             self._log.warning(
-                "真机链路已就绪：保持安全零位，按右手柄 A 开始。"
+                "真机链路已就绪：保持安全零位，主机开始遥操作后跟随"
+                "（PICO 按右手柄 A / mocap 键盘按 s）。"
             )
 
     def _fail_startup(self, error: BaseException) -> None:
