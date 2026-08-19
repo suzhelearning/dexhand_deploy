@@ -315,7 +315,7 @@ find_conflicting_teleop_nodes() {
   local mode="${1:-all}"
   awk -v mode="${mode}" '
     {
-      host_node = ($0 ~ /^\/(pico_controller_input|pico_controller_only_input|tianji_kinematic_sim)$/)
+      host_node = ($0 ~ /^\/(pico_controller_input|pico_controller_only_input|mocap_keyboard_step|mocap_live|tianji_kinematic_sim)$/)
       output_node = ($0 ~ /^\/(marvin_hardware_bridge|tianji_world_output_node|tianji_arm_node)$/)
       if ((mode != "real" && host_node) || output_node) {
         if (!seen[$0]++) {
@@ -336,25 +336,23 @@ read_teleop_node_list() {
   fi
   # Zenoh liveliness 查询 tj/live/*，输出带前导斜杠的节点名（兼容旧检查）。
   python - <<'PY' 2>/dev/null
-import sys
-import threading
+import time
 import zenoh
 
 names = set()
-done = threading.Event()
-
-
-def handler(reply):
-    if reply.ok:
-        name = str(reply.result.key_expr).rsplit("/", 1)[-1]
-        names.add("/" + name)
-    done.set()
-
-
 session = zenoh.open(zenoh.Config())
 try:
-    session.liveliness().get("tj/live/*", handler, timeout=1.0)
-    done.wait(1.5)
+    # 不用 callback + “首条回复完成”事件：liveliness GET 可能返回
+    # 多个 token，收到第一条就返回会令真机链路检查随机漏节点。
+    # 分布式发现的单次完整 GET 也可能出现瞬态缺项；连续三次取并集，
+    # 对真机链路采用保守、稳定的完整视图。
+    for attempt in range(3):
+        for reply in session.liveliness().get("tj/live/*", timeout=1.0):
+            if reply.ok:
+                name = str(reply.result.key_expr).rsplit("/", 1)[-1]
+                names.add("/" + name)
+        if attempt < 2:
+            time.sleep(0.15)
 finally:
     session.close()
 for name in sorted(names):
@@ -462,6 +460,7 @@ assert_single_controller_only_simulation_host_chain() {
   local node_list=""
   local controller_only_count=0
   local smpl_count=0
+  local mocap_host_count=0
   local ik_count=0
   if [[ -v PICO_TIANJI_NODE_LIST_OVERRIDE ]]; then
     printf '%s\n' \
@@ -473,7 +472,6 @@ assert_single_controller_only_simulation_host_chain() {
       '拒绝连接真机：真机模式禁止跳过主机 ROS 链路检查。' >&2
     return 1
   fi
-  assert_managed_teleop_guard_alive controller-only-simulation
   if ! node_list="$(read_teleop_node_list)"; then
     printf '%s\n' \
       '错误：无法检查纯手柄仿真主机链路，拒绝连接真机。' >&2
@@ -524,6 +522,7 @@ assert_single_controller_only_simulation_host_chain() {
       '请先运行 pixi run sim_controller_only，并关闭其他仿真任务。' >&2
     return 1
   fi
+  assert_managed_teleop_guard_alive controller-only-simulation
 }
 
 yaml_params_for() {
