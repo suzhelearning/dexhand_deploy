@@ -32,9 +32,10 @@ fi
 source "${SCRIPT_DIR}/common.sh"
 
 WITH_MUJOCO=true
-LEFT_RIGID_ID=1
-RIGHT_RIGID_ID=2
-CONNECT_ENDPOINT="tcp/127.0.0.1:7447"
+LEFT_RIGID_ID="left_wrist"
+RIGHT_RIGID_ID="right_arm"
+CONNECT_ENDPOINT=""
+SIDE=right
 MUJOCO_PID=""
 SIM_PID=""
 
@@ -47,10 +48,11 @@ usage() {
 模式：
   --mujoco-only         同时启动 IK、MuJoCo 预览与动捕实时驱动（默认）
   --topics-only         只启动 IK 与动捕实时驱动（无界面）
-  --left-rigid-id N     左手腕 Motive 刚体 ID（默认 1）
-  --right-rigid-id N    右手腕 Motive 刚体 ID（默认 2）
-  --connect-endpoint EP zenohd Router 端点（默认 tcp/127.0.0.1:7447；
-                         空字符串则用默认本机 scouting）
+  --left-rigid-id SPEC   左臂 Motive 刚体：数字 id 或刚体名（默认 left_wrist）
+  --right-rigid-id SPEC  右臂 Motive 刚体：数字 id 或刚体名（默认 right_arm）
+  --connect-endpoint EP zenohd Router 端点（默认空=本机 scouting；
+                         仅当 scouting 不可达时才需显式连 router）
+  --side SIDE            控制侧：right（仅右臂，默认）/ both（双臂同步）
   -h, --help
 
 本脚本只启动纯运动学仿真，不加载 Marvin SDK，不连接实体机械臂。
@@ -90,6 +92,22 @@ while (($#)); do
         exit 2
       fi
       CONNECT_ENDPOINT="$2"
+      shift
+      ;;
+    --side)
+      if (($# < 2)); then
+        printf '%s\n' '错误：--side 缺少数值。' >&2
+        usage >&2
+        exit 2
+      fi
+      case "$2" in
+        right|both) SIDE="$2" ;;
+        *)
+          printf '错误：--side 必须是 right 或 both，实际 %s\n' "$2" >&2
+          usage >&2
+          exit 2
+          ;;
+      esac
       shift
       ;;
     -h|--help)
@@ -162,8 +180,8 @@ register_teleop_process_group "${SIM_PID}" sim-ik-solver 5
 
 printf '%s\n' \
   '启动 mocap 动捕实时驱动（Zenoh）：Motive 位姿 → 参考增量 → IK' \
-  "  左右手腕刚体 id=${LEFT_RIGID_ID}/${RIGHT_RIGID_ID}  " \
-  "Router=${CONNECT_ENDPOINT}  MuJoCo=${WITH_MUJOCO}" \
+  "  左右手腕刚体 id=${LEFT_RIGID_ID}/${RIGHT_RIGID_ID}  side=${SIDE}" \
+  "  Router=${CONNECT_ENDPOINT:-<scouting>}  MuJoCo=${WITH_MUJOCO}" \
   '该任务不会连接 Marvin 控制器。'
 
 # 动捕实时节点前台运行：stdin 直连终端（raw 模式读键）。
@@ -172,6 +190,7 @@ printf '%s\n' \
   --param "rate:=60" \
   --left-rigid-id "${LEFT_RIGID_ID}" \
   --right-rigid-id "${RIGHT_RIGID_ID}" \
+  --side "${SIDE}" \
   --connect-endpoint "${CONNECT_ENDPOINT}"
 LIVE_EXIT=$?
 

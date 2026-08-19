@@ -109,16 +109,33 @@ class MocapLiveNode:
         left_rigid_id: int = 1,
         right_rigid_id: int = 2,
         rate: float = 60.0,
+        side: str = "right",
     ) -> None:
         if rate <= 0.0:
             raise ValueError("rate must be positive")
-        if left_rigid_id <= 0 or right_rigid_id <= 0:
-            raise ValueError("rigid ids must be positive")
+        for label, spec in (
+            ("left_rigid_id", left_rigid_id),
+            ("right_rigid_id", right_rigid_id),
+        ):
+            if isinstance(spec, int):
+                if spec <= 0:
+                    raise ValueError(f"{label} must be positive")
+            elif not isinstance(spec, str) or not spec.strip():
+                raise ValueError(
+                    f"{label} 必须是正整数或刚体名，实际 {spec!r}"
+                )
+        if side not in ("right", "both"):
+            raise ValueError(f"side 必须是 right/both 之一，实际 {side!r}")
         self._session = session
         self._rate = rate
+        self._side = side
         self._rigid_ids = {
-            "left": int(left_rigid_id),
-            "right": int(right_rigid_id),
+            "left": int(left_rigid_id)
+            if isinstance(left_rigid_id, int)
+            else str(left_rigid_id).strip(),
+            "right": int(right_rigid_id)
+            if isinstance(right_rigid_id, int)
+            else str(right_rigid_id).strip(),
         }
 
         conditioning_settings = TargetConditioningSettings(
@@ -180,8 +197,12 @@ class MocapLiveNode:
         self._frame_sub = ZenohJsonSub(
             session, FRAME_KEY, self._on_mocap_frame
         )
-        # 刚体名 → ID（可选，用于日志/校验）。
+        # 刚体名 → ID（natnet-zenoh 发布，异步到达；参数可用名字）。
         self._rigid_body_names: dict[int, str] = {}
+        self._names_sub = ZenohJsonSub(
+            session, RIGID_BODY_NAMES_KEY, self._on_rigid_body_names
+        )
+        self._missing_rigid_warned: set[str] = set()
 
         self._phase = "armed"
         self._phase_started = time.monotonic()
@@ -197,12 +218,14 @@ class MocapLiveNode:
         )
         self._keyboard_thread.start()
 
+        side_label = "仅右臂" if side == "right" else "双臂同步"
         _LOG.info(
-            "mocap 动捕实时驱动已就绪：订阅 %s（手腕刚体 id=%d/%d），"
-            "按 s 记录参考开始，跟随中再按 s 回 Home，q 退出",
+            "mocap 动捕实时驱动已就绪：订阅 %s（刚体 %s/%s），"
+            "控制 %s；按 s 记录参考开始，跟随中再按 s 回 Home，q 退出",
             FRAME_KEY,
-            left_rigid_id,
-            right_rigid_id,
+            self._rigid_ids["left"],
+            self._rigid_ids["right"],
+            side_label,
         )
 
     # -- 动捕帧 -------------------------------------------------------------
@@ -212,9 +235,40 @@ class MocapLiveNode:
             self._latest_frame = frame
             self._latest_received_monotonic = time.monotonic()
 
+    def _on_rigid_body_names(self, mapping: dict) -> None:
+        # natnet-zenoh 发布格式：{"names": {str(id): name}}
+        payload = mapping.get("names", mapping)
+        with self._frame_lock:
+            self._rigid_body_names = {
+                int(rid): str(name)
+                for rid, name in payload.items()
+            }
+        _LOG.info("刚体名映射已更新：%s", self._rigid_body_names)
+
+    def _resolve_rigid_id(self, side: str) -> int | None:
+        """刚体参数（int id 或名字）→ 当前 id；名字未发布返回 None。"""
+        spec = self._rigid_ids[side]
+        if isinstance(spec, int):
+            return spec
+        with self._frame_lock:
+            for rid, name in self._rigid_body_names.items():
+                if name == spec:
+                    return rid
+        if side not in self._missing_rigid_warned:
+            self._missing_rigid_warned.add(side)
+            _LOG.warning(
+                "刚体名 %r 尚未从 %s 解析（确认 Windows natnet-zenoh "
+                "发布器已运行）",
+                spec,
+                RIGID_BODY_NAMES_KEY,
+            )
+        return None
+
     def _side_pose(self, frame: dict, side: str) -> np.ndarray | None:
-        """取单侧手腕位姿（Motive 系 7 向量）；无效/缺失返回 None。"""
-        rigid_id = self._rigid_ids[side]
+        """取单侧刚体位姿（Motive 系 7 向量）；无效/缺失返回 None。"""
+        rigid_id = self._resolve_rigid_id(side)
+        if rigid_id is None:
+            return None
         for body in frame.get("rigid_bodies", []):
             if body.get("id") != rigid_id:
                 continue
@@ -272,9 +326,12 @@ class MocapLiveNode:
             if poses["left"] is None and poses["right"] is None:
                 _LOG.warning("键盘 's'：当前帧无有效手腕刚体，拒绝开始")
                 return
-            # 缺失侧保持 Home（不发目标）；mapper 参考帧缺失侧用
-            # 零点，增量恒为零。
-            self._reference = poses
+            # 只控制右臂时左臂恒用零点参考（增量恒零，左目标不发布，
+            # IK 左臂保持 Home）。
+            self._reference = {
+                side: poses[side]
+                for side in ("left", "right")
+            }
             self._mapper.initialize(
                 ControllerFrame.from_poses(
                     self._reference["left"]
@@ -332,6 +389,7 @@ class MocapLiveNode:
                 "at_safe_home": state == "idle",
                 "left_rigid_id": self._rigid_ids["left"],
                 "right_rigid_id": self._rigid_ids["right"],
+                "side": self._side,
                 "error": None,
             }
         )
@@ -370,7 +428,8 @@ class MocapLiveNode:
 
     def _publish_targets(self, targets: ControllerOnlyTargets) -> None:
         stamp = stamp_now()
-        for side in ("left", "right"):
+        sides = ("right",) if self._side == "right" else ("left", "right")
+        for side in sides:
             pose = (
                 targets.left_pose
                 if side == "left"
@@ -416,12 +475,16 @@ class MocapLiveNode:
         }
         if poses["left"] is None and poses["right"] is None:
             return True
-        # 单侧缺失：该侧恒用参考位姿（增量恒零），目标不发布该侧。
-        left_pose = (
-            poses["left"]
-            if poses["left"] is not None
-            else self._reference_pose()
-        )
+        # 只控制右臂时左臂恒用零点参考（增量恒零，左目标不发布）。
+        # 单侧缺失同理：该侧恒用参考位姿（增量恒零）。
+        if self._side == "right":
+            left_pose = self._reference_pose()
+        else:
+            left_pose = (
+                poses["left"]
+                if poses["left"] is not None
+                else self._reference_pose()
+            )
         right_pose = (
             poses["right"]
             if poses["right"] is not None
@@ -464,6 +527,9 @@ class MocapLiveNode:
             "elbow_constraint": "published_default_zsp_backend_selected",
             "smpl_used": False,
             "motion_trackers_required": True,
+            "left_rigid_id": self._rigid_ids["left"],
+            "right_rigid_id": self._rigid_ids["right"],
+            "side": self._side,
             "tracking": tracking,
             "target_conditioning": self._last_conditioning,
             "error": None,
@@ -497,6 +563,7 @@ class MocapLiveNode:
         finally:
             try:
                 self._frame_sub.close()
+                self._names_sub.close()
                 for pub in (
                     *self._pose_pubs.values(),
                     *self._elbow_pubs.values(),
@@ -518,25 +585,34 @@ def main(argv=None) -> int:
     args = parse_cli_args(
         extra={
             "--left-rigid-id": {
-                "type": int,
-                "default": 1,
-                "help": "左手腕 Motive 刚体 ID（默认 1）",
+                "type": str,
+                "default": "left_wrist",
+                "help": "左臂 Motive 刚体：数字 id 或刚体名（默认 left_wrist）",
             },
             "--right-rigid-id": {
-                "type": int,
-                "default": 2,
-                "help": "右手腕 Motive 刚体 ID（默认 2）",
+                "type": str,
+                "default": "right_arm",
+                "help": "右臂 Motive 刚体：数字 id 或刚体名（默认 right_arm）",
             },
             "--rate": {
                 "type": float,
                 "default": 60.0,
                 "help": "映射器采样率 Hz（默认 60）",
             },
+            "--side": {
+                "choices": ("right", "both"),
+                "default": "right",
+                "help": "控制侧（默认 right：仅右臂，左臂保持 Home；"
+                        "both：双臂同步）",
+            },
             "--connect-endpoint": {
                 "type": str,
-                "default": "tcp/127.0.0.1:7447",
-                "help": "zenohd Router 端点（Motive 数据经 natnet-zenoh "
-                        "发布到该 Router；空则用默认本机 scouting）",
+                "default": "",
+                "help": "zenohd Router 端点（默认空=本机 scouting；"
+                        "Motive 数据经 router ACL 放行的 mocap/** 转发"
+                        "到 scouting 网络即可收到；仅当 scouting 不可达"
+                        "时才需显式连 router，但 router ACL 不放行 "
+                        "tj/live/**，会破坏真机链路 liveliness 检查）",
             },
         }
     )
@@ -569,12 +645,19 @@ def main(argv=None) -> int:
     else:
         session = open_session()
     _assert_replay_graph_is_safe(session)
+    def _parse_rigid_spec(spec: str):
+        try:
+            return int(spec)
+        except ValueError:
+            return spec
+
     node = MocapLiveNode(
         session,
         params,
-        left_rigid_id=args.left_rigid_id,
-        right_rigid_id=args.right_rigid_id,
+        left_rigid_id=_parse_rigid_spec(args.left_rigid_id),
+        right_rigid_id=_parse_rigid_spec(args.right_rigid_id),
         rate=args.rate,
+        side=args.side,
     )
     try:
         _LOG.warning(
