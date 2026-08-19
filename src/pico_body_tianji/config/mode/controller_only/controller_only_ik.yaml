@@ -44,6 +44,23 @@ mocap_h5_replay:
     left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
     right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
 
+# mocap 键盘步进节点：目标整形参数与 mocap_h5_replay 保持一致
+# （1:1 验收/标定模式），修改时同步两处。
+mocap_keyboard_step:
+  ros__parameters:
+    min_cutoff: 1.2
+    beta: 0.45
+    translation_gain: [1.0, 1.0, 1.0]
+    rotation_gain: 1.0
+    workspace_relative_radii_m: [0.42, 0.38, 0.38]
+    workspace_soft_zone_ratio: 0.90
+    maximum_linear_speed_m_s: 0.36
+    maximum_angular_speed_rad_s: 1.55
+    maximum_linear_acceleration_m_s2: 3.5
+    maximum_angular_acceleration_rad_s2: 9.0
+    left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
+    right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
+
 tianji_kinematic_sim:
   ros__parameters:
     # 仅手柄模式只在这里选择 IK：

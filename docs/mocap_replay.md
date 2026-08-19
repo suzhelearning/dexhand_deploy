@@ -104,6 +104,25 @@ pixi run sim_mocap_step -- --step-mm 5              # 每次 5mm
 步进模式同样可作为真机桥主机输入（身份 `mocap_keyboard_step` 被
 readiness 与主机链检查显式接受），用于键盘逐点驱动的真机位移验收。
 
+## 仿真运行方式
+
+两种方式：
+
+**1. 正式入口（需部署）**：`pixi run sim_mocap_step` /
+`pixi run sim_mocap -- TAKE.h5`。首次需
+`pixi install --locked -e ik-build` + `pixi run -e ik-build build-ik` +
+`pixi run -e ik-build deploy-ik`，并跑 `doctor`（含厂商完整性校验）。
+
+**2. 源码直跑（无需构建）**：`bash scripts/run_mocap_step_dev.sh`
+（键盘步进；`--topics-only` / `--mujoco-only` / `--step-mm N`）。
+结构：MuJoCo/IK 后台受管，**步进节点前台运行**（stdin 直连终端，
+raw 键盘直接可用，不经 ros2 launch——其子进程 stdin 不直连终端）。
+注意：本机（2026-08-19）vendor 已更新为较新版本，与仓库
+`VENDOR_SHA256SUMS`（7-31 release 清单）不匹配，`doctor` 完整性
+校验会失败；dev 脚本跳过 `doctor`（`activate_bundle_runtime` 仍
+检查关键 ROS 运行时）。正式入口仍走 `doctor`——如需恢复，把本地
+vendor 与清单对齐（更新 `VENDOR_SHA256SUMS` 或换回匹配的 vendor）。
+
 ## 数据链路
 
 ```
