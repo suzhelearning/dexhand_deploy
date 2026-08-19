@@ -8,6 +8,7 @@
     左 ← 动捕 +x        右 ← 动捕 -x
     '1' ← 动捕 +y       '0' ← 动捕 -y
     's' 开始回放（armed 时）/ 结束并回 Home（步进中）
+    'q' / Ctrl+C 退出（步进中先回 Home 再退出）
 
 命令经与在线 PICO 相同的映射链路（增量相对参考帧 → pico_to_robot →
 world→chest → One-Euro → 1:1 目标整形）经 Zenoh 发布到
@@ -197,6 +198,7 @@ class MocapKeyboardStepNode:
             "right": None,
         }
         self._stop_event = threading.Event()
+        self._quit = False
         self._keyboard_thread = threading.Thread(
             target=self._keyboard_loop, daemon=True
         )
@@ -218,6 +220,9 @@ class MocapKeyboardStepNode:
     def _on_key(self, byte: str) -> None:
         event = self._parser.feed(byte)
         if event is None:
+            return
+        if event in ("\x03", "q"):  # Ctrl+C / q：raw 模式无 SIGINT，自行退出
+            self._handle_interrupt()
             return
         if event == "s":
             if self._phase == "armed":
@@ -254,6 +259,17 @@ class MocapKeyboardStepNode:
             delta_mm[1],
             delta_mm[2],
         )
+
+    def _handle_interrupt(self) -> None:
+        """q / Ctrl+C 退出：步进中先回 Home（安全），否则直接退出。"""
+        if self._phase == "stepping":
+            self._phase = "returning"
+            self._phase_started = time.monotonic()
+            _LOG.info("按键 q/Ctrl+C：请求结束并回 Home")
+            return
+        _LOG.info("按键 q/Ctrl+C：退出")
+        self._quit = True
+        self._stop_event.set()
 
     def _stop(self) -> None:
         self._stop_event.set()
@@ -403,6 +419,8 @@ class MocapKeyboardStepNode:
         next_tick = time.monotonic() + tick_interval
         next_status = next_tick + status_interval
         while True:
+            if self._quit:
+                return 0
             now = time.monotonic()
             if now >= next_tick:
                 if not self._tick():
@@ -477,7 +495,8 @@ def main(argv=None) -> int:
     try:
         _LOG.warning(
             "等待键盘 's' 开始步进；步进中方向键/1/0 每次移动 %g mm，"
-            "再按 's' 结束回 Home；该身份可配合真机桥做验收",
+            "再按 's' 结束回 Home，按 'q' 退出；"
+            "该身份可配合真机桥做验收",
             args.step_mm,
         )
         return node.run()
