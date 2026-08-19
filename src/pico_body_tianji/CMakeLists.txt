@@ -166,6 +166,7 @@ install(
     scripts/controller_only_trace
     scripts/controller_only_real_diagnostic
     scripts/marvin_hardware_bridge
+    scripts/mocap_keyboard_step
     scripts/mujoco_joint_viewer.py
   DESTINATION lib/${PROJECT_NAME}
 )

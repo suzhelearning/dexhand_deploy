@@ -158,6 +158,7 @@ Pixi 负责锁定 Python、Pinocchio（pin）和 eclipse-zenoh 绑定；构建�
 | --- | --- | --- | --- |
 | PICO + SMPL 全身链路 | `src/pico_body_tianji/config/mode/full_body/preview.yaml` | `pixi run sim` | `pixi run real` |
 | 纯手柄链路 | `src/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml` | `pixi run sim_controller_only` | `pixi run real_controller_only` |
+| mocap 键盘步进 | `src/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml` | `pixi run sim_mocap_step` | —（真机桥主机输入） |
 
 配置先按运行模式分组；每种模式各有一个 Sim/IK 配置和一个 Real 配置：
 
@@ -186,8 +187,8 @@ tianji_kinematic_sim:
 段内直接平铺参数。
 
 因此运行命令始终只有
-`sim`、`real`、`sim_controller_only`、`real_controller_only` 四个，
-不会把模式名与 IK 名组合成新命令。
+`sim`、`real`、`sim_controller_only`、`real_controller_only`、
+`sim_mocap_step` 五个，不会把模式名与 IK 名组合成新命令。
 
 官方库路径和机型配置保持空字符串即可，运行时包装器会使用项目内的
 `runtime/tianji_official`。修改完成后，在项目根目录依次执行：
@@ -543,12 +544,42 @@ key，不发布控制命令；结束后会打印输入速度/加速度、椭球�
 | `pixi run sim` | 同时启动仿真链路与 MuJoCo 预览 | 否 |
 | `pixi run real -- --confirm-real` | 复用正在运行的 sim，启动真机桥 | **是** |
 | `pixi run sim_controller_only` | 纯手柄 IK 的 MuJoCo 仿真 | 否 |
+| `pixi run sim_mocap_step` | mocap 键盘步进控制（动捕系 10mm/键，s 启停） | 否 |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
 
 `doctor`、`test`、`pico-probe`、`status`、`controller-only-joints` 和
 `controller-only-real-diagnostic` 是检查/观测工具，不是新的运行模式。
 `sim` 两个入口均可追加 `-- --mujoco-only` 或 `-- --topics-only`，
 但入口名不变。
+
+## mocap 键盘步进控制（sim_mocap_step）
+
+不用 PICO、不回放 h5：键盘在**动捕坐标系**（Motive，y-up）里给
+机器人末端目标增量，每次按键 10mm（`--step-mm` 可调），目标经
+Zenoh 发布（`/pico_body/{left,right}_arm_target_pose`）送入可配置
+IK，按键后 0.5s 持续映射让滤波/整形收敛到完整步长。
+
+| 按键 | 动捕系方向 | 按键 | 动捕系方向 |
+| --- | --- | --- | --- |
+| 上 ↑ | +z | 下 ↓ | -z |
+| 左 ← | +x | 右 → | -x |
+| `1` | +y | `0` | -y |
+| `s` | 开始（armed 时） | `s` | 结束回 Home（步进中） |
+
+**默认只控制右臂**（左臂目标不发布，IK 对无目标的臂保持当前关节角）；
+`--side both` 恢复双臂同步。可作真机桥主机输入（身份
+`mocap_keyboard_step` 不在真机桥冲突名单内）。
+
+```bash
+pixi run sim_mocap_step                     # MuJoCo 预览 + 键盘步进
+pixi run sim_mocap_step -- --topics-only    # 无界面，仅右臂
+pixi run sim_mocap_step -- --side both      # 双臂同步
+pixi run sim_mocap_step -- --step-mm 5      # 每次 5mm
+```
+
+方向键在 raw 模式是 `\x1b[A/B/C/D` 转义序列，由 `ArrowKeyParser`
+解析；步进节点前台运行，stdin 直连终端（raw 模式读键），不经过
+launch/FIFO 转发。
 
 ## 控制原理
 
