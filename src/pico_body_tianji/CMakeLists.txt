@@ -1,16 +1,28 @@
 cmake_minimum_required(VERSION 3.16)
 project(pico_body_tianji)
 
-find_package(ament_cmake REQUIRED)
-find_package(ament_cmake_python REQUIRED)
-find_package(ament_index_cpp REQUIRED)
+# Zenoh（zenoh-c + zenoh-cpp）vendored 于仓库根 vendor/ 下：
+#   vendor/zenoh/include        zenoh-c 头文件
+#   vendor/zenoh/lib            libzenohc.so
+#   vendor/zenoh-cpp/include    zenoh-cpp（header-only）
+get_filename_component(
+  ZENOH_ROOT
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/zenoh"
+  REALPATH
+)
+get_filename_component(
+  ZENOH_CPP_ROOT
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/zenoh-cpp"
+  REALPATH
+)
+if(NOT EXISTS "${ZENOH_ROOT}/lib/libzenohc.so")
+  message(FATAL_ERROR "缺少 vendor/zenoh/lib/libzenohc.so（zenoh-c 1.10.0 standalone 包）")
+endif()
+if(NOT EXISTS "${ZENOH_CPP_ROOT}/include/zenoh.hxx")
+  message(FATAL_ERROR "缺少 vendor/zenoh-cpp/include（zenoh-cpp 1.10.0 头文件）")
+endif()
+
 find_package(Eigen3 REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(tf2_ros REQUIRED)
-find_package(visualization_msgs REQUIRED)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 execute_process(
@@ -58,7 +70,7 @@ target_link_libraries(
 )
 
 # 厂商 libKine 与 Pinocchio 的依赖闭包不能安全共存。native 库只链接
-# Eigen/dl，供独立 worker 和 probe 使用；ROS 主节点内使用 IPC proxy。
+# Eigen/dl，供独立 worker 和 probe 使用；主节点内使用 IPC proxy。
 add_library(
   tianji_official_native STATIC
   src/tianji_official/tianji_official_arm_ik.cpp
@@ -75,8 +87,7 @@ target_link_libraries(
   tianji_official_native PUBLIC Eigen3::Eigen ${CMAKE_DL_LIBS}
 )
 
-# 该节点名称沿用已验证的话题兼容名；它只做所选后端的 IK/FK，
-# 不直接连接机械臂。RViz/MuJoCo 与真机桥接仅订阅其输出。
+# 该节点只做所选后端的 IK/FK，不直接连接机械臂；通讯走 Zenoh。
 add_executable(
   tianji_kinematic_sim src/tianji_kinematic_sim_node.cpp
 )
@@ -108,7 +119,13 @@ target_compile_options(
 target_compile_options(
   pinocchio_qp_ik_probe PRIVATE -Wall -Wextra -Wpedantic
 )
-target_link_libraries(tianji_kinematic_sim arm_ik)
+target_include_directories(
+  tianji_kinematic_sim PRIVATE
+    "${ZENOH_CPP_ROOT}/include"
+    "${ZENOH_ROOT}/include"
+)
+target_compile_definitions(tianji_kinematic_sim PRIVATE ZENOHCXX_ZENOHC)
+target_link_libraries(tianji_kinematic_sim arm_ik "${ZENOH_ROOT}/lib/libzenohc.so")
 target_link_libraries(tianji_official_ik_probe tianji_official_native)
 target_link_libraries(tianji_official_ik_worker tianji_official_native)
 target_link_libraries(pinocchio_qp_ik_probe arm_ik)
@@ -127,18 +144,6 @@ set_target_properties(
     SKIP_BUILD_RPATH TRUE
     INSTALL_RPATH ""
 )
-ament_target_dependencies(
-  tianji_kinematic_sim
-  ament_index_cpp
-  geometry_msgs
-  rclcpp
-  sensor_msgs
-  std_msgs
-  tf2_ros
-  visualization_msgs
-)
-
-ament_python_install_package(${PROJECT_NAME})
 
 install(
   TARGETS
@@ -161,11 +166,14 @@ install(
     scripts/controller_only_trace
     scripts/controller_only_real_diagnostic
     scripts/marvin_hardware_bridge
+    scripts/mujoco_joint_viewer.py
   DESTINATION lib/${PROJECT_NAME}
 )
 install(
-  DIRECTORY assets config launch rviz
+  DIRECTORY pico_body_tianji
+  DESTINATION lib/python3.10/site-packages
+)
+install(
+  DIRECTORY assets config
   DESTINATION share/${PROJECT_NAME}
 )
-
-ament_package()

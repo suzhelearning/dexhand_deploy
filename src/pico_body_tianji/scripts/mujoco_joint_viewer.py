@@ -2,18 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 import time
 
 import mujoco
 import mujoco.viewer
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import JointState
+import zenoh
 
 from pico_body_tianji.joint_state_model import urdf_joint_names
 from pico_body_tianji.mujoco_joint_state import apply_joint_positions
 from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
+from pico_body_tianji.zenoh_util import ZenohJsonSub, key, open_session, parse_cli_args
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,24 +25,30 @@ DEFAULT_URDF = (
     / "marvin_m6_s_ccs_696_v4_mujoco.urdf"
 )
 
+_LOG = logging.getLogger("pico_body_mujoco_viewer")
 
-class MujocoJointMirror(Node):
+
+class MujocoJointMirror:
     """把隔离预览关节状态镜像到 MuJoCo qpos，不执行动力学。"""
 
-    def __init__(self, model, topic: str):
-        super().__init__("pico_body_mujoco_viewer")
+    def __init__(self, session, model, topic: str):
         self._qpos_addresses = _qpos_addresses(model)
         self._pending: tuple[list[str], list[float]] | None = None
         self._received_once = False
-        self.create_subscription(JointState, topic, self._on_joint_state, 10)
-        self.get_logger().info(f"等待只读关节状态：{topic}")
+        self._sub = ZenohJsonSub(
+            session,
+            key(topic),
+            self._on_joint_state,
+            reliability=zenoh.Reliability.RELIABLE,
+        )
+        _LOG.info("等待只读关节状态：%s", topic)
 
     @property
     def received_once(self) -> bool:
         return self._received_once
 
-    def _on_joint_state(self, msg: JointState) -> None:
-        self._pending = (list(msg.name), list(msg.position))
+    def _on_joint_state(self, msg: dict) -> None:
+        self._pending = (list(msg["name"]), list(msg["position"]))
 
     def apply_latest(self, data) -> int:
         pending = self._pending
@@ -58,10 +64,14 @@ class MujocoJointMirror(Node):
         )
         if count and not self._received_once:
             self._received_once = True
-            self.get_logger().info(
-                f"已接收 {count} 个关节；MuJoCo 开始镜像预览"
-            )
+            _LOG.info("已接收 %d 个关节；MuJoCo 开始镜像预览", count)
         return count
+
+    def close(self) -> None:
+        try:
+            self._sub.close()
+        except Exception:
+            pass
 
 
 def _qpos_addresses(model) -> dict[str, int]:
@@ -79,21 +89,19 @@ def _qpos_addresses(model) -> dict[str, int]:
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(
-        description="只读镜像 PICO Body 天机预览关节到 MuJoCo"
+    return parse_cli_args(
+        extra={
+            "--urdf": {
+                "type": Path,
+                "default": DEFAULT_URDF,
+                "help": "MuJoCo 专用 Marvin URDF",
+            },
+            "--topic": {
+                "default": "/pico_body_sim/model_joint_states",
+                "help": "JointState JSON 输入话题",
+            },
+        }
     )
-    parser.add_argument(
-        "--urdf",
-        type=Path,
-        default=DEFAULT_URDF,
-        help="MuJoCo 专用 Marvin URDF",
-    )
-    parser.add_argument(
-        "--topic",
-        default="/pico_body_sim/model_joint_states",
-        help="sensor_msgs/JointState 输入话题",
-    )
-    return parser.parse_args()
 
 
 def main() -> None:
@@ -103,8 +111,8 @@ def main() -> None:
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
 
-    rclpy.init()
-    node = MujocoJointMirror(model, args.topic)
+    session = open_session()
+    mirror = MujocoJointMirror(session, model, args.topic)
     started = time.monotonic()
     warned = False
     try:
@@ -114,29 +122,28 @@ def main() -> None:
             viewer.cam.azimuth = 135.0
             viewer.cam.elevation = -18.0
 
-            while viewer.is_running() and rclpy.ok():
-                rclpy.spin_once(node, timeout_sec=0.01)
+            while viewer.is_running():
                 with viewer.lock():
-                    if node.apply_latest(data):
+                    if mirror.apply_latest(data):
                         mujoco.mj_forward(model, data)
                 viewer.sync()
                 if (
-                    not node.received_once
+                    not mirror.received_once
                     and not warned
                     and time.monotonic() - started > 3.0
                 ):
-                    node.get_logger().warning(
-                        "尚未收到预览关节；请先运行 run_preview.sh"
-                    )
+                    _LOG.warning("尚未收到预览关节；请先运行 run_preview.sh")
                     warned = True
                 time.sleep(1.0 / 60.0)
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        mirror.close()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     main()

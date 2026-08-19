@@ -6,36 +6,23 @@ BUNDLE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 CONDA_PREFIX="${CONDA_PREFIX:-}"
 if [[ -z "${CONDA_PREFIX}" || ! -x "${CONDA_PREFIX}/bin/python" ]]; then
-  printf '%s\n' '错误：请通过 pixi run -e ik-build 运行本脚本。' >&2
+  printf '%s\n' '错误：请在 pixi ik-build 环境中运行（pixi run -e ik-build build-ik）。' >&2
   exit 1
 fi
-
-# robostack 的 setup.bash 不设置 PKG_CONFIG_PATH；
-# ROS 的 libyaml_vendor 等通过 pkg-config 找依赖，必须显式补上。
-export PKG_CONFIG_PATH="${CONDA_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
-
-set +u
-# shellcheck disable=SC1091
-source "${CONDA_PREFIX}/setup.bash"
-set -u
 
 export CC=/usr/bin/gcc
 export CXX=/usr/bin/g++
 
 cd "${BUNDLE_ROOT}"
-"${CONDA_PREFIX}/bin/colcon" --log-base log/ik build \
-  --base-paths src \
-  --packages-select pico_body_tianji \
-  --build-base build/ik \
-  --install-base staging/ik \
-  --merge-install \
-  --cmake-force-configure \
-  --event-handlers console_direct+ \
-  --cmake-args \
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-    -DCMAKE_C_COMPILER=/usr/bin/gcc \
-    -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
-    -DPython3_EXECUTABLE="$(command -v python)"
+rm -rf build/ik
+cmake -S src/pico_body_tianji -B build/ik \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_C_COMPILER=/usr/bin/gcc \
+  -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
+  -DPython3_EXECUTABLE="$(command -v python)" \
+  -DCMAKE_INSTALL_PREFIX="${BUNDLE_ROOT}/staging/ik"
+cmake --build build/ik --parallel "$(nproc)"
+cmake --install build/ik
 
 ik_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_kinematic_sim"
 probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_probe"

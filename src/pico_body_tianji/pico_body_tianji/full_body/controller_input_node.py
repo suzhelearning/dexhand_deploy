@@ -1,73 +1,71 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
-
-import rclpy
-from geometry_msgs.msg import PoseStamped, Vector3Stamped
-from rclpy.node import Node
-from std_msgs.msg import Bool, String
-from visualization_msgs.msg import MarkerArray
 
 from tianji_world_output.config_loader import TianjiConfig
 
 from .controller_mapper import ControllerTargets, ControllerTeleopMapper
 from .controller_source import XRoboControllerSource
 from ..freshness import FreshnessGate
-from ..qos import LATCHED_QOS
 from ..teleop_state import TeleopStateMachine
-from .visualization import (
-    arm_angle_constraint_markers,
-    body_skeleton_markers,
-    input_endpoint_markers,
-    smpl_skeleton_markers,
+from ..zenoh_util import (
+    LatchedKey,
+    ZenohPub,
+    key,
+    load_node_config,
+    open_session,
+    parse_cli_args,
+    parse_param_override,
+    stamp_now,
 )
 
+_LOG = logging.getLogger("pico_controller_input")
 
-class PicoControllerInputNode(Node):
+DEFAULT_PARAMETERS = {
+    "rate": 90.0,
+    "stale_timeout": 0.5,
+    "require_reliable_timestamp": True,
+    "allow_unstamped_preview": False,
+    "min_cutoff": 1.0,
+    "beta": 0.7,
+    "elbow_min_cutoff": 0.3,
+}
+
+
+class PicoControllerInputNode:
     """PICO 双手柄相对末端遥操作输入，仅发布隔离的预览目标。"""
 
-    def __init__(self):
-        super().__init__("pico_controller_input")
-        self.declare_parameter("rate", 90.0)
-        self.declare_parameter("stale_timeout", 0.5)
-        self.declare_parameter("require_reliable_timestamp", True)
-        self.declare_parameter("allow_unstamped_preview", False)
-        self.declare_parameter("min_cutoff", 1.0)
-        self.declare_parameter("beta", 0.7)
-        self.declare_parameter("elbow_min_cutoff", 0.3)
+    def __init__(self, session, params):
+        self._session = session
+        self._log = _LOG
 
-        rate = float(self.get_parameter("rate").value)
-        require_reliable = bool(
-            self.get_parameter("require_reliable_timestamp").value
+        rate = float(params["rate"])
+        if rate <= 0.0:
+            raise ValueError("rate must be positive")
+        self._rate = rate
+        self._require_reliable_timestamp = bool(
+            params["require_reliable_timestamp"]
         )
-        allow_unstamped = bool(
-            self.get_parameter("allow_unstamped_preview").value
-        )
-        self._require_reliable_timestamp = require_reliable
+        allow_unstamped = bool(params["allow_unstamped_preview"])
 
         config = TianjiConfig.load()
         self._mapper = ControllerTeleopMapper(
             config,
             rate=rate,
-            min_cutoff=float(self.get_parameter("min_cutoff").value),
-            beta=float(self.get_parameter("beta").value),
-            elbow_min_cutoff=float(
-                self.get_parameter("elbow_min_cutoff").value
-            ),
+            min_cutoff=float(params["min_cutoff"]),
+            beta=float(params["beta"]),
+            elbow_min_cutoff=float(params["elbow_min_cutoff"]),
         )
         self._source = XRoboControllerSource()
         self._source.open()
         self._freshness = FreshnessGate(
-            timeout_seconds=float(
-                self.get_parameter("stale_timeout").value
-            ),
+            timeout_seconds=float(params["stale_timeout"]),
             allow_unstamped=allow_unstamped,
         )
         self._body_freshness = FreshnessGate(
-            timeout_seconds=float(
-                self.get_parameter("stale_timeout").value
-            ),
+            timeout_seconds=float(params["stale_timeout"]),
             # 部分 XRoboToolkit 版本不提供 Body 独立时间戳。
             # 此时必须按骨架签名独立判活，不能借用仍在刷新的手柄时钟。
             allow_unstamped=True,
@@ -89,54 +87,46 @@ class PicoControllerInputNode(Node):
         self._last_error = None
         self._right_a_pressed = False
 
-        self._left_pose_pub = self.create_publisher(
-            PoseStamped, "/pico_body/left_arm_target_pose", 10
+        self._left_pose_pub = ZenohPub(
+            session, key("/pico_body/left_arm_target_pose")
         )
-        self._right_pose_pub = self.create_publisher(
-            PoseStamped, "/pico_body/right_arm_target_pose", 10
+        self._right_pose_pub = ZenohPub(
+            session, key("/pico_body/right_arm_target_pose")
         )
-        self._left_elbow_pub = self.create_publisher(
-            Vector3Stamped, "/pico_body/left_arm_elbow_direction", 10
+        self._left_elbow_pub = ZenohPub(
+            session, key("/pico_body/left_arm_elbow_direction")
         )
-        self._right_elbow_pub = self.create_publisher(
-            Vector3Stamped, "/pico_body/right_arm_elbow_direction", 10
+        self._right_elbow_pub = ZenohPub(
+            session, key("/pico_body/right_arm_elbow_direction")
         )
-        self._state_pub = self.create_publisher(
-            String, "/pico_body/teleop_state", 10
+        self._state_pub = ZenohPub(session, key("/pico_body/teleop_state"))
+        self._status_pub = ZenohPub(session, key("/pico_body/status"))
+
+        # 事件 + 初始值（原 transient_local latched）：启动时主动取一次。
+        self._at_home_latch = LatchedKey(
+            session, key("/pico_body_sim/at_home"), initial=b"false"
         )
-        self._status_pub = self.create_publisher(
-            String, "/pico_body/status", 10
+        self._return_latch = LatchedKey(
+            session, key("/pico_body_sim/return_complete")
         )
-        self._body_marker_pub = self.create_publisher(
-            MarkerArray, "/pico_body/body_keypoints", 10
-        )
-        self.create_subscription(
-            Bool,
-            "/pico_body_sim/at_home",
-            self._on_at_home,
-            LATCHED_QOS,
-        )
-        self.create_subscription(
-            Bool,
-            "/pico_body_sim/return_complete",
-            self._on_return_complete,
-            10,
+        self._session.get(
+            key("/pico_body_sim/at_home"),
+            self._on_at_home_query,
+            timeout=1.0,
         )
 
-        self._timer = self.create_timer(1.0 / rate, self._tick)
-        self._status_timer = self.create_timer(0.5, self._publish_status)
         self._publish_state("idle")
-        self.get_logger().info(
+        self._log.info(
             "PICO 双手柄相对末端预览已启动；"
             "等待仿真回报安全初始位，然后按右手柄 A 开始。"
         )
 
-    def _on_at_home(self, msg: Bool) -> None:
-        self._at_home = bool(msg.data)
+    def _on_at_home_query(self, reply) -> None:
+        if reply.ok and reply.result.payload:
+            self._on_at_home_text(bytes(reply.result.payload))
 
-    def _on_return_complete(self, msg: Bool) -> None:
-        if msg.data:
-            self._return_complete = True
+    def _on_at_home_text(self, payload: bytes) -> None:
+        self._at_home = payload.decode("utf-8").strip() == "true"
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -214,7 +204,7 @@ class PicoControllerInputNode(Node):
             if sample is None:
                 return
             if sample.body_frame is None:
-                self.get_logger().error(
+                self._log.error(
                     "SMPL 胸廓不可用，不能建立躯干相对参考系"
                 )
                 return
@@ -226,39 +216,25 @@ class PicoControllerInputNode(Node):
                 "pico_left_wrist",
                 "pico_right_wrist",
             }:
-                self.get_logger().error(
+                self._log.error(
                     f"双手柄参考姿态初始化不完整：{sorted(initialized)}"
                 )
                 return
-            self.get_logger().info(
+            self._log.info(
                 "右手柄 A：在实时 SMPL 胸廓系记录双手柄参考位姿，"
                 "启用相对末端预览"
             )
         elif transition.action == "start_return":
-            self.get_logger().warning(
+            self._log.warning(
                 f"开始缓慢回安全初始位：{transition.reason}"
             )
         elif transition.action == "reject_start":
-            self.get_logger().warning(
+            self._log.warning(
                 f"拒绝启动遥操作：{transition.reason}"
             )
 
         if transition.state != self._last_state:
             self._publish_state(transition.state)
-
-        if (
-            transition.state != "teleop"
-            and body_live
-            and sample is not None
-            and sample.body_frame is not None
-        ):
-            self._publish_skeleton(
-                self._mapper.map_skeleton(sample.body_frame),
-                self._mapper.map_controller_positions(
-                    sample.frame,
-                    sample.body_frame,
-                ),
-            )
 
         if (
             transition.state == "teleop"
@@ -275,73 +251,34 @@ class PicoControllerInputNode(Node):
                 )
             except Exception as exc:
                 self._last_error = str(exc)
-                self.get_logger().error(f"手柄相对末端映射失败：{exc}")
+                self._log.error(f"手柄相对末端映射失败：{exc}")
 
     def _publish_state(self, state: str) -> None:
         self._last_state = state
-        self._state_pub.publish(String(data=state))
+        self._state_pub.put_text(state)
 
     def _publish_targets(self, targets: ControllerTargets) -> None:
-        stamp = self.get_clock().now().to_msg()
-        self._left_pose_pub.publish(
+        stamp = stamp_now()
+        self._left_pose_pub.put_json(
             self._pose_message(targets.left_pose, "left_chest", stamp)
         )
-        self._right_pose_pub.publish(
+        self._right_pose_pub.put_json(
             self._pose_message(targets.right_pose, "right_chest", stamp)
         )
-        self._left_elbow_pub.publish(
+        self._left_elbow_pub.put_json(
             self._vector_message(
                 targets.left_elbow_direction, "left_chest", stamp
             )
         )
-        self._right_elbow_pub.publish(
+        self._right_elbow_pub.put_json(
             self._vector_message(
                 targets.right_elbow_direction, "right_chest", stamp
-            )
-        )
-        markers = MarkerArray()
-        markers.markers.extend(
-            smpl_skeleton_markers(
-                targets.smpl_skeleton_keypoints,
-                stamp,
-            )
-        )
-        markers.markers.extend(
-            body_skeleton_markers(
-                "left",
-                targets.left_body_keypoints,
-                stamp,
-            )
-        )
-        markers.markers.extend(
-            body_skeleton_markers(
-                "right",
-                targets.right_body_keypoints,
-                stamp,
-            )
-        )
-        markers.markers.extend(
-            input_endpoint_markers(
-                targets.smpl_skeleton_keypoints,
-                targets.controller_positions,
-                stamp,
             )
         )
         for side, result in (
             ("left", targets.left_arm_angle),
             ("right", targets.right_arm_angle),
         ):
-            markers.markers.extend(
-                arm_angle_constraint_markers(
-                    side,
-                    projection_point=result.projection_point,
-                    physical_direction=result.physical_direction,
-                    angle_deg=result.constrained_angle_deg,
-                    measured_angle_deg=result.measured_angle_deg,
-                    source=result.source,
-                    stamp=stamp,
-                )
-            )
             self._last_arm_angle_deg[side] = float(
                 result.constrained_angle_deg
             )
@@ -351,49 +288,36 @@ class PicoControllerInputNode(Node):
                 else float(result.measured_angle_deg)
             )
             self._last_arm_angle_source[side] = result.source
-        self._body_marker_pub.publish(markers)
-
-    def _publish_skeleton(
-        self,
-        keypoints,
-        controller_positions,
-    ) -> None:
-        stamp = self.get_clock().now().to_msg()
-        markers = smpl_skeleton_markers(keypoints, stamp)
-        markers.extend(
-            input_endpoint_markers(
-                keypoints,
-                controller_positions,
-                stamp,
-            )
-        )
-        self._body_marker_pub.publish(
-            MarkerArray(markers=markers)
-        )
 
     @staticmethod
-    def _pose_message(values, frame_id: str, stamp) -> PoseStamped:
-        msg = PoseStamped()
-        msg.header.stamp = stamp
-        msg.header.frame_id = frame_id
-        msg.pose.position.x = float(values[0])
-        msg.pose.position.y = float(values[1])
-        msg.pose.position.z = float(values[2])
-        msg.pose.orientation.x = float(values[3])
-        msg.pose.orientation.y = float(values[4])
-        msg.pose.orientation.z = float(values[5])
-        msg.pose.orientation.w = float(values[6])
-        return msg
+    def _pose_message(values, frame_id: str, stamp) -> dict:
+        return {
+            "stamp": stamp,
+            "frame_id": frame_id,
+            "position": {
+                "x": float(values[0]),
+                "y": float(values[1]),
+                "z": float(values[2]),
+            },
+            "orientation": {
+                "x": float(values[3]),
+                "y": float(values[4]),
+                "z": float(values[5]),
+                "w": float(values[6]),
+            },
+        }
 
     @staticmethod
-    def _vector_message(values, frame_id: str, stamp) -> Vector3Stamped:
-        msg = Vector3Stamped()
-        msg.header.stamp = stamp
-        msg.header.frame_id = frame_id
-        msg.vector.x = float(values[0])
-        msg.vector.y = float(values[1])
-        msg.vector.z = float(values[2])
-        return msg
+    def _vector_message(values, frame_id: str, stamp) -> dict:
+        return {
+            "stamp": stamp,
+            "frame_id": frame_id,
+            "vector": {
+                "x": float(values[0]),
+                "y": float(values[1]),
+                "z": float(values[2]),
+            },
+        }
 
     def _publish_status(self) -> None:
         status = {
@@ -422,23 +346,62 @@ class PicoControllerInputNode(Node):
             "smpl_used": self._smpl_used,
             "scope": "preview_only",
         }
-        self._status_pub.publish(
-            String(data=json.dumps(status, ensure_ascii=False))
-        )
+        self._status_pub.put_text(json.dumps(status, ensure_ascii=False))
 
-    def destroy_node(self):
-        self._source.close()
-        return super().destroy_node()
+    def run(self) -> None:
+        """主循环：rate Hz 解算 + 0.5 s 状态。"""
+        tick_interval = 1.0 / self._rate
+        status_interval = 0.5
+        next_tick = time.monotonic() + tick_interval
+        next_status = next_tick + status_interval
+        while True:
+            now = time.monotonic()
+            if now >= next_tick:
+                self._tick()
+                next_tick += tick_interval
+            if now >= next_status:
+                self._publish_status()
+                next_status += status_interval
+            time.sleep(
+                max(0.001, min(next_tick, next_status) - time.monotonic())
+            )
+
+    def close(self) -> None:
+        try:
+            self._source.close()
+        finally:
+            try:
+                self._at_home_latch.close()
+                self._return_latch.close()
+            finally:
+                self._session.close()
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = PicoControllerInputNode()
+def main(argv=None) -> None:
+    args = parse_cli_args()
+    overrides = {}
+    for spec in args.param:
+        k, v = parse_param_override(spec)
+        overrides[k] = v
+    params = load_node_config(
+        args.config,
+        "pico_controller_input",
+        DEFAULT_PARAMETERS,
+        overrides,
+    )
+    session = open_session()
+    node = PicoControllerInputNode(session, params)
     try:
-        rclpy.spin(node)
+        node.run()
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        node.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    main()

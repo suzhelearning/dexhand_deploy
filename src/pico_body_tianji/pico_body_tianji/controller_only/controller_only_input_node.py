@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
-
-import rclpy
-from geometry_msgs.msg import PoseStamped, Vector3Stamped
-from rclpy.executors import ExternalShutdownException
-from rclpy.node import Node
-from std_msgs.msg import Bool, String
 
 from tianji_world_output.config_loader import TianjiConfig
 
@@ -18,90 +13,94 @@ from .controller_only_mapper import (
 from .controller_only_source import XRoboControllerOnlySource
 from .target_conditioner import TargetConditioningSettings
 from ..freshness import FreshnessGate
-from ..qos import LATCHED_QOS
 from ..teleop_state import TeleopStateMachine
+from ..zenoh_util import (
+    LatchedKey,
+    ZenohPub,
+    key,
+    load_node_config,
+    open_session,
+    parse_cli_args,
+    parse_param_override,
+    stamp_now,
+)
+
+_LOG = logging.getLogger("pico_controller_only_input")
+
+DEFAULT_PARAMETERS = {
+    "rate": 90.0,
+    "stale_timeout": 0.5,
+    "require_reliable_timestamp": True,
+    "allow_unstamped_input": False,
+    "min_cutoff": 1.0,
+    "beta": 0.7,
+    "translation_gain": [0.75, 0.75, 0.75],
+    "rotation_gain": 0.85,
+    "workspace_relative_radii_m": [0.32, 0.28, 0.28],
+    "workspace_soft_zone_ratio": 0.80,
+    "maximum_linear_speed_m_s": 0.18,
+    "maximum_angular_speed_rad_s": 0.80,
+    "maximum_linear_acceleration_m_s2": 1.20,
+    "maximum_angular_acceleration_rad_s2": 4.0,
+    "left_default_zsp_direction": [
+        0.45638698,
+        -0.74604902,
+        -0.48489358,
+    ],
+    "right_default_zsp_direction": [
+        0.45638698,
+        0.74604902,
+        -0.48489358,
+    ],
+}
 
 
-class PicoControllerOnlyInputNode(Node):
+class PicoControllerOnlyInputNode:
     """只使用 PICO 左右手柄生成双臂 IK 目标，不读取 Body。"""
 
-    def __init__(self):
-        super().__init__("pico_controller_only_input")
-        self.declare_parameter("rate", 90.0)
-        self.declare_parameter("stale_timeout", 0.5)
-        self.declare_parameter("require_reliable_timestamp", True)
-        self.declare_parameter("allow_unstamped_input", False)
-        self.declare_parameter("min_cutoff", 1.0)
-        self.declare_parameter("beta", 0.7)
-        self.declare_parameter("translation_gain", [0.75, 0.75, 0.75])
-        self.declare_parameter("rotation_gain", 0.85)
-        self.declare_parameter(
-            "workspace_relative_radii_m", [0.32, 0.28, 0.28]
-        )
-        self.declare_parameter("workspace_soft_zone_ratio", 0.80)
-        self.declare_parameter("maximum_linear_speed_m_s", 0.18)
-        self.declare_parameter("maximum_angular_speed_rad_s", 0.80)
-        self.declare_parameter("maximum_linear_acceleration_m_s2", 1.20)
-        self.declare_parameter(
-            "maximum_angular_acceleration_rad_s2", 4.0
-        )
-        self.declare_parameter(
-            "left_default_zsp_direction",
-            [0.45638698, -0.74604902, -0.48489358],
-        )
-        self.declare_parameter(
-            "right_default_zsp_direction",
-            [0.45638698, 0.74604902, -0.48489358],
-        )
+    def __init__(self, session, params):
+        self._session = session
+        self._log = _LOG
 
-        rate = float(self.get_parameter("rate").value)
+        rate = float(params["rate"])
         if rate <= 0.0:
             raise ValueError("rate must be positive")
+        self._rate = rate
         self._require_reliable_timestamp = bool(
-            self.get_parameter("require_reliable_timestamp").value
+            params["require_reliable_timestamp"]
         )
 
         config = TianjiConfig.load()
         self._mapper = ControllerOnlyTeleopMapper(
             config,
             rate=rate,
-            min_cutoff=float(self.get_parameter("min_cutoff").value),
-            beta=float(self.get_parameter("beta").value),
+            min_cutoff=float(params["min_cutoff"]),
+            beta=float(params["beta"]),
             conditioning_settings=TargetConditioningSettings(
                 rate_hz=rate,
-                translation_gain=self.get_parameter(
-                    "translation_gain"
-                ).value,
-                rotation_gain=float(
-                    self.get_parameter("rotation_gain").value
-                ),
-                workspace_relative_radii_m=self.get_parameter(
+                translation_gain=params["translation_gain"],
+                rotation_gain=float(params["rotation_gain"]),
+                workspace_relative_radii_m=params[
                     "workspace_relative_radii_m"
-                ).value,
+                ],
                 workspace_soft_zone_ratio=float(
-                    self.get_parameter("workspace_soft_zone_ratio").value
+                    params["workspace_soft_zone_ratio"]
                 ),
                 maximum_linear_speed_m_s=float(
-                    self.get_parameter("maximum_linear_speed_m_s").value
+                    params["maximum_linear_speed_m_s"]
                 ),
                 maximum_angular_speed_rad_s=float(
-                    self.get_parameter("maximum_angular_speed_rad_s").value
+                    params["maximum_angular_speed_rad_s"]
                 ),
                 maximum_linear_acceleration_m_s2=float(
-                    self.get_parameter(
-                        "maximum_linear_acceleration_m_s2"
-                    ).value
+                    params["maximum_linear_acceleration_m_s2"]
                 ),
                 maximum_angular_acceleration_rad_s2=float(
-                    self.get_parameter(
-                        "maximum_angular_acceleration_rad_s2"
-                    ).value
+                    params["maximum_angular_acceleration_rad_s2"]
                 ),
             ),
             default_zsp_directions={
-                side: self.get_parameter(
-                    f"{side}_default_zsp_direction"
-                ).value
+                side: params[f"{side}_default_zsp_direction"]
                 for side in ("left", "right")
             },
         )
@@ -109,12 +108,8 @@ class PicoControllerOnlyInputNode(Node):
         self._source = XRoboControllerOnlySource()
         self._source.open()
         self._freshness = FreshnessGate(
-            timeout_seconds=float(
-                self.get_parameter("stale_timeout").value
-            ),
-            allow_unstamped=bool(
-                self.get_parameter("allow_unstamped_input").value
-            ),
+            timeout_seconds=float(params["stale_timeout"]),
+            allow_unstamped=bool(params["allow_unstamped_input"]),
         )
         self._state_machine = TeleopStateMachine()
 
@@ -127,53 +122,48 @@ class PicoControllerOnlyInputNode(Node):
         self._last_conditioning = {"left": None, "right": None}
         self._right_a_pressed = False
 
-        self._left_pose_pub = self.create_publisher(
-            PoseStamped, "/pico_body/left_arm_target_pose", 10
+        self._left_pose_pub = ZenohPub(
+            session, key("/pico_body/left_arm_target_pose")
         )
-        self._right_pose_pub = self.create_publisher(
-            PoseStamped, "/pico_body/right_arm_target_pose", 10
+        self._right_pose_pub = ZenohPub(
+            session, key("/pico_body/right_arm_target_pose")
         )
         # 始终发布安全初始位对应的固定 ZSP。Pinocchio 可忽略它，官方 IK
         # 通过 official_use_zsp 显式决定是否用它稳定第七自由度。
-        self._left_elbow_pub = self.create_publisher(
-            Vector3Stamped, "/pico_body/left_arm_elbow_direction", 10
+        self._left_elbow_pub = ZenohPub(
+            session, key("/pico_body/left_arm_elbow_direction")
         )
-        self._right_elbow_pub = self.create_publisher(
-            Vector3Stamped, "/pico_body/right_arm_elbow_direction", 10
+        self._right_elbow_pub = ZenohPub(
+            session, key("/pico_body/right_arm_elbow_direction")
         )
-        self._state_pub = self.create_publisher(
-            String, "/pico_body/teleop_state", 10
+        self._state_pub = ZenohPub(session, key("/pico_body/teleop_state"))
+        self._status_pub = ZenohPub(session, key("/pico_body/status"))
+
+        # 事件 + 初始值（原 transient_local latched）：启动时主动取一次。
+        self._at_home_latch = LatchedKey(
+            session, key("/pico_body_sim/at_home"), initial=b"false"
         )
-        self._status_pub = self.create_publisher(
-            String, "/pico_body/status", 10
+        self._return_latch = LatchedKey(
+            session, key("/pico_body_sim/return_complete")
         )
-        self.create_subscription(
-            Bool,
-            "/pico_body_sim/at_home",
-            self._on_at_home,
-            LATCHED_QOS,
-        )
-        self.create_subscription(
-            Bool,
-            "/pico_body_sim/return_complete",
-            self._on_return_complete,
-            10,
+        self._session.get(
+            key("/pico_body_sim/at_home"),
+            self._on_at_home_query,
+            timeout=1.0,
         )
 
-        self._timer = self.create_timer(1.0 / rate, self._tick)
-        self._status_timer = self.create_timer(0.5, self._publish_status)
         self._publish_state("idle")
-        self.get_logger().info(
+        self._log.info(
             "PICO 纯手柄 IK 输入已启动；不读取 Body/Motion Tracker，"
             "等待 IK 安全初始位后按右手柄 A 开始。"
         )
 
-    def _on_at_home(self, msg: Bool) -> None:
-        self._at_home = bool(msg.data)
+    def _on_at_home_query(self, reply) -> None:
+        if reply.ok and reply.result.payload:
+            self._on_at_home_text(bytes(reply.result.payload))
 
-    def _on_return_complete(self, msg: Bool) -> None:
-        if msg.data:
-            self._return_complete = True
+    def _on_at_home_text(self, payload: bytes) -> None:
+        self._at_home = payload.decode("utf-8").strip() == "true"
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -222,18 +212,18 @@ class PicoControllerOnlyInputNode(Node):
                     "controller-only reference initialization incomplete: "
                     f"{sorted(initialized)}"
                 )
-                self.get_logger().error(self._last_error)
+                self._log.error(self._last_error)
                 return
-            self.get_logger().info(
+            self._log.info(
                 "右手柄 A：已记录左右手柄参考位姿，"
                 "开始纯手柄 IK 解算"
             )
         elif transition.action == "start_return":
-            self.get_logger().warning(
+            self._log.warning(
                 f"开始缓慢回安全初始位：{transition.reason}"
             )
         elif transition.action == "reject_start":
-            self.get_logger().warning(
+            self._log.warning(
                 f"拒绝启动纯手柄 IK：{transition.reason}"
             )
 
@@ -245,32 +235,32 @@ class PicoControllerOnlyInputNode(Node):
                 self._publish_targets(self._mapper.map_frame(sample.frame))
             except Exception as exc:
                 self._last_error = str(exc)
-                self.get_logger().error(f"纯手柄末端映射失败：{exc}")
+                self._log.error(f"纯手柄末端映射失败：{exc}")
 
     def _publish_state(self, state: str) -> None:
         self._last_state = state
-        self._state_pub.publish(String(data=state))
+        self._state_pub.put_text(state)
 
     def _publish_targets(self, targets: ControllerOnlyTargets) -> None:
         self._last_conditioning = {
             "left": targets.left_conditioning.as_dict(),
             "right": targets.right_conditioning.as_dict(),
         }
-        stamp = self.get_clock().now().to_msg()
-        self._left_pose_pub.publish(
+        stamp = stamp_now()
+        self._left_pose_pub.put_json(
             self._pose_message(targets.left_pose, "left_chest", stamp)
         )
-        self._right_pose_pub.publish(
+        self._right_pose_pub.put_json(
             self._pose_message(targets.right_pose, "right_chest", stamp)
         )
-        self._left_elbow_pub.publish(
+        self._left_elbow_pub.put_json(
             self._vector_message(
                 targets.left_default_elbow_direction,
                 "left_chest",
                 stamp,
             )
         )
-        self._right_elbow_pub.publish(
+        self._right_elbow_pub.put_json(
             self._vector_message(
                 targets.right_default_elbow_direction,
                 "right_chest",
@@ -279,28 +269,34 @@ class PicoControllerOnlyInputNode(Node):
         )
 
     @staticmethod
-    def _pose_message(values, frame_id: str, stamp) -> PoseStamped:
-        msg = PoseStamped()
-        msg.header.stamp = stamp
-        msg.header.frame_id = frame_id
-        msg.pose.position.x = float(values[0])
-        msg.pose.position.y = float(values[1])
-        msg.pose.position.z = float(values[2])
-        msg.pose.orientation.x = float(values[3])
-        msg.pose.orientation.y = float(values[4])
-        msg.pose.orientation.z = float(values[5])
-        msg.pose.orientation.w = float(values[6])
-        return msg
+    def _pose_message(values, frame_id: str, stamp) -> dict:
+        return {
+            "stamp": stamp,
+            "frame_id": frame_id,
+            "position": {
+                "x": float(values[0]),
+                "y": float(values[1]),
+                "z": float(values[2]),
+            },
+            "orientation": {
+                "x": float(values[3]),
+                "y": float(values[4]),
+                "z": float(values[5]),
+                "w": float(values[6]),
+            },
+        }
 
     @staticmethod
-    def _vector_message(values, frame_id: str, stamp) -> Vector3Stamped:
-        msg = Vector3Stamped()
-        msg.header.stamp = stamp
-        msg.header.frame_id = frame_id
-        msg.vector.x = float(values[0])
-        msg.vector.y = float(values[1])
-        msg.vector.z = float(values[2])
-        return msg
+    def _vector_message(values, frame_id: str, stamp) -> dict:
+        return {
+            "stamp": stamp,
+            "frame_id": frame_id,
+            "vector": {
+                "x": float(values[0]),
+                "y": float(values[1]),
+                "z": float(values[2]),
+            },
+        }
 
     def _publish_status(self) -> None:
         status = {
@@ -319,28 +315,62 @@ class PicoControllerOnlyInputNode(Node):
             "scope": "controller_only_ik",
             "target_conditioning": self._last_conditioning,
         }
-        self._status_pub.publish(
-            String(data=json.dumps(status, ensure_ascii=False))
-        )
+        self._status_pub.put_text(json.dumps(status, ensure_ascii=False))
 
-    def destroy_node(self):
-        self._source.close()
-        return super().destroy_node()
+    def run(self) -> None:
+        """主循环：rate Hz 解算 + 0.5 s 状态。"""
+        tick_interval = 1.0 / self._rate
+        status_interval = 0.5
+        next_tick = time.monotonic() + tick_interval
+        next_status = next_tick + status_interval
+        while True:
+            now = time.monotonic()
+            if now >= next_tick:
+                self._tick()
+                next_tick += tick_interval
+            if now >= next_status:
+                self._publish_status()
+                next_status += status_interval
+            time.sleep(
+                max(0.001, min(next_tick, next_status) - time.monotonic())
+            )
+
+    def close(self) -> None:
+        try:
+            self._source.close()
+        finally:
+            try:
+                self._at_home_latch.close()
+                self._return_latch.close()
+            finally:
+                self._session.close()
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = PicoControllerOnlyInputNode()
+def main(argv=None) -> None:
+    args = parse_cli_args()
+    overrides = {}
+    for spec in args.param:
+        k, v = parse_param_override(spec)
+        overrides[k] = v
+    params = load_node_config(
+        args.config,
+        "pico_controller_only_input",
+        DEFAULT_PARAMETERS,
+        overrides,
+    )
+    session = open_session()
+    node = PicoControllerOnlyInputNode(session, params)
     try:
-        rclpy.spin(node)
-    except (KeyboardInterrupt, ExternalShutdownException):
+        node.run()
+    except KeyboardInterrupt:
         pass
-    except Exception:
-        # SIGTERM 可能先使 context 失效，再让 executor 抛出 RCLError。
-        # 只吞掉这种关闭阶段异常，运行期间的真实错误仍继续抛出。
-        if rclpy.ok():
-            raise
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        node.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    main()
