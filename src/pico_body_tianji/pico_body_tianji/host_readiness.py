@@ -175,12 +175,14 @@ class HostReadinessGate:
             ):
                 return HostReadiness(False, "pico_smpl_not_live")
         elif source.get("input") == "mocap_live":
-            # mocap 动捕实时位姿驱动：Motive 实时手腕刚体 → 参考增量
-            # 跟随，要求动捕跟踪器在运行（motion_trackers_required）。
+            # Motive 刚体仅用于按 s 定零，随后由键盘累计虚拟目标；
+            # 要求新控制模式身份及动捕跟踪器可用于初始参考。
             if not (
                 source.get("source") == "live"
                 and source.get("mapping")
                 == "controller_relative_end_pose_conditioned_v1"
+                and source.get("control_mode")
+                == "motive_reference_keyboard_step"
                 and source.get("body_tracking") == "disabled"
                 and source.get("motion_trackers_required") is True
                 and source.get("elbow_constraint")

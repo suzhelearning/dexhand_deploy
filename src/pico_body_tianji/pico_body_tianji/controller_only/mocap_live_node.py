@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
-"""mocap 动捕实时位姿驱动节点（Zenoh 通讯版，无 ROS）。
+"""Motive 刚体定零 + 键盘位置步进节点（Zenoh 通讯版，无 ROS）。
 
-订阅 Motive 实时手腕刚体位姿（natnet-zenoh publisher →
-`mocap/hands/frame`，Motive y-up 右手系、米制），基于动捕系位姿
-增量驱动机器人末端：
+订阅 `mocap/hands/frame` 中的 Motive 刚体位姿（y-up 右手系、米制）。
+默认用贴在机器人右臂末端的 ``right_arm`` 刚体：按 ``s`` 时仅记录
+其当前位姿作为控制零点；开始后不再把刚体实测位姿送入目标映射，
+避免“机器人运动 → 刚体随动 → 目标再次增加”的正反馈。
 
-    's' 记录当前动捕位姿为参考并开始（等效在线链路按 A 键）
-    's' 结束并回 Home（步进/跟随中）
-    'q' / Ctrl+C 退出（跟随中先回 Home 再退出）
+键盘在冻结的参考位姿上累计位置增量，四元数保持不变：
 
-实时帧处理：取最新帧左右腕刚体（--left-rigid-id/--right-rigid-id，
-默认 1/2，与采集项目 config.yaml 的物理位置一致）→ 相对参考的
-增量 → pico_to_robot → world→chest → One-Euro → 1:1 目标整形 →
-经 Zenoh 发布到 tianji_kinematic_sim（/pico_body/{left,right}
-_arm_target_pose 与 elbow_direction）。单侧 tracking_valid 为
-False 或刚体缺失时该侧不发目标（IK 保持当前关节角，真机桥按
-命令超时软停）。
+    上/下          动捕 +z/-z
+    左/右          动捕 +x/-x
+    1/0            动捕 +y/-y
+    s              记录参考开始 / 结束回 Home
+    q / Ctrl+C     安全退出
 
-身份与真机验收：liveliness 注册 tj/live/mocap_live；status 含真机
-桥 host_readiness 所需字段（input=mocap_live、scope=mocap_live、
-source=live、motion_trackers_required=True），可作为真机桥主机输入。
+虚拟位姿经与 mocap 回放相同的相对增量映射链：pico_to_robot →
+world→chest → One-Euro → 1:1 目标整形，再通过 Zenoh 发布给
+``tianji_kinematic_sim``。默认每键 10mm、仅发布右臂目标。
 
-用法（由 scripts/run_mocap_live.sh 启动）：
-
-    mocap_live [--left-rigid-id 1] [--right-rigid-id 2] [--rate 60]
-               [--config <yaml>] [--param key:=value ...]
+身份与真机验收：liveliness 注册 ``tj/live/mocap_live``；status
+保持 ``input=mocap_live``、``scope=mocap_live``，供真机桥
+host_readiness 校验。Motive 跟踪仅用于开始时定零及状态观测。
 """
 
 from __future__ import annotations
@@ -41,6 +37,11 @@ from .controller_only_mapper import (
     ControllerOnlyTeleopMapper,
 )
 from .controller_only_trace import _assert_replay_graph_is_safe
+from .mocap_keyboard_step import (
+    AXIS_STEPS,
+    ArrowKeyParser,
+    StepAccumulator,
+)
 from .raw_keyboard import raw_keyboard
 from .target_conditioner import TargetConditioningSettings
 from ..controller_frame import ControllerFrame
@@ -66,11 +67,15 @@ RIGID_BODY_NAMES_KEY = "mocap/rigid_body_names"
 # （真机桥侧另有命令超时软停保护）。
 _FRAME_STALE_S = 0.5
 
-_ECHO_SYMBOLS = {
-    "s": "s",
-    "q": "q",
-}
 
+_AXIS_LABELS = {
+    "up": "动捕 +z",
+    "down": "动捕 -z",
+    "left": "动捕 +x",
+    "right": "动捕 -x",
+    "1": "动捕 +y",
+    "0": "动捕 -y",
+}
 # 目标整形参数与 mocap 回放/键盘步进一致（1:1 验收/标定模式），
 # 修改时同步 config/mode/controller_only/controller_only_ik.yaml 的
 # mocap_live 段。
@@ -99,20 +104,23 @@ DEFAULT_PARAMETERS = {
 
 
 class MocapLiveNode:
-    """Motive 实时位姿驱动：订阅动捕帧 → 参考增量映射 → 发布目标。"""
+    """Motive 刚体定零后，以键盘累计虚拟目标并发布机器人末端目标。"""
 
     def __init__(
         self,
         session,
         params: dict,
         *,
-        left_rigid_id: int = 1,
-        right_rigid_id: int = 2,
+        left_rigid_id: int | str = "left_wrist",
+        right_rigid_id: int | str = "right_arm",
         rate: float = 60.0,
         side: str = "right",
+        step_mm: float = 10.0,
     ) -> None:
         if rate <= 0.0:
             raise ValueError("rate must be positive")
+        if not np.isfinite(step_mm) or step_mm <= 0.0:
+            raise ValueError("step_mm must be positive and finite")
         for label, spec in (
             ("left_rigid_id", left_rigid_id),
             ("right_rigid_id", right_rigid_id),
@@ -129,6 +137,10 @@ class MocapLiveNode:
         self._session = session
         self._rate = rate
         self._side = side
+        self._step_mm = float(step_mm)
+        self._active_sides = (
+            ("right",) if side == "right" else ("left", "right")
+        )
         self._rigid_ids = {
             "left": int(left_rigid_id)
             if isinstance(left_rigid_id, int)
@@ -206,7 +218,10 @@ class MocapLiveNode:
 
         self._phase = "armed"
         self._phase_started = time.monotonic()
-        self._reference: dict[str, np.ndarray] | None = None
+        # 按 s 后由 Motive 参考位姿构造；随后只由键盘更新。
+        self._command_lock = threading.Lock()
+        self._accumulators: dict[str, StepAccumulator] | None = None
+        self._parser = ArrowKeyParser()
         self._last_conditioning: dict[str, object] = {
             "left": None,
             "right": None,
@@ -220,11 +235,13 @@ class MocapLiveNode:
 
         side_label = "仅右臂" if side == "right" else "双臂同步"
         _LOG.info(
-            "mocap 动捕实时驱动已就绪：订阅 %s（刚体 %s/%s），"
-            "控制 %s；按 s 记录参考开始，跟随中再按 s 回 Home，q 退出",
+            "Motive 刚体定零键盘步进已就绪：%s（刚体 %s/%s），"
+            "每键 %g mm（动捕系），控制 %s；按 s 记录零点开始，"
+            "再按 s 回 Home，q 退出",
             FRAME_KEY,
             self._rigid_ids["left"],
             self._rigid_ids["right"],
+            self._step_mm,
             side_label,
         )
 
@@ -293,6 +310,12 @@ class MocapLiveNode:
 
     # raw 模式终端无 echo；按键事件实时回显到 stdout。
     _ECHO_SYMBOLS = {
+        "up": "↑",
+        "down": "↓",
+        "left": "←",
+        "right": "→",
+        "1": "1",
+        "0": "0",
         "s": "s",
         "q": "q",
     }
@@ -307,56 +330,139 @@ class MocapLiveNode:
             pass
 
     def _on_key(self, byte: str) -> None:
-        if byte in ("\x03", "q"):
+        event = self._parser.feed(byte)
+        if event is None:
+            return
+        if event in ("\x03", "q"):
             self._echo("q")
             self._handle_interrupt()
             return
-        if byte != "s":
-            return
-        self._echo("s")
-        if self._phase == "armed":
-            frame = self._latest_frame
-            if frame is None:
-                _LOG.warning("键盘 's'：尚未收到动捕帧，无法记录参考")
-                return
-            poses = {
-                side: self._side_pose(frame, side)
-                for side in ("left", "right")
-            }
-            if poses["left"] is None and poses["right"] is None:
-                _LOG.warning("键盘 's'：当前帧无有效手腕刚体，拒绝开始")
-                return
-            # 只控制右臂时左臂恒用零点参考（增量恒零，左目标不发布，
-            # IK 左臂保持 Home）。
-            self._reference = {
-                side: poses[side]
-                for side in ("left", "right")
-            }
-            self._mapper.initialize(
-                ControllerFrame.from_poses(
-                    self._reference["left"]
-                    if self._reference["left"] is not None
-                    else self._reference_pose(),
-                    self._reference["right"]
-                    if self._reference["right"] is not None
-                    else self._reference_pose(),
+        if event == "s":
+            self._echo("s")
+            if self._phase == "armed":
+                with self._frame_lock:
+                    frame = self._latest_frame
+                    received_at = self._latest_received_monotonic
+                if frame is None:
+                    _LOG.warning(
+                        "键盘 's'：尚未收到动捕帧，无法记录参考"
+                    )
+                    return
+                age_s = time.monotonic() - received_at
+                if age_s > _FRAME_STALE_S:
+                    _LOG.warning(
+                        "键盘 's'：最新动捕帧已超时 %.2fs，拒绝记录参考",
+                        age_s,
+                    )
+                    return
+                poses = {
+                    side: self._side_pose(frame, side)
+                    for side in ("left", "right")
+                }
+                missing = [
+                    side
+                    for side in self._active_sides
+                    if poses[side] is None
+                ]
+                if missing:
+                    labels = ", ".join(
+                        f"{side}={self._rigid_ids[side]}"
+                        for side in missing
+                    )
+                    _LOG.warning(
+                        "键盘 's'：所选 Motive 刚体无效或缺失（%s），"
+                        "拒绝开始",
+                        labels,
+                    )
+                    return
+                reference_poses = {
+                    side: (
+                        poses[side]
+                        if side in self._active_sides
+                        else self._reference_pose()
+                    )
+                    for side in ("left", "right")
+                }
+                try:
+                    accumulators = {
+                        side: StepAccumulator(
+                            reference_poses[side], self._step_mm
+                        )
+                        for side in ("left", "right")
+                    }
+                    command_frame = ControllerFrame.from_poses(
+                        accumulators["left"].pose(),
+                        accumulators["right"].pose(),
+                    )
+                    self._mapper.initialize(command_frame)
+                except ValueError as exc:
+                    _LOG.warning("Motive 参考位姿无效，拒绝开始：%s", exc)
+                    return
+                with self._command_lock:
+                    self._accumulators = accumulators
+                self._phase = "stepping"
+                self._phase_started = time.monotonic()
+                self._publish_state("teleop")
+                _LOG.info(
+                    "键盘 's'：已冻结 %s 参考位姿；后续 Motive 随动"
+                    "不进入目标，方向键/1/0 开始步进",
+                    "/".join(self._active_sides),
                 )
-            )
-            self._phase = "stepping"
-            self._phase_started = time.monotonic()
-            self._publish_state("teleop")
-            _LOG.info(
-                "键盘 's'：参考位姿已记录（左=%s 右=%s），开始动捕跟随",
-                "有效" if self._reference["left"] is not None else "缺失",
-                "有效" if self._reference["right"] is not None else "缺失",
-            )
-        elif self._phase == "stepping":
-            self._phase = "returning"
-            self._phase_started = time.monotonic()
-            _LOG.info("键盘 's'：请求结束并回 Home")
+            elif self._phase == "stepping":
+                self._phase = "returning"
+                self._phase_started = time.monotonic()
+                _LOG.info("键盘 's'：请求结束并回 Home")
+            return
+        if self._phase != "stepping" or event not in AXIS_STEPS:
+            return
+        self._echo(event)
+        with self._command_lock:
+            if self._accumulators is None:
+                return
+            for side in self._active_sides:
+                self._accumulators[side].step(event)
+            delta_mm = self._accumulators[
+                self._active_sides[-1]
+            ].delta_m() * 1000.0
+        _LOG.info(
+            "按键 %s（%s）：%g mm → 累积 (%+.1f, %+.1f, %+.1f) mm",
+            event,
+            _AXIS_LABELS[event],
+            self._step_mm,
+            delta_mm[0],
+            delta_mm[1],
+            delta_mm[2],
+        )
 
     def _reference_pose(self) -> np.ndarray:
         return np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+
+    def _command_frame(self) -> ControllerFrame | None:
+        """返回冻结参考 + 键盘增量构成的虚拟帧。"""
+        with self._command_lock:
+            if self._accumulators is None:
+                return None
+            return ControllerFrame.from_poses(
+                self._accumulators["left"].pose(),
+                self._accumulators["right"].pose(),
+            )
+
+    def _accumulated_delta_mm(self) -> dict[str, list[float]]:
+        with self._command_lock:
+            if self._accumulators is None:
+                return {
+                    side: [0.0, 0.0, 0.0]
+                    for side in ("left", "right")
+                }
+            return {
+                side: [
+                    float(value)
+                    for value in (
+                        self._accumulators[side].delta_m() * 1000.0
+                    )
+                ]
+                for side in ("left", "right")
+            }
 
     def _handle_interrupt(self) -> None:
         """q / Ctrl+C 退出：跟随中先回 Home（安全），否则直接退出。"""
@@ -390,6 +496,8 @@ class MocapLiveNode:
                 "left_rigid_id": self._rigid_ids["left"],
                 "right_rigid_id": self._rigid_ids["right"],
                 "side": self._side,
+                "control_mode": "motive_reference_keyboard_step",
+                "step_mm": self._step_mm,
                 "error": None,
             }
         )
@@ -428,7 +536,7 @@ class MocapLiveNode:
 
     def _publish_targets(self, targets: ControllerOnlyTargets) -> None:
         stamp = stamp_now()
-        sides = ("right",) if self._side == "right" else ("left", "right")
+        sides = self._active_sides
         for side in sides:
             pose = (
                 targets.left_pose
@@ -450,52 +558,26 @@ class MocapLiveNode:
             )
 
     def _tick(self) -> bool:
-        """rate Hz 映射一帧；返回 False 表示流程结束（已请求回 Home）。"""
+        """rate Hz 映射虚拟键盘目标；返回 False 表示回 Home 流程结束。"""
         if self._phase == "armed":
             self._publish_state("idle")
             return True
         if self._phase == "returning":
             self._publish_state("returning")
             if time.monotonic() - self._phase_started >= 3.0:
-                _LOG.info("动捕跟随结束并已请求回 Home")
+                _LOG.info("键盘步进结束并已请求回 Home")
                 return False
             return True
         self._publish_state("teleop")
-        with self._frame_lock:
-            frame = self._latest_frame
-            received_at = self._latest_received_monotonic
-        if frame is None:
+        # 只消费按 s 时冻结的参考 + 键盘累计增量。这里禁止读取
+        # _latest_frame；right_arm 随机器人运动不能形成控制反馈。
+        command_frame = self._command_frame()
+        if command_frame is None:
             return True
-        if time.monotonic() - received_at > _FRAME_STALE_S:
-            _LOG.warning("动捕帧超时（>%.1fs），暂停映射", _FRAME_STALE_S)
-            return True
-        poses = {
-            side: self._side_pose(frame, side)
-            for side in ("left", "right")
-        }
-        if poses["left"] is None and poses["right"] is None:
-            return True
-        # 只控制右臂时左臂恒用零点参考（增量恒零，左目标不发布）。
-        # 单侧缺失同理：该侧恒用参考位姿（增量恒零）。
-        if self._side == "right":
-            left_pose = self._reference_pose()
-        else:
-            left_pose = (
-                poses["left"]
-                if poses["left"] is not None
-                else self._reference_pose()
-            )
-        right_pose = (
-            poses["right"]
-            if poses["right"] is not None
-            else self._reference_pose()
-        )
         try:
-            targets = self._mapper.map_frame(
-                ControllerFrame.from_poses(left_pose, right_pose)
-            )
+            targets = self._mapper.map_frame(command_frame)
         except Exception as exc:
-            _LOG.error("动捕映射失败：%s", exc)
+            _LOG.error("键盘虚拟目标映射失败：%s", exc)
             return True
         self._publish_targets(targets)
         self._last_conditioning = {
@@ -507,11 +589,15 @@ class MocapLiveNode:
     def _publish_status(self) -> None:
         with self._frame_lock:
             frame = self._latest_frame
+            received_at = self._latest_received_monotonic
+        frame_fresh = (
+            frame is not None
+            and time.monotonic() - received_at <= _FRAME_STALE_S
+        )
         tracking = {
             side: (
                 self._side_pose(frame, side) is not None
-                if frame is not None
-                else False
+                if frame_fresh else False
             )
             for side in ("left", "right")
         }
@@ -530,6 +616,9 @@ class MocapLiveNode:
             "left_rigid_id": self._rigid_ids["left"],
             "right_rigid_id": self._rigid_ids["right"],
             "side": self._side,
+            "control_mode": "motive_reference_keyboard_step",
+            "step_mm": self._step_mm,
+            "accumulated_delta_mm": self._accumulated_delta_mm(),
             "tracking": tracking,
             "target_conditioning": self._last_conditioning,
             "error": None,
@@ -599,6 +688,11 @@ def main(argv=None) -> int:
                 "default": 60.0,
                 "help": "映射器采样率 Hz（默认 60）",
             },
+            "--step-mm": {
+                "type": float,
+                "default": 10.0,
+                "help": "每次按键的位置步长 mm（默认 10）",
+            },
             "--side": {
                 "choices": ("right", "both"),
                 "default": "right",
@@ -658,12 +752,14 @@ def main(argv=None) -> int:
         right_rigid_id=_parse_rigid_spec(args.right_rigid_id),
         rate=args.rate,
         side=args.side,
+        step_mm=args.step_mm,
     )
     try:
         _LOG.warning(
-            "等待动捕帧与键盘 's'；按 s 记录当前动捕位姿为参考并开始，"
-            "再按 's' 结束回 Home，按 'q' 退出；"
-            "该身份可配合真机桥做验收"
+            "等待 Motive 刚体帧与键盘 's'；按 s 冻结当前 right_arm "
+            "位姿为零点，再用 上/下/左/右/1/0 按 %g mm 累计位置；"
+            "后续刚体随动不进入目标；再按 s 回 Home，按 q 退出",
+            args.step_mm,
         )
         return node.run()
     except KeyboardInterrupt:

@@ -36,7 +36,7 @@ controller-only-real-diagnostic = "bash scripts/run_controller_only_real_diagnos
 replay-controller-only = { cmd = "bash scripts/run_controller_only_replay.sh", depends-on = ["doctor"] }
 sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --mujoco-only", depends-on = ["doctor"] }
 sim_mocap_step = { cmd = "bash scripts/run_mocap_step.sh --mujoco-only", description = "mocap 键盘步进控制（动捕系 10mm/键，s 启停，Zenoh）" }
-sim_mocap_live = { cmd = "bash scripts/run_mocap_live.sh --mujoco-only", description = "mocap 动捕实时位姿驱动（Motive → 参考增量 → IK，Zenoh）" }
+sim_mocap_live = { cmd = "bash scripts/run_mocap_live.sh --mujoco-only", description = "Motive right_arm 定零 + 键盘位置步进（默认右臂 10mm/键，Zenoh）" }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
 
 # C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。

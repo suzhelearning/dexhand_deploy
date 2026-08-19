@@ -546,9 +546,9 @@ key，不发布控制命令；结束后会打印输入速度/加速度、椭球�
 | `pixi run real -- --confirm-real` | 复用正在运行的 sim，启动真机桥 | **是** |
 | `pixi run sim_controller_only` | 纯手柄 IK 的 MuJoCo 仿真 | 否 |
 | `pixi run sim_mocap_step` | mocap 键盘步进控制（动捕系 10mm/键，s 启停） | 否 |
-| `pixi run sim_mocap_live` | mocap 动捕实时位姿驱动（Motive → 参考增量 → IK） | 否 |
+| `pixi run sim_mocap_live` | Motive `right_arm` 定零 + 键盘位置步进（默认右臂 10mm/键） | 否 |
 | `pixi run real_mocap_step -- --confirm-real` | 复用键盘步进仿真，启动真机桥 | **是** |
-| `pixi run real_mocap_live -- --confirm-real` | 复用动捕实时仿真，启动真机桥 | **是** |
+| `pixi run real_mocap_live -- --confirm-real` | 复用 Motive 定零键盘步进仿真，启动真机桥 | **是** |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
 
 `doctor`、`test`、`pico-probe`、`status`、`controller-only-joints` 和
@@ -602,23 +602,31 @@ pixi run real_mocap_step -- --confirm-real
 命令就绪且位于 Home 时进入 armed_idle，随后按 `s` 开始、方向键
 步进（默认仅右臂 10mm/键）、再按 `s` 回 Home、`q` 退出。
 
-**mocap 动捕实时位姿驱动（sim_mocap_live / real_mocap_live）**：
-订阅 Motive 实时手腕刚体位姿（`mocap/hands/frame`，natnet-zenoh
-publisher → zenohd Router tcp/0.0.0.0:7447），基于动捕系位姿做
-参考增量跟随（'s' 记录参考开始，再按 's' 回 Home，'q' 退出）：
+**Motive 刚体定零 + 键盘位置步进（sim_mocap_live / real_mocap_live）**：
+订阅 `mocap/hands/frame`，默认读取贴在机器人右臂末端的 Motive
+`right_arm` 刚体。按 `s` 时只冻结其当前位姿作为控制零点；之后不再
+把刚体实测随动送入目标，避免“机器人运动 → 刚体运动 → 目标再次增加”
+的正反馈。虚拟目标由键盘在冻结参考上累计位置，四元数保持不变：
+
+| 按键 | 动捕系增量 | 按键 | 动捕系增量 |
+| --- | --- | --- | --- |
+| `↑` / `↓` | `+z` / `-z` | `←` / `→` | `+x` / `-x` |
+| `1` / `0` | `+y` / `-y` | `s` | 定零开始 / 结束回 Home |
 
 ```bash
-pixi run sim_mocap_live                        # Motive 实时 → IK（+MuJoCo）
+pixi run sim_mocap_live                         # 默认仅右臂、10mm/键
+pixi run sim_mocap_live -- --step-mm 5
 pixi run sim_mocap_live -- --topics-only
-pixi run sim_mocap_live -- --left-rigid-id 1 --right-rigid-id 2
+pixi run sim_mocap_live -- --right-rigid-id right_arm
 
 # 真机（先起上面的 sim 主机，再确认硬件安全后）
 pixi run real_mocap_live -- --confirm-real
 ```
 
-单侧手腕刚体 `tracking_valid=false` 或缺失时该侧不发目标（IK 保持
-当前关节角，真机桥按命令超时软停）。`host_readiness` 显式接受
-`mocap_live` 身份（要求动捕跟踪器在运行）。
+按 `s` 定零时，所选刚体必须存在、`tracking_valid=true` 且最新帧不超过
+0.5s；默认只要求 `right_arm`。status 标识
+`control_mode=motive_reference_keyboard_step`，真机桥拒绝旧的连续刚体
+反馈模式。默认仅发布右臂目标；`--side both` 才要求左右刚体同时有效。
 
 ## 控制原理
 

@@ -44,6 +44,7 @@ def _mocap_live_status() -> dict:
         "input": "mocap_live",
         "scope": "mocap_live",
         "mapping": "controller_relative_end_pose_conditioned_v1",
+        "control_mode": "motive_reference_keyboard_step",
         "body_tracking": "disabled",
         "motion_trackers_required": True,
         "elbow_constraint": "published_default_zsp_backend_selected",
@@ -230,6 +231,18 @@ class MocapLiveHostReadinessTest(unittest.TestCase):
 
         self.assertFalse(decision.ready)
         self.assertEqual(decision.reason, "mocap_live_not_ready")
+
+    def test_mocap_live_rejects_continuous_rigid_feedback_mode(self) -> None:
+        gate = _gate("controller_only")
+        status = _mocap_live_status()
+        status["control_mode"] = "motive_continuous_follow"
+
+        _observe_safe_host(gate, status)
+        decision = gate.evaluate(now=10.02)
+
+        self.assertFalse(decision.ready)
+        self.assertEqual(decision.reason, "mocap_live_not_ready")
+
 
     def test_mocap_live_rejects_offline_source(self) -> None:
         gate = _gate("controller_only")

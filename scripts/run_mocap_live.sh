@@ -12,11 +12,11 @@ if ! python -c 'import zenoh' 2>/dev/null; then
   fi
 fi
 
-# mocap 动捕实时位姿仿真（Zenoh 通讯版，无 ROS）。
+# Motive 刚体定零 + 键盘位置步进仿真（Zenoh 通讯版，无 ROS）。
 #
-# 订阅 Motive 实时手腕刚体位姿（natnet-zenoh publisher →
-# zenohd Router → 本节点），基于动捕系位姿增量驱动 IK；'s' 记录
-# 参考开始、's' 结束回 Home、'q' 退出。IK 与 MuJoCo 后台受管，
+# 订阅 Motive 刚体位姿；'s' 仅冻结 right_arm 当前位姿为零点，
+# 后续目标由键盘在动捕系累计位置增量，刚体随机器人运动不反馈到
+# 目标。's' 结束回 Home、'q' 退出。IK 与 MuJoCo 后台受管，
 # 节点前台直连终端（raw 模式读键）。
 #
 # 前置：Windows Motive + natnet-zenoh publisher 已发布
@@ -26,7 +26,7 @@ fi
 # 用法：
 #   pixi run sim_mocap_live
 #   pixi run sim_mocap_live -- --topics-only
-#   pixi run sim_mocap_live -- --left-rigid-id 1 --right-rigid-id 2
+#   pixi run sim_mocap_live -- --right-rigid-id right_arm --step-mm 10
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common.sh"
@@ -36,6 +36,7 @@ LEFT_RIGID_ID="left_wrist"
 RIGHT_RIGID_ID="right_arm"
 CONNECT_ENDPOINT=""
 SIDE=right
+STEP_MM=10.0
 MUJOCO_PID=""
 SIM_PID=""
 
@@ -53,6 +54,7 @@ usage() {
   --connect-endpoint EP zenohd Router 端点（默认空=本机 scouting；
                          仅当 scouting 不可达时才需显式连 router）
   --side SIDE            控制侧：right（仅右臂，默认）/ both（双臂同步）
+  --step-mm MM           每次按键位置步长（默认 10mm）
   -h, --help
 
 本脚本只启动纯运动学仿真，不加载 Marvin SDK，不连接实体机械臂。
@@ -108,6 +110,15 @@ while (($#)); do
           exit 2
           ;;
       esac
+      shift
+      ;;
+    --step-mm)
+      if (($# < 2)); then
+        printf '%s\n' '错误：--step-mm 缺少数值。' >&2
+        usage >&2
+        exit 2
+      fi
+      STEP_MM="$2"
       shift
       ;;
     -h|--help)
@@ -179,8 +190,8 @@ SIM_PID=$!
 register_teleop_process_group "${SIM_PID}" sim-ik-solver 5
 
 printf '%s\n' \
-  '启动 mocap 动捕实时驱动（Zenoh）：Motive 位姿 → 参考增量 → IK' \
-  "  左右手腕刚体 id=${LEFT_RIGID_ID}/${RIGHT_RIGID_ID}  side=${SIDE}" \
+  '启动 Motive 刚体定零 + 键盘位置步进：参考位姿 + 键盘增量 → IK' \
+  "  刚体=${LEFT_RIGID_ID}/${RIGHT_RIGID_ID}  side=${SIDE}  step_mm=${STEP_MM}" \
   "  Router=${CONNECT_ENDPOINT:-<scouting>}  MuJoCo=${WITH_MUJOCO}" \
   '该任务不会连接 Marvin 控制器。'
 
@@ -191,6 +202,7 @@ printf '%s\n' \
   --left-rigid-id "${LEFT_RIGID_ID}" \
   --right-rigid-id "${RIGHT_RIGID_ID}" \
   --side "${SIDE}" \
+  --step-mm "${STEP_MM}" \
   --connect-endpoint "${CONNECT_ENDPOINT}"
 LIVE_EXIT=$?
 

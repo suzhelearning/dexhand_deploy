@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 
 import numpy as np
@@ -13,6 +15,7 @@ from pico_body_tianji.controller_only.mocap_keyboard_step import (
     ArrowKeyParser,
     StepAccumulator,
 )
+from pico_body_tianji.controller_only.mocap_live_node import MocapLiveNode
 from pico_body_tianji.controller_only.target_conditioner import (
     TargetConditioningSettings,
 )
@@ -114,6 +117,75 @@ class StepAccumulatorTest(unittest.TestCase):
         )
         pose = accumulator.step("1")
         np.testing.assert_allclose(pose[:3], [0.0, 0.025, 0.0])
+
+
+class _InitializeCapture:
+    def __init__(self) -> None:
+        self.frame: ControllerFrame | None = None
+
+    def initialize(self, frame: ControllerFrame) -> set[str]:
+        self.frame = frame
+        return {"pico_left_wrist", "pico_right_wrist"}
+
+
+class MocapLiveReferenceKeyboardTest(unittest.TestCase):
+    """机器人末端刚体只用于定零，后续实测随动不得改变虚拟目标。"""
+
+    def test_right_arm_reference_freezes_then_keyboard_steps(self) -> None:
+        node = MocapLiveNode.__new__(MocapLiveNode)
+        node._parser = ArrowKeyParser()
+        node._phase = "armed"
+        node._frame_lock = threading.Lock()
+        right_reference = np.array(
+            [0.41, -0.12, 0.28, 0.0, 0.0, 0.0, 1.0]
+        )
+        node._latest_frame = {
+            "left": _REFERENCE_POSE.copy(),
+            "right": right_reference.copy(),
+        }
+        node._latest_received_monotonic = time.monotonic()
+        node._side_pose = lambda frame, side: frame[side].copy()
+        node._active_sides = ("right",)
+        node._rigid_ids = {
+            "left": "left_wrist",
+            "right": "right_arm",
+        }
+        node._step_mm = 10.0
+        node._command_lock = threading.Lock()
+        node._accumulators = None
+        node._mapper = _InitializeCapture()
+        node._publish_state = lambda state: None
+        node._echo = lambda event: None
+
+        node._on_key("s")
+        self.assertEqual(node._phase, "stepping")
+        frozen = node._command_frame()
+        self.assertIsNotNone(frozen)
+        np.testing.assert_array_equal(
+            frozen.right_pose, right_reference
+        )
+
+        # 模拟机器人运动后，贴在末端的 right_arm 刚体随动 300mm；
+        # 虚拟命令必须仍停在按 s 时冻结的参考。
+        node._latest_frame["right"][0] += 0.3
+        after_feedback = node._command_frame()
+        np.testing.assert_array_equal(
+            after_feedback.right_pose, right_reference
+        )
+
+        for byte in "\x1b[A":
+            node._on_key(byte)
+        stepped = node._command_frame()
+        np.testing.assert_allclose(
+            stepped.right_pose[:3],
+            right_reference[:3] + np.array([0.0, 0.0, 0.01]),
+        )
+        np.testing.assert_array_equal(
+            stepped.right_pose[3:], right_reference[3:]
+        )
+        np.testing.assert_array_equal(
+            stepped.left_pose, _REFERENCE_POSE
+        )
 
 
 class MocapKeyboardStepMappingTest(unittest.TestCase):
