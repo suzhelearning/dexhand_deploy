@@ -106,20 +106,17 @@ REAL_CONFIG="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/full_body/real
 
 bridge_arguments=(
   "--confirm-real"
-  "--ros-args"
-  "-r"
-  "__node:=marvin_hardware_bridge"
-  "--params-file"
+  "--config"
   "${REAL_CONFIG}"
-  "-p"
+  "--param"
   "velocity_ratio:=${VELOCITY_RATIO}"
-  "-p"
+  "--param"
   "acceleration_ratio:=${ACCELERATION_RATIO}"
 )
 if [[ -n "${ROBOT_IP}" ]]; then
-  bridge_arguments+=("-p" "robot_ip:=${ROBOT_IP}")
+  bridge_arguments+=("--param" "robot_ip:=${ROBOT_IP}")
 fi
-setsid "${BRIDGE_NODE}" "${bridge_arguments[@]}" &
+setsid python "${BRIDGE_NODE}" "${bridge_arguments[@]}" &
 bridge_pid=$!
 register_teleop_process_group \
   "${bridge_pid}" marvin-hardware-bridge 30

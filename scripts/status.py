@@ -22,7 +22,6 @@ class StatusMonitor:
             session,
             STATUS_KEY,
             self._print_status,
-            reliability=zenoh.Reliability.RELIABLE,
         )
         _LOG.info("等待状态消息：%s", STATUS_KEY)
 

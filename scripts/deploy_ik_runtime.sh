@@ -15,6 +15,7 @@ RUNTIME_PROGRAMS=(
   controller_only_trace
   controller_only_real_diagnostic
   marvin_hardware_bridge
+  mujoco_joint_viewer.py
 )
 BACKUP_DIR="${BUNDLE_ROOT}/staging/runtime-backup"
 SDK_SOURCE_ROOT="${TIANJI_OFFICIAL_SDK_ROOT:-/home/ice/TJ_FX_ROBOT_CONTRL_SDK}"
@@ -70,11 +71,7 @@ for path in \
   "${RUNTIME_BIN}/pico_link_probe" \
   "${RUNTIME_BIN}/controller_only_trace" \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so" \
-  "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg" \
-  "${RUNTIME_SHARE}/launch/controller_only_ik.launch.py" \
-  "${RUNTIME_SHARE}/launch/controller_only_sim.launch.py" \
-  "${RUNTIME_SHARE}/launch/preview.launch.py" \
-  "${RUNTIME_SHARE}/launch/real_teleop.launch.py"
+  "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
 do
   if [[ -f "${path}" ]]; then
     cp -a -- "${path}" "${BACKUP_DIR}/$(basename "${path}")"
@@ -90,8 +87,7 @@ fi
 mkdir -p \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK" \
   "${SDK_RUNTIME_ROOT}/CommonConfig" \
-  "${RUNTIME_CONFIG}" \
-  "${RUNTIME_SHARE}/launch"
+  "${RUNTIME_CONFIG}"
 # 允许 TIANJI_OFFICIAL_SDK_ROOT 指向 runtime 自身（自拷贝场景，
 # 例如 SDK 源机器不可用时）；源与目标相同则跳过。
 if [[ "$(realpath "${SDK_LIBRARY}")" != "$(realpath "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so")" ]]; then
@@ -146,17 +142,6 @@ if ! diff -qr -- "${SOURCE_CONFIG}" "${RUNTIME_CONFIG}" >/dev/null; then
   printf '%s\n' '错误：src 与 runtime 的 config 目录部署后仍不一致。' >&2
   exit 1
 fi
-for launch_file in \
-  controller_only_ik.launch.py \
-  controller_only_sim.launch.py \
-  controller_only_replay.launch.py \
-  preview.launch.py \
-  real_teleop.launch.py
-do
-  install -m 0644 \
-    "${BUNDLE_ROOT}/src/pico_body_tianji/launch/${launch_file}" \
-    "${RUNTIME_SHARE}/launch/${launch_file}"
-done
 
 runtime_hash="$(
   cd "${BUNDLE_ROOT}"

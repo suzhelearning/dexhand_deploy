@@ -4,17 +4,17 @@ import json
 import logging
 import time
 
-from tianji_world_output.config_loader import TianjiConfig
-
 from .controller_mapper import ControllerTargets, ControllerTeleopMapper
 from .controller_source import XRoboControllerSource
 from ..freshness import FreshnessGate
 from ..teleop_state import TeleopStateMachine
 from ..zenoh_util import (
     LatchedKey,
+    LiveToken,
     ZenohPub,
     key,
     load_node_config,
+    load_tianji_config,
     open_session,
     parse_cli_args,
     parse_param_override,
@@ -50,7 +50,7 @@ class PicoControllerInputNode:
         )
         allow_unstamped = bool(params["allow_unstamped_preview"])
 
-        config = TianjiConfig.load()
+        config = load_tianji_config()
         self._mapper = ControllerTeleopMapper(
             config,
             rate=rate,
@@ -114,6 +114,7 @@ class PicoControllerInputNode:
             self._on_at_home_query,
             timeout=1.0,
         )
+        self._live = LiveToken(session, "pico_controller_input")
 
         self._publish_state("idle")
         self._log.info(
@@ -373,6 +374,7 @@ class PicoControllerInputNode:
             try:
                 self._at_home_latch.close()
                 self._return_latch.close()
+                self._live.close()
             finally:
                 self._session.close()
 

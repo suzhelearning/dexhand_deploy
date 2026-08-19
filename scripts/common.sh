@@ -2,12 +2,12 @@
 set -euo pipefail
 
 BUNDLE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-ROS_ROOT="${BUNDLE_ROOT}/runtime/ros/humble"
 PROJECT_PREFIX="${BUNDLE_ROOT}/runtime/pico_body_tianji"
 ABI_LIBRARY_ROOT="${BUNDLE_ROOT}/runtime/abi/lib"
 PIN_LIBRARY_ROOT="${BUNDLE_ROOT}/runtime/pin/lib"
-GUI_LIBRARY_ROOT="${BUNDLE_ROOT}/runtime/gui/lib"
-QT_PLUGIN_ROOT="${BUNDLE_ROOT}/runtime/gui/qt/plugins"
+ZENOH_LIBRARY_ROOT="${BUNDLE_ROOT}/vendor/zenoh/lib"
+ZENOH_CPP_INCLUDE_ROOT="${BUNDLE_ROOT}/vendor/zenoh-cpp/include"
+ZENOH_C_INCLUDE_ROOT="${BUNDLE_ROOT}/vendor/zenoh/include"
 _TELEOP_RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 TELEOP_RUNTIME_DIR="${PICO_TIANJI_RUNTIME_DIR:-${_TELEOP_RUNTIME_BASE}/pico-tianji-teleop-${UID}}"
 TELEOP_GUARDS_DIR="${TELEOP_RUNTIME_DIR}/guards"
@@ -334,8 +334,32 @@ read_teleop_node_list() {
     printf '%s\n' "${PICO_TIANJI_NODE_LIST_OVERRIDE}"
     return 0
   fi
-  timeout 4 python "${ROS_ROOT}/bin/ros2" node list \
-    --no-daemon 2>/dev/null
+  # Zenoh liveliness 查询 tj/live/*，输出带前导斜杠的节点名（兼容旧检查）。
+  python - <<'PY' 2>/dev/null
+import sys
+import threading
+import zenoh
+
+names = set()
+done = threading.Event()
+
+
+def handler(reply):
+    if reply.ok:
+        name = str(reply.result.key_expr).rsplit("/", 1)[-1]
+        names.add("/" + name)
+    done.set()
+
+
+session = zenoh.open(zenoh.Config())
+try:
+    session.liveliness().get("tj/live/*", handler, timeout=1.0)
+    done.wait(1.5)
+finally:
+    session.close()
+for name in sorted(names):
+    print(name)
+PY
 }
 
 assert_no_conflicting_teleop_nodes() {
@@ -347,7 +371,7 @@ assert_no_conflicting_teleop_nodes() {
   fi
   if ! node_list="$(read_teleop_node_list)"; then
     printf '%s\n' \
-      '错误：无法检查 ROS 图中的旧控制节点，拒绝启动。' >&2
+      '错误：无法检查遥操作图中的旧控制节点（zenoh liveliness），拒绝启动。' >&2
     return 1
   fi
   conflicts="$(find_conflicting_teleop_nodes "${mode}" <<<"${node_list}")"
@@ -476,33 +500,59 @@ assert_single_controller_only_simulation_host_chain() {
   fi
 }
 
+yaml_params_for() {
+  # 用法：yaml_params_for <节点名> <yaml 路径> [urdf_path:=绝对路径 ...]
+  # 输出该节点段的裸 key:=value 参数（每行一个，无 --param 前缀；
+  # C++ 节点直接使用，Python 节点由调用方包装为 --param <key:=value>）。
+  local node_name="$1"
+  local yaml_path="$2"
+  shift 2
+  python - "$node_name" "$yaml_path" "$@" <<'PY' 2>/dev/null
+import json
+import sys
+
+node_name, yaml_path = sys.argv[1], sys.argv[2]
+extra = [arg for arg in sys.argv[3:] if ":=" in arg]
+
+with open(yaml_path, encoding="utf-8") as fh:
+    import yaml
+    data = yaml.safe_load(fh) or {}
+section = data.get(node_name, data)
+if isinstance(section, dict) and "ros__parameters" in section:
+    section = section["ros__parameters"]
+for key, value in (section or {}).items():
+    if isinstance(value, bool):
+        encoded = "true" if value else "false"
+    elif isinstance(value, (list, tuple)):
+        encoded = json.dumps(list(value), separators=(",", ":"))
+    else:
+        encoded = str(value)
+    print(f"{key}:={encoded}")
+for arg in extra:
+    print(arg)
+PY
+}
+
 activate_bundle_runtime() {
-  if [[ ! -f \
-    "${ROS_ROOT}/local/lib/python3.10/dist-packages/rclpy/__init__.py" ]]
-  then
-    printf '错误：缺少随包 ROS 2 运行时：%s\n' "${ROS_ROOT}" >&2
+  if [[ ! -d "${BUNDLE_ROOT}/vendor/python" ||
+        ! -d "${ZENOH_LIBRARY_ROOT}" ]]; then
+    printf '%s\n' \
+      '错误：缺少随包运行环境（vendor/python、vendor/zenoh）。' >&2
+    return 1
+  fi
+  if ! python -c 'import zenoh' 2>/dev/null; then
+    printf '%s\n' \
+      '错误：当前 Python 环境缺少 zenoh（请用 pixi run 执行）。' >&2
     return 1
   fi
 
-  ros_library_path=""
-  if [[ -d "${ROS_ROOT}/lib/x86_64-linux-gnu" ]]; then
-    ros_library_path="${ROS_ROOT}/lib/x86_64-linux-gnu"
-  fi
-  while IFS= read -r -d '' library_dir; do
-    ros_library_path+="${ros_library_path:+:}${library_dir}"
-  done < <(find "${ROS_ROOT}" -type d -name lib -print0)
-
-  export AMENT_PREFIX_PATH="${PROJECT_PREFIX}:${ROS_ROOT}${AMENT_PREFIX_PATH:+:${AMENT_PREFIX_PATH}}"
-  export RMW_IMPLEMENTATION="rmw_cyclonedds_cpp"
   export PYTHONDONTWRITEBYTECODE=1
-  export PATH="${PROJECT_PREFIX}/lib/pico_body_tianji:${ROS_ROOT}/bin:${PATH}"
-  export PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${BUNDLE_ROOT}/vendor/python:${ROS_ROOT}/local/lib/python3.10/dist-packages:${ROS_ROOT}/lib/python3.10/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
+  export PICO_BODY_TIANJI_BUNDLE_ROOT="${BUNDLE_ROOT}"
+  export PATH="${PROJECT_PREFIX}/lib/pico_body_tianji:${PATH}"
+  export PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${BUNDLE_ROOT}/vendor/python:${PROJECT_PREFIX}/lib/python3.10/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
   conda_library_path=""
   if [[ -n "${CONDA_PREFIX:-}" ]]; then
     conda_library_path="${CONDA_PREFIX}/lib:"
   fi
-  export LD_LIBRARY_PATH="${conda_library_path}${BUNDLE_ROOT}/vendor/lib:${PROJECT_PREFIX}/lib:${GUI_LIBRARY_ROOT}:${ros_library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-  export QT_PLUGIN_PATH="${QT_PLUGIN_ROOT}${QT_PLUGIN_PATH:+:${QT_PLUGIN_PATH}}"
-  export QT_QPA_PLATFORM_PLUGIN_PATH="${QT_PLUGIN_ROOT}/platforms"
-  export QT_X11_NO_MITSHM=1
+  export LD_LIBRARY_PATH="${conda_library_path}${BUNDLE_ROOT}/vendor/lib:${ZENOH_LIBRARY_ROOT}:${PROJECT_PREFIX}/lib:${PIN_LIBRARY_ROOT}:${ABI_LIBRARY_ROOT}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 }

@@ -16,9 +16,11 @@ from ..freshness import FreshnessGate
 from ..teleop_state import TeleopStateMachine
 from ..zenoh_util import (
     LatchedKey,
+    LiveToken,
     ZenohPub,
     key,
     load_node_config,
+    load_tianji_config,
     open_session,
     parse_cli_args,
     parse_param_override,
@@ -70,7 +72,7 @@ class PicoControllerOnlyInputNode:
             params["require_reliable_timestamp"]
         )
 
-        config = TianjiConfig.load()
+        config = load_tianji_config()
         self._mapper = ControllerOnlyTeleopMapper(
             config,
             rate=rate,
@@ -151,6 +153,7 @@ class PicoControllerOnlyInputNode:
             self._on_at_home_query,
             timeout=1.0,
         )
+        self._live = LiveToken(session, "pico_controller_only_input")
 
         self._publish_state("idle")
         self._log.info(
@@ -342,6 +345,7 @@ class PicoControllerOnlyInputNode:
             try:
                 self._at_home_latch.close()
                 self._return_latch.close()
+                self._live.close()
             finally:
                 self._session.close()
 

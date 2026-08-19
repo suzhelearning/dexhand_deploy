@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
@@ -102,20 +103,18 @@ class ZenohPub:
 # ---------------------------------------------------------------- 订阅
 
 class _SafeSub:
-    """包装 subscriber：解码 + 异常隔离。"""
+    """包装 subscriber：解码 + 异常隔离。
+
+    注意：zenoh-python 1.10 的 declare_subscriber 不接受 reliability
+    参数（仅 declare_publisher 有），可靠语义为 zenoh 默认。
+    """
 
     def __init__(
         self,
         session: zenoh.Session,
         key: str,
         handler: Callable[[zenoh.Sample], None],
-        *,
-        reliability: Optional[Any] = None,
     ):
-        kwargs = {}
-        if reliability is not None:
-            kwargs["reliability"] = reliability
-
         def safe_handler(sample: zenoh.Sample) -> None:
             try:
                 handler(sample)
@@ -123,7 +122,7 @@ class _SafeSub:
                 import traceback
                 traceback.print_exc()
 
-        self._sub = session.declare_subscriber(key, safe_handler, **kwargs)
+        self._sub = session.declare_subscriber(key, safe_handler)
 
     def close(self) -> None:
         try:
@@ -135,27 +134,27 @@ class _SafeSub:
 class ZenohJsonSub(_SafeSub):
     """JSON 消息订阅；handler 收到解码后的对象。"""
 
-    def __init__(self, session, key, handler, **kwargs):
+    def __init__(self, session, key, handler):
         def decoded(sample):
             payload = bytes(sample.payload)
             if not payload:
                 return
             handler(json.loads(payload.decode("utf-8")))
 
-        super().__init__(session, key, decoded, **kwargs)
+        super().__init__(session, key, decoded)
 
 
 class ZenohTextSub(_SafeSub):
     """裸文本订阅；handler 收到 str。"""
 
-    def __init__(self, session, key, handler, **kwargs):
+    def __init__(self, session, key, handler):
         def decoded(sample):
             payload = bytes(sample.payload)
             if not payload:
                 return
             handler(payload.decode("utf-8"))
 
-        super().__init__(session, key, decoded, **kwargs)
+        super().__init__(session, key, decoded)
 
 
 # ---------------------------------------------------------------- 事件 + 初始值
@@ -221,6 +220,41 @@ class LatchedKey:
 
 
 # ---------------------------------------------------------------- 参数
+
+def load_tianji_config():
+    """显式加载随包 tianji_robot.yaml（避开 ament 索引依赖）。
+
+    优先使用环境变量 PICO_BODY_TIANJI_BUNDLE_ROOT（activate_bundle_runtime
+    导出）；缺失时回退到源码树相对定位。
+    """
+    from tianji_world_output.config_loader import TianjiConfig
+
+    bundle_root = os.environ.get("PICO_BODY_TIANJI_BUNDLE_ROOT", "")
+    if bundle_root:
+        config_path = os.path.join(
+            bundle_root,
+            "vendor",
+            "python",
+            "tianji_world_output",
+            "config",
+            "tianji_robot.yaml",
+        )
+        return TianjiConfig.load(config_path)
+    # 回退：本文件位于 <root>/src/pico_body_tianji/pico_body_tianji/
+    here = os.path.dirname(os.path.abspath(__file__))
+    fallback = os.path.join(
+        here,
+        "..",
+        "..",
+        "..",
+        "vendor",
+        "python",
+        "tianji_world_output",
+        "config",
+        "tianji_robot.yaml",
+    )
+    return TianjiConfig.load(fallback)
+
 
 def parse_cli_args(
     argv: Optional[list] = None,

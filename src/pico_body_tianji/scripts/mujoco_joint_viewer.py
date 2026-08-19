@@ -39,7 +39,6 @@ class MujocoJointMirror:
             session,
             key(topic),
             self._on_joint_state,
-            reliability=zenoh.Reliability.RELIABLE,
         )
         _LOG.info("等待只读关节状态：%s", topic)
 

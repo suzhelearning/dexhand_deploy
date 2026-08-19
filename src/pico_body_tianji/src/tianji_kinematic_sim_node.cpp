@@ -913,6 +913,8 @@ private:
       zenoh::KeyExpr(topic_key("/pico_body_sim/model_joint_states")));
     status_publisher_ = session_.declare_publisher(
       zenoh::KeyExpr(topic_key("/pico_body_sim/status")));
+    liveliness_token_ = session_.liveliness_declare_token(
+      zenoh::KeyExpr("tj/live/tianji_kinematic_sim"));
     teleop_state_subscription_ = session_.declare_subscriber(
       zenoh::KeyExpr(topic_key("/pico_body/teleop_state")),
       [this](const zenoh::Sample & sample) {
@@ -1378,6 +1380,7 @@ private:
   std::array<std::optional<zenoh::Publisher>, 2> solved_pose_publishers_;
   std::optional<zenoh::Publisher> model_joint_publisher_;
   std::optional<zenoh::Publisher> status_publisher_;
+  std::optional<zenoh::LivelinessToken> liveliness_token_;
 
   std::array<std::optional<zenoh::Subscriber<void>>, 2> pose_subscriptions_;
   std::array<std::optional<zenoh::Subscriber<void>>, 2>
