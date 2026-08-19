@@ -315,7 +315,7 @@ find_conflicting_teleop_nodes() {
   local mode="${1:-all}"
   awk -v mode="${mode}" '
     {
-      host_node = ($0 ~ /^\/(pico_controller_input|pico_controller_only_input|tianji_kinematic_sim|pico_body_sim\/marvin_robot_state_publisher)$/)
+      host_node = ($0 ~ /^\/(pico_controller_input|pico_controller_only_input|tianji_kinematic_sim)$/)
       output_node = ($0 ~ /^\/(marvin_hardware_bridge|tianji_world_output_node|tianji_arm_node)$/)
       if ((mode != "real" && host_node) || output_node) {
         if (!seen[$0]++) {

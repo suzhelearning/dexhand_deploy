@@ -22,7 +22,6 @@ required_files=(
   "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
   "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4_mujoco.urdf"
   "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/meshes/Link_Base.STL"
-  "${BUNDLE_ROOT}/src/pico_body_tianji/rviz/preview.rviz"
   "${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
   "${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim.bin"
   "${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_official_ik_probe"
@@ -31,8 +30,6 @@ required_files=(
   "${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_official_ik_worker.bin"
   "${BUNDLE_ROOT}/runtime/tianji_official/kinematicsSDK/libKine.so"
   "${BUNDLE_ROOT}/runtime/tianji_official/CommonConfig/ccs_m6_40.MvKDCfg"
-  "${PROJECT_PREFIX}/share/pico_body_tianji/launch/preview.launch.py"
-  "${PROJECT_PREFIX}/share/pico_body_tianji/rviz/preview.rviz"
   "${ABI_LIBRARY_ROOT}/ld-linux-x86-64.so.2"
   "${PIN_LIBRARY_ROOT}/libpinocchio_default.so"
 )
