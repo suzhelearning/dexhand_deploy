@@ -217,14 +217,34 @@ class MocapKeyboardStepNode:
     def _keyboard_loop(self) -> None:
         raw_keyboard(self._on_key, self._stop_event)
 
+    # raw 模式终端无 echo；按键事件实时回显到 stdout。
+    _ECHO_SYMBOLS = {
+        "up": "↑",
+        "down": "↓",
+        "left": "←",
+        "right": "→",
+        "1": "1",
+        "0": "0",
+        "s": "s",
+        "q": "q",
+    }
+
+    def _echo(self, event: str) -> None:
+        try:
+            print(self._ECHO_SYMBOLS.get(event, event), end="", flush=True)
+        except OSError:
+            pass
+
     def _on_key(self, byte: str) -> None:
         event = self._parser.feed(byte)
         if event is None:
             return
         if event in ("\x03", "q"):  # Ctrl+C / q：raw 模式无 SIGINT，自行退出
+            self._echo("q")
             self._handle_interrupt()
             return
         if event == "s":
+            self._echo("s")
             if self._phase == "armed":
                 self._phase = "stepping"
                 self._phase_started = time.monotonic()
@@ -245,6 +265,7 @@ class MocapKeyboardStepNode:
             return
         if self._phase != "stepping" or event not in AXIS_STEPS:
             return
+        self._echo(event)
         pose = self._accumulator.step(event)
         # 进入 settle：_tick 在 60Hz 持续映射该位姿，让滤波/整形收敛。
         self._pending_pose = pose
