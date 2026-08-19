@@ -7,3 +7,7 @@ tests/logs
 build/
 log/
 staging/
+
+# 本地便携运行包和厂商二进制；由构建或受控离线包提供。
+runtime/
+vendor/
