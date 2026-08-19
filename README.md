@@ -71,17 +71,20 @@ pixi --version
 
 ### 1. 获取简化版项目并进入目录
 
-从 GitHub 克隆：
+源码开发可从 GitHub 克隆：
 
 ```bash
-git clone git@github.com:hbw1010/tianji_teleop.git
+git clone git@github.com:suzhelearning/tianji_teleop.git
 cd tianji_teleop
 ```
 
-也可以使用独立压缩包：
+Git 仓库只跟踪源码、脚本、配置和 Pixi 锁文件，不跟踪 `.pixi/`、
+`runtime/`、`vendor/`、`build/`、`log/`、`staging/` 等本地环境或
+生成物。因此源码克隆不能直接运行 `doctor`、仿真或真机任务。
 
-只需要复制这一份压缩包到目标电脑，不需要同时复制源码仓库、Docker
-镜像、ROS 工作区或外置校验文件。执行：
+运行仿真或真机时应使用独立压缩包，其中包含经过校验的运行时和厂商
+二进制。只需要复制这一份压缩包到目标电脑，不需要同时复制源码仓库、
+Docker 镜像、ROS 工作区或外置校验文件。执行：
 
 ```bash
 tar -xzf pico_tianji_teleop_standalone_*.tar.gz
