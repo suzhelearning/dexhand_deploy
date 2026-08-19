@@ -41,6 +41,23 @@ mocap_keyboard_step:
     left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
     right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
 
+# mocap 动捕实时位姿驱动节点：目标整形参数 1:1（translation_gain=1.0），
+# 动捕位姿增量 → 目标位移严格 1:1，用于真机逐点验收/标定。
+mocap_live:
+  ros__parameters:
+    min_cutoff: 1.2
+    beta: 0.45
+    translation_gain: [1.0, 1.0, 1.0]
+    rotation_gain: 1.0
+    workspace_relative_radii_m: [0.42, 0.38, 0.38]
+    workspace_soft_zone_ratio: 0.90
+    maximum_linear_speed_m_s: 0.36
+    maximum_angular_speed_rad_s: 1.55
+    maximum_linear_acceleration_m_s2: 3.5
+    maximum_angular_acceleration_rad_s2: 9.0
+    left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
+    right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
+
 tianji_kinematic_sim:
   ros__parameters:
     # 仅手柄模式只在这里选择 IK：

@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# 直接 bash 运行（不经 pixi）时系统 python 缺少 zenoh；自动经
+# pixi run 重新执行本脚本（doctor / activate_bundle_runtime 均需
+# zenoh 环境）。pixi run 下 PATH 已含 zenoh 环境，不会递归。
+if ! python -c 'import zenoh' 2>/dev/null; then
+  if command -v pixi >/dev/null 2>&1; then
+    exec pixi run bash "${BASH_SOURCE[0]}" "$@"
+  fi
+fi
+
+# mocap 动捕实时位姿仿真（Zenoh 通讯版，无 ROS）。
+#
+# 订阅 Motive 实时手腕刚体位姿（natnet-zenoh publisher →
+# zenohd Router → 本节点），基于动捕系位姿增量驱动 IK；'s' 记录
+# 参考开始、's' 结束回 Home、'q' 退出。IK 与 MuJoCo 后台受管，
+# 节点前台直连终端（raw 模式读键）。
+#
+# 前置：Windows Motive + natnet-zenoh publisher 已发布
+# mocap/hands/frame；本机 zenohd Router（tcp/0.0.0.0:7447）常驻
+# （acquisition 项目 start_zenohd.sh / systemd 服务）。
+#
+# 用法：
+#   pixi run sim_mocap_live
+#   pixi run sim_mocap_live -- --topics-only
+#   pixi run sim_mocap_live -- --left-rigid-id 1 --right-rigid-id 2
+
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common.sh"
+
+WITH_MUJOCO=true
+LEFT_RIGID_ID=1
+RIGHT_RIGID_ID=2
+CONNECT_ENDPOINT="tcp/127.0.0.1:7447"
+MUJOCO_PID=""
+SIM_PID=""
+
+usage() {
+  cat <<'EOF'
+用法：
+  pixi run sim_mocap_live [-- 模式]
+  bash scripts/run_mocap_live.sh [模式]
+
+模式：
+  --mujoco-only         同时启动 IK、MuJoCo 预览与动捕实时驱动（默认）
+  --topics-only         只启动 IK 与动捕实时驱动（无界面）
+  --left-rigid-id N     左手腕 Motive 刚体 ID（默认 1）
+  --right-rigid-id N    右手腕 Motive 刚体 ID（默认 2）
+  --connect-endpoint EP zenohd Router 端点（默认 tcp/127.0.0.1:7447；
+                         空字符串则用默认本机 scouting）
+  -h, --help
+
+本脚本只启动纯运动学仿真，不加载 Marvin SDK，不连接实体机械臂。
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --mujoco-only)
+      WITH_MUJOCO=true
+      ;;
+    --topics-only)
+      WITH_MUJOCO=false
+      ;;
+    --left-rigid-id)
+      if (($# < 2)); then
+        printf '%s\n' '错误：--left-rigid-id 缺少数值。' >&2
+        usage >&2
+        exit 2
+      fi
+      LEFT_RIGID_ID="$2"
+      shift
+      ;;
+    --right-rigid-id)
+      if (($# < 2)); then
+        printf '%s\n' '错误：--right-rigid-id 缺少数值。' >&2
+        usage >&2
+        exit 2
+      fi
+      RIGHT_RIGID_ID="$2"
+      shift
+      ;;
+    --connect-endpoint)
+      if (($# < 2)); then
+        printf '%s\n' '错误：--connect-endpoint 缺少值。' >&2
+        usage >&2
+        exit 2
+      fi
+      CONNECT_ENDPOINT="$2"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf '错误：未知参数 %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [[
+  "${WITH_MUJOCO}" == true &&
+  -z "${DISPLAY:-}" &&
+  -z "${WAYLAND_DISPLAY:-}"
+]]; then
+  printf '%s\n' \
+    '错误：未检测到 DISPLAY/WAYLAND_DISPLAY，无法启动 MuJoCo 预览。' \
+    '可使用 --topics-only 验证无界面仿真链路。' >&2
+  exit 1
+fi
+
+acquire_teleop_guard mocap-replay
+install_teleop_cleanup_traps
+
+"${SCRIPT_DIR}/doctor.sh"
+activate_bundle_runtime
+assert_no_conflicting_teleop_nodes
+
+SIM_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
+LIVE_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/mocap_live"
+PARAMETERS="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml"
+URDF_PATH="${PROJECT_PREFIX}/share/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
+MUJOCO_VIEWER="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/mujoco_joint_viewer.py"
+
+for required in \
+  "${SIM_NODE}" \
+  "${LIVE_NODE}" \
+  "${PARAMETERS}" \
+  "${URDF_PATH}" \
+  "${MUJOCO_VIEWER}"
+do
+  if [[ ! -f "${required}" ]]; then
+    printf '错误：mocap 动捕实时驱动运行文件不存在：%s\n' "${required}" >&2
+    exit 1
+  fi
+done
+
+if [[ "${WITH_MUJOCO}" == true ]]; then
+  setsid python "${MUJOCO_VIEWER}" &
+  MUJOCO_PID=$!
+  register_teleop_process_group "${MUJOCO_PID}" mujoco-viewer 5
+fi
+
+# C++ 节点只接受裸 key:=value 参数；yaml_params_for 直接输出该格式。
+mapfile -t sim_arguments < <(
+  yaml_params_for tianji_kinematic_sim "${PARAMETERS}" \
+    "urdf_path:=${URDF_PATH}"
+)
+for index in "${!sim_arguments[@]}"; do
+  sim_arguments[index]="${sim_arguments[index]#--param }"
+done
+setsid "${SIM_NODE}" "${sim_arguments[@]}" &
+SIM_PID=$!
+register_teleop_process_group "${SIM_PID}" sim-ik-solver 5
+
+printf '%s\n' \
+  '启动 mocap 动捕实时驱动（Zenoh）：Motive 位姿 → 参考增量 → IK' \
+  "  左右手腕刚体 id=${LEFT_RIGID_ID}/${RIGHT_RIGID_ID}  " \
+  "Router=${CONNECT_ENDPOINT}  MuJoCo=${WITH_MUJOCO}" \
+  '该任务不会连接 Marvin 控制器。'
+
+# 动捕实时节点前台运行：stdin 直连终端（raw 模式读键）。
+"${LIVE_NODE}" \
+  --config "${PARAMETERS}" \
+  --param "rate:=60" \
+  --left-rigid-id "${LEFT_RIGID_ID}" \
+  --right-rigid-id "${RIGHT_RIGID_ID}" \
+  --connect-endpoint "${CONNECT_ENDPOINT}"
+LIVE_EXIT=$?
+
+exit "${LIVE_EXIT}"

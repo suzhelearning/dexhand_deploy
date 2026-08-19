@@ -174,6 +174,43 @@ class HostReadinessGate:
                 and source.get("error") is None
             ):
                 return HostReadiness(False, "pico_smpl_not_live")
+        elif source.get("input") == "mocap_live":
+            # mocap 动捕实时位姿驱动：Motive 实时手腕刚体 → 参考增量
+            # 跟随，要求动捕跟踪器在运行（motion_trackers_required）。
+            if not (
+                source.get("source") == "live"
+                and source.get("mapping")
+                == "controller_relative_end_pose_conditioned_v1"
+                and source.get("body_tracking") == "disabled"
+                and source.get("motion_trackers_required") is True
+                and source.get("elbow_constraint")
+                == "published_default_zsp_backend_selected"
+                and source.get("smpl_used") is False
+                and source.get("scope") == "mocap_live"
+                and source.get("at_safe_home") is True
+                and source.get("error") is None
+            ):
+                return HostReadiness(False, "mocap_live_not_ready")
+        elif source.get("input") == "mocap_keyboard_step":
+            # mocap 键盘步进主机：确定性逐点验收/标定输入，
+            # 接受离线来源（source=offline_replay），要求
+            # preview-only 身份与就绪字段。
+            if not (
+                source.get("source") == "offline_replay"
+                and source.get("mapping")
+                == "controller_relative_end_pose_conditioned_v1"
+                and source.get("body_tracking") == "disabled"
+                and source.get("motion_trackers_required") is False
+                and source.get("elbow_constraint")
+                == "published_default_zsp_backend_selected"
+                and source.get("smpl_used") is False
+                and source.get("scope") == "mocap_keyboard_step"
+                and source.get("at_safe_home") is True
+                and source.get("error") is None
+            ):
+                return HostReadiness(
+                    False, "mocap_keyboard_step_not_ready"
+                )
         elif not (
             source.get("source") == "live"
             and source.get("input") == "pico_controllers_only"

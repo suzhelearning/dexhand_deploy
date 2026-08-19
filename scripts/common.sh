@@ -483,6 +483,10 @@ assert_single_controller_only_simulation_host_chain() {
     awk '$0 == "/pico_controller_only_input" {count++} END {print count + 0}' \
       <<<"${node_list}"
   )"
+  mocap_host_count="$(
+    awk '$0 == "/mocap_keyboard_step" || $0 == "/mocap_live" {count++} END {print count + 0}' \
+      <<<"${node_list}"
+  )"
   smpl_count="$(
     awk '$0 == "/pico_controller_input" {count++} END {print count + 0}' \
       <<<"${node_list}"
@@ -491,6 +495,21 @@ assert_single_controller_only_simulation_host_chain() {
     awk '$0 == "/tianji_kinematic_sim" {count++} END {print count + 0}' \
       <<<"${node_list}"
   )"
+  if ((mocap_host_count >= 1)); then
+    # mocap 主机（键盘步进 / 动捕实时位姿）：确定性真机验收。运行锁
+    # 为 mocap-replay（sim_mocap_step / sim_mocap_live），输入身份
+    # /mocap_keyboard_step 或 /mocap_live（host_readiness 显式接受）。
+    assert_managed_teleop_guard_alive mocap-replay
+    if ((mocap_host_count != 1 || controller_only_count != 0 ||
+        smpl_count != 0 || ik_count != 1)); then
+      printf '%s\n' \
+        '拒绝连接真机：mocap 主机必须恰好运行一套（步进/动捕实时）+ IK。' \
+        "  当前计数：mocap=${mocap_host_count} 纯手柄=${controller_only_count} SMPL=${smpl_count} IK=${ik_count}" \
+        '请先运行 pixi run sim_mocap_step / sim_mocap_live，并关闭其他仿真任务。' >&2
+      return 1
+    fi
+    return 0
+  fi
   if ((controller_only_count != 1 || smpl_count != 0 || ik_count != 1)); then
     printf '%s\n' \
       '拒绝连接真机：主机侧必须恰好运行一套纯手柄 + IK。' \

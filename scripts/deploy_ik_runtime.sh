@@ -16,6 +16,7 @@ RUNTIME_PROGRAMS=(
   controller_only_real_diagnostic
   marvin_hardware_bridge
   mocap_keyboard_step
+  mocap_live
   mujoco_joint_viewer.py
 )
 BACKUP_DIR="${BUNDLE_ROOT}/staging/runtime-backup"

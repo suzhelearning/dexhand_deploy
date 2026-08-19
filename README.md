@@ -188,7 +188,8 @@ tianji_kinematic_sim:
 
 因此运行命令始终只有
 `sim`、`real`、`sim_controller_only`、`real_controller_only`、
-`sim_mocap_step` 五个，不会把模式名与 IK 名组合成新命令。
+`sim_mocap_step`、`real_mocap_step` 六个，不会把模式名与 IK 名组合
+成新命令。
 
 官方库路径和机型配置保持空字符串即可，运行时包装器会使用项目内的
 `runtime/tianji_official`。修改完成后，在项目根目录依次执行：
@@ -545,6 +546,9 @@ key，不发布控制命令；结束后会打印输入速度/加速度、椭球�
 | `pixi run real -- --confirm-real` | 复用正在运行的 sim，启动真机桥 | **是** |
 | `pixi run sim_controller_only` | 纯手柄 IK 的 MuJoCo 仿真 | 否 |
 | `pixi run sim_mocap_step` | mocap 键盘步进控制（动捕系 10mm/键，s 启停） | 否 |
+| `pixi run sim_mocap_live` | mocap 动捕实时位姿驱动（Motive → 参考增量 → IK） | 否 |
+| `pixi run real_mocap_step -- --confirm-real` | 复用键盘步进仿真，启动真机桥 | **是** |
+| `pixi run real_mocap_live -- --confirm-real` | 复用动捕实时仿真，启动真机桥 | **是** |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
 
 `doctor`、`test`、`pico-probe`、`status`、`controller-only-joints` 和
@@ -581,6 +585,40 @@ pixi run sim_mocap_step -- --step-mm 5      # 每次 5mm
 方向键在 raw 模式是 `\x1b[A/B/C/D` 转义序列，由 `ArrowKeyParser`
 解析；步进节点前台运行，stdin 直连终端（raw 模式读键），不经过
 launch/FIFO 转发。
+
+**按键驱动真机**（逐点验收/标定）：先运行键盘步进仿真主机，再起
+真机桥（安全桥 → Marvin 低层关节控制）：
+
+```bash
+# 终端 1：键盘步进 + IK 主机链路
+pixi run sim_mocap_step
+
+# 终端 2：真机桥（确认硬件安全后）
+pixi run real_mocap_step -- --confirm-real
+```
+
+真机桥复用 IK 解算的关节命令（与 PICO 手柄链路同协议），
+`host_readiness` 显式接受 `mocap_keyboard_step` 身份；桥只在双臂
+命令就绪且位于 Home 时进入 armed_idle，随后按 `s` 开始、方向键
+步进（默认仅右臂 10mm/键）、再按 `s` 回 Home、`q` 退出。
+
+**mocap 动捕实时位姿驱动（sim_mocap_live / real_mocap_live）**：
+订阅 Motive 实时手腕刚体位姿（`mocap/hands/frame`，natnet-zenoh
+publisher → zenohd Router tcp/0.0.0.0:7447），基于动捕系位姿做
+参考增量跟随（'s' 记录参考开始，再按 's' 回 Home，'q' 退出）：
+
+```bash
+pixi run sim_mocap_live                        # Motive 实时 → IK（+MuJoCo）
+pixi run sim_mocap_live -- --topics-only
+pixi run sim_mocap_live -- --left-rigid-id 1 --right-rigid-id 2
+
+# 真机（先起上面的 sim 主机，再确认硬件安全后）
+pixi run real_mocap_live -- --confirm-real
+```
+
+单侧手腕刚体 `tracking_valid=false` 或缺失时该侧不发目标（IK 保持
+当前关节角，真机桥按命令超时软停）。`host_readiness` 显式接受
+`mocap_live` 身份（要求动捕跟踪器在运行）。
 
 ## 控制原理
 

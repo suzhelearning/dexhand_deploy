@@ -37,6 +37,42 @@ def _controller_only_status() -> dict:
     }
 
 
+def _mocap_live_status() -> dict:
+    return {
+        "state": "idle",
+        "source": "live",
+        "input": "mocap_live",
+        "scope": "mocap_live",
+        "mapping": "controller_relative_end_pose_conditioned_v1",
+        "body_tracking": "disabled",
+        "motion_trackers_required": True,
+        "elbow_constraint": "published_default_zsp_backend_selected",
+        "smpl_used": False,
+        "at_safe_home": True,
+        "left_rigid_id": 1,
+        "right_rigid_id": 2,
+        "error": None,
+    }
+
+
+def _mocap_step_status() -> dict:
+    return {
+        "state": "idle",
+        "source": "offline_replay",
+        "input": "mocap_keyboard_step",
+        "scope": "mocap_keyboard_step",
+        "mapping": "controller_relative_end_pose_conditioned_v1",
+        "body_tracking": "disabled",
+        "motion_trackers_required": False,
+        "elbow_constraint": "published_default_zsp_backend_selected",
+        "smpl_used": False,
+        "at_safe_home": True,
+        "step_mm": 10.0,
+        "side": "right",
+        "error": None,
+    }
+
+
 def _observe_safe_host(
     gate: HostReadinessGate,
     input_status: dict,
@@ -172,6 +208,39 @@ class ControllerOnlyHostReadinessTest(unittest.TestCase):
 
         self.assertTrue(decision.ready)
         self.assertEqual(decision.reason, "ready")
+
+
+class MocapLiveHostReadinessTest(unittest.TestCase):
+    def test_mocap_live_host_is_ready(self) -> None:
+        gate = _gate("controller_only")
+        _observe_safe_host(gate, _mocap_live_status())
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertTrue(decision.ready)
+        self.assertEqual(decision.reason, "ready")
+
+    def test_mocap_live_requires_trackers(self) -> None:
+        gate = _gate("controller_only")
+        status = _mocap_live_status()
+        status["motion_trackers_required"] = False
+
+        _observe_safe_host(gate, status)
+        decision = gate.evaluate(now=10.02)
+
+        self.assertFalse(decision.ready)
+        self.assertEqual(decision.reason, "mocap_live_not_ready")
+
+    def test_mocap_live_rejects_offline_source(self) -> None:
+        gate = _gate("controller_only")
+        status = _mocap_live_status()
+        status["source"] = "offline_replay"
+
+        _observe_safe_host(gate, status)
+        decision = gate.evaluate(now=10.02)
+
+        self.assertFalse(decision.ready)
+        self.assertEqual(decision.reason, "mocap_live_not_ready")
 
 
 if __name__ == "__main__":
