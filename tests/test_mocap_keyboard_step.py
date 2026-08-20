@@ -138,8 +138,14 @@ class _CapturePublisher:
 class MocapLiveReferenceKeyboardTest(unittest.TestCase):
     """机器人末端刚体只用于定零，后续实测随动不得改变虚拟目标。"""
 
-    def test_right_arm_reference_freezes_then_keyboard_steps(self) -> None:
+    @staticmethod
+    def _node() -> MocapLiveNode:
         node = MocapLiveNode.__new__(MocapLiveNode)
+        node._phase_lock = threading.RLock()
+        return node
+
+    def test_right_arm_reference_freezes_then_keyboard_steps(self) -> None:
+        node = self._node()
         node._parser = ArrowKeyParser()
         node._phase = "armed"
         node._frame_lock = threading.Lock()
@@ -204,8 +210,73 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
             right_reference[:3] + np.array([0.01, 0.01, 0.03]),
         )
 
+
+    def test_teleop_transition_cannot_be_followed_by_stale_idle(self) -> None:
+        node = self._node()
+        node._parser = ArrowKeyParser()
+        node._phase = "armed"
+        node._frame_lock = threading.Lock()
+        node._latest_frame = {
+            "left": _REFERENCE_POSE.copy(),
+            "right": _REFERENCE_POSE.copy(),
+        }
+        node._latest_received_monotonic = time.monotonic()
+        node._side_pose = lambda frame, side: frame[side].copy()
+        node._active_sides = ("right",)
+        node._rigid_ids = {
+            "left": "left_wrist",
+            "right": "right_arm",
+        }
+        node._step_mm = 10.0
+        node._command_lock = threading.Lock()
+        node._accumulators = None
+        node._mapper = _InitializeCapture()
+        node._echo = lambda event: None
+
+        idle_publish_started = threading.Event()
+        release_idle_publish = threading.Event()
+        states: list[str] = []
+        thread_errors: list[BaseException] = []
+
+        def publish_state(state: str) -> None:
+            if state == "idle":
+                idle_publish_started.set()
+                release_idle_publish.wait(timeout=1.0)
+            states.append(state)
+
+        def run_tick() -> None:
+            try:
+                node._tick()
+            except BaseException as exc:
+                thread_errors.append(exc)
+
+        def press_start() -> None:
+            try:
+                node._on_key("s")
+            except BaseException as exc:
+                thread_errors.append(exc)
+
+        node._publish_state = publish_state
+        tick_thread = threading.Thread(target=run_tick, daemon=True)
+        tick_thread.start()
+        self.assertTrue(idle_publish_started.wait(timeout=1.0))
+
+        key_thread = threading.Thread(target=press_start, daemon=True)
+        key_thread.start()
+        time.sleep(0.05)
+        self.assertTrue(key_thread.is_alive())
+
+        release_idle_publish.set()
+        tick_thread.join(timeout=1.0)
+        key_thread.join(timeout=1.0)
+        self.assertFalse(tick_thread.is_alive())
+        self.assertFalse(key_thread.is_alive())
+        self.assertEqual(thread_errors, [])
+        self.assertEqual(states, ["idle", "teleop"])
+        self.assertEqual(node._phase, "stepping")
+
     def test_s_within_debounce_window_ignored(self) -> None:
-        node = MocapLiveNode.__new__(MocapLiveNode)
+        node = self._node()
         node._parser = ArrowKeyParser()
         node._echo = lambda event: None
         node._phase = "stepping"
@@ -223,7 +294,7 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
         self.assertFalse(node._exit_after_return)
 
     def test_s_after_debounce_window_returns(self) -> None:
-        node = MocapLiveNode.__new__(MocapLiveNode)
+        node = self._node()
         node._parser = ArrowKeyParser()
         node._echo = lambda event: None
         node._phase = "stepping"
@@ -241,7 +312,7 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
         self.assertFalse(node._exit_after_return)
 
     def test_s_rearms_after_home_and_q_exits_after_home(self) -> None:
-        node = MocapLiveNode.__new__(MocapLiveNode)
+        node = self._node()
         node._parser = ArrowKeyParser()
         node._echo = lambda event: None
         node._phase = "stepping"
@@ -275,7 +346,7 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
         self.assertFalse(node._tick())
 
     def test_status_contains_live_motive_pose_and_valid_idle_state(self) -> None:
-        node = MocapLiveNode.__new__(MocapLiveNode)
+        node = self._node()
         node._frame_lock = threading.Lock()
         node._latest_frame = {
             "frame_number": 42,

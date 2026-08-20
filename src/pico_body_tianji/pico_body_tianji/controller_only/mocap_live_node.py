@@ -209,6 +209,10 @@ class MocapLiveNode:
         self._state_pub = ZenohPub(session, key("/pico_body/teleop_state"))
         self._status_pub = ZenohPub(session, key("/pico_body/status"))
         self._live = LiveToken(session, "mocap_live")
+        # phase、Home 回执与对应状态/目标发布跨主循环、键盘线程和
+        # Zenoh 回调线程共享。RLock 保证 phase 切换与旧状态发布不可
+        # 交错；否则 teleop 后迟到的一帧 idle 会触发真机安全回 Home。
+        self._phase_lock = threading.RLock()
         self._at_home = False
         self._return_complete = False
         self._exit_after_return = False
@@ -336,11 +340,13 @@ class MocapLiveNode:
             self._on_at_home_text(bytes(reply.result.payload).decode("utf-8"))
 
     def _on_at_home_text(self, payload: str) -> None:
-        self._at_home = payload.strip() == "true"
+        with self._phase_lock:
+            self._at_home = payload.strip() == "true"
 
     def _on_return_complete_text(self, payload: str) -> None:
         if payload.strip() == "true":
-            self._return_complete = True
+            with self._phase_lock:
+                self._return_complete = True
 
     # -- 键盘 ---------------------------------------------------------------
 
@@ -375,7 +381,9 @@ class MocapLiveNode:
             return
         if event == "s":
             self._echo("s")
-            if self._phase == "armed":
+            with self._phase_lock:
+                phase = self._phase
+            if phase == "armed":
                 with self._frame_lock:
                     frame = self._latest_frame
                     received_at = self._latest_received_monotonic
@@ -434,44 +442,55 @@ class MocapLiveNode:
                 except ValueError as exc:
                     _LOG.warning("Motive 参考位姿无效，拒绝开始：%s", exc)
                     return
-                with self._command_lock:
-                    self._accumulators = accumulators
-                self._return_complete = False
-                self._at_home = False
-                self._exit_after_return = False
-                self._phase = "stepping"
-                self._phase_started = time.monotonic()
-                self._publish_state("teleop")
+                # 与 _tick 的 phase 读取+状态发布互斥。无论谁先取得锁，
+                # Zenoh 上都只能是 idle→teleop，不能 teleop→迟到 idle。
+                with self._phase_lock:
+                    if self._phase != "armed":
+                        return
+                    with self._command_lock:
+                        self._accumulators = accumulators
+                    self._return_complete = False
+                    self._at_home = False
+                    self._exit_after_return = False
+                    self._phase = "stepping"
+                    self._phase_started = time.monotonic()
+                    self._publish_state("teleop")
                 _LOG.info(
                     "键盘 's'：已冻结 %s 参考位姿；后续 Motive 随动"
                     "不进入目标，方向键/1/0 开始步进",
                     "/".join(self._active_sides),
                 )
-            elif self._phase == "stepping":
-                now = time.monotonic()
-                if now - self._phase_started < _S_DEBOUNCE_S:
-                    _LOG.info(
-                        "键盘 's'：开始后 %.0fms 内的重复 s 已忽略"
-                        "（终端 key repeat 连击）",
-                        (now - self._phase_started) * 1000.0,
-                    )
-                    return
-                self._begin_return(exit_after_return=False)
+            elif phase == "stepping":
+                with self._phase_lock:
+                    if self._phase != "stepping":
+                        return
+                    now = time.monotonic()
+                    if now - self._phase_started < _S_DEBOUNCE_S:
+                        _LOG.info(
+                            "键盘 's'：开始后 %.0fms 内的重复 s 已忽略"
+                            "（终端 key repeat 连击）",
+                            (now - self._phase_started) * 1000.0,
+                        )
+                        return
+                    self._begin_return(exit_after_return=False)
                 _LOG.info("键盘 's'：请求结束并回 Home")
-            elif self._phase == "returning":
+            elif phase == "returning":
                 _LOG.info("正在回 Home；完成后可再次按 s 开始")
             return
-        if self._phase != "stepping" or event not in AXIS_STEPS:
+        if event not in AXIS_STEPS:
             return
-        self._echo(event)
-        with self._command_lock:
-            if self._accumulators is None:
+        with self._phase_lock:
+            if self._phase != "stepping":
                 return
-            for side in self._active_sides:
-                self._accumulators[side].step(event)
-            delta_mm = self._accumulators[
-                self._active_sides[-1]
-            ].delta_m() * 1000.0
+            self._echo(event)
+            with self._command_lock:
+                if self._accumulators is None:
+                    return
+                for side in self._active_sides:
+                    self._accumulators[side].step(event)
+                delta_mm = self._accumulators[
+                    self._active_sides[-1]
+                ].delta_m() * 1000.0
         _LOG.info(
             "按键 %s（%s）：%g mm → 累积 (%+.1f, %+.1f, %+.1f) mm",
             event,
@@ -513,35 +532,38 @@ class MocapLiveNode:
             }
 
     def _begin_return(self, *, exit_after_return: bool) -> None:
-        self._return_complete = False
-        self._exit_after_return = exit_after_return
-        self._phase = "returning"
-        self._phase_started = time.monotonic()
+        with self._phase_lock:
+            self._return_complete = False
+            self._exit_after_return = exit_after_return
+            self._phase = "returning"
+            self._phase_started = time.monotonic()
 
     def _complete_return(self) -> None:
-        with self._command_lock:
-            self._accumulators = None
-        self._last_conditioning = {
-            "left": None,
-            "right": None,
-        }
-        self._phase = "armed"
-        self._phase_started = time.monotonic()
-        self._publish_state("idle")
+        with self._phase_lock:
+            with self._command_lock:
+                self._accumulators = None
+            self._last_conditioning = {
+                "left": None,
+                "right": None,
+            }
+            self._phase = "armed"
+            self._phase_started = time.monotonic()
+            self._publish_state("idle")
 
     def _handle_interrupt(self) -> None:
         """q / Ctrl+C：跟随或回零中先等 Home，否则直接退出。"""
-        if self._phase == "stepping":
-            self._begin_return(exit_after_return=True)
-            _LOG.info("按键 q/Ctrl+C：请求回 Home 后退出")
-            return
-        if self._phase == "returning":
-            self._exit_after_return = True
-            _LOG.info("按键 q/Ctrl+C：等待回 Home 完成后退出")
-            return
-        _LOG.info("按键 q/Ctrl+C：退出")
-        self._quit = True
-        self._stop_event.set()
+        with self._phase_lock:
+            if self._phase == "stepping":
+                self._begin_return(exit_after_return=True)
+                _LOG.info("按键 q/Ctrl+C：请求回 Home 后退出")
+                return
+            if self._phase == "returning":
+                self._exit_after_return = True
+                _LOG.info("按键 q/Ctrl+C：等待回 Home 完成后退出")
+                return
+            _LOG.info("按键 q/Ctrl+C：退出")
+            self._quit = True
+            self._stop_event.set()
 
     # -- 发布 ---------------------------------------------------------------
 
@@ -627,40 +649,47 @@ class MocapLiveNode:
 
     def _tick(self) -> bool:
         """rate Hz 映射虚拟目标；仅 q 回零完成后返回 False。"""
-        if self._phase == "armed":
-            self._publish_state("idle")
-            return True
-        if self._phase == "returning":
-            self._publish_state("returning")
-            if not (self._return_complete and self._at_home):
+        # phase 判定、状态发布和该 phase 的目标发布必须是一个临界区。
+        # 键盘线程只能在完整 tick 前后切 phase，不能插入一个旧状态。
+        with self._phase_lock:
+            if self._phase == "armed":
+                self._publish_state("idle")
                 return True
-            if self._exit_after_return:
-                _LOG.info("已确认 IK 回到安全 Home，退出")
-                return False
-            self._complete_return()
-            _LOG.info(
-                "已确认 IK 回到安全 Home；保持运行，按 s 可再次开始"
-            )
+            if self._phase == "returning":
+                self._publish_state("returning")
+                if not (self._return_complete and self._at_home):
+                    return True
+                if self._exit_after_return:
+                    _LOG.info("已确认 IK 回到安全 Home，退出")
+                    return False
+                self._complete_return()
+                _LOG.info(
+                    "已确认 IK 回到安全 Home；保持运行，按 s 可再次开始"
+                )
+                return True
+            self._publish_state("teleop")
+            # 只消费按 s 时冻结的参考 + 键盘累计增量。这里禁止读取
+            # _latest_frame；right_arm 随机器人运动不能形成控制反馈。
+            command_frame = self._command_frame()
+            if command_frame is None:
+                return True
+            try:
+                targets = self._mapper.map_frame(command_frame)
+            except Exception as exc:
+                _LOG.error("键盘虚拟目标映射失败：%s", exc)
+                return True
+            self._publish_targets(targets)
+            self._last_conditioning = {
+                "left": targets.left_conditioning.as_dict(),
+                "right": targets.right_conditioning.as_dict(),
+            }
             return True
-        self._publish_state("teleop")
-        # 只消费按 s 时冻结的参考 + 键盘累计增量。这里禁止读取
-        # _latest_frame；right_arm 随机器人运动不能形成控制反馈。
-        command_frame = self._command_frame()
-        if command_frame is None:
-            return True
-        try:
-            targets = self._mapper.map_frame(command_frame)
-        except Exception as exc:
-            _LOG.error("键盘虚拟目标映射失败：%s", exc)
-            return True
-        self._publish_targets(targets)
-        self._last_conditioning = {
-            "left": targets.left_conditioning.as_dict(),
-            "right": targets.right_conditioning.as_dict(),
-        }
-        return True
 
     def _publish_status(self) -> None:
+        with self._phase_lock:
+            phase = self._phase
+            at_home = self._at_home
+            target_conditioning = self._last_conditioning
         with self._frame_lock:
             frame = self._latest_frame
             received_at = self._latest_received_monotonic
@@ -697,9 +726,9 @@ class MocapLiveNode:
             "armed": "idle",
             "stepping": "teleop",
             "returning": "returning",
-        }[self._phase]
+        }[phase]
         status = {
-            "phase": self._phase,
+            "phase": phase,
             "state": state,
             "source": "live",
             "input": "mocap_live",
@@ -708,7 +737,7 @@ class MocapLiveNode:
             "elbow_constraint": "published_default_zsp_backend_selected",
             "smpl_used": False,
             "motion_trackers_required": True,
-            "at_safe_home": state == "idle" and self._at_home,
+            "at_safe_home": state == "idle" and at_home,
             "left_rigid_id": self._rigid_ids["left"],
             "right_rigid_id": self._rigid_ids["right"],
             "side": self._side,
@@ -717,7 +746,7 @@ class MocapLiveNode:
             "accumulated_delta_mm": accumulated_delta_mm,
             "tracking": tracking,
             "motive_pose": motive_pose,
-            "target_conditioning": self._last_conditioning,
+            "target_conditioning": target_conditioning,
             "error": None,
         }
         self._status_pub.put_json(status)
@@ -732,7 +761,7 @@ class MocapLiveNode:
                     "n/a"
                     if observed["age_ms"] is None
                     else f"{observed['age_ms']:.0f}ms",
-                    self._phase,
+                    phase,
                 )
                 continue
             delta = accumulated_delta_mm[side]
@@ -755,7 +784,7 @@ class MocapLiveNode:
                 delta[0],
                 delta[1],
                 delta[2],
-                self._phase,
+                phase,
             )
 
     def run(self) -> int:
