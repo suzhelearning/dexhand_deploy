@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from pico_body_tianji.host_readiness import HostReadinessGate
+from pico_body_tianji.marvin_hardware_bridge import MarvinHardwareBridge
 
 
 LEFT_HOME = [55.0, -65.0, -70.0, -60.0, 60.0, 0.0, 0.0]
@@ -254,6 +255,33 @@ class MocapLiveHostReadinessTest(unittest.TestCase):
 
         self.assertFalse(decision.ready)
         self.assertEqual(decision.reason, "mocap_live_not_ready")
+
+
+class _InputStatusCapture:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float]] = []
+
+    def observe_input_status(self, text: str, *, received_at: float) -> None:
+        self.calls.append((text, received_at))
+
+
+class MarvinBridgeStateAuthorityTest(unittest.TestCase):
+    def test_status_state_cannot_override_dedicated_teleop_state(self) -> None:
+        bridge = MarvinHardwareBridge.__new__(MarvinHardwareBridge)
+        bridge._readiness = _InputStatusCapture()
+        bridge._last_error = None
+        observed_states: list[str] = []
+        bridge._observe_state = (
+            lambda state, received_at: observed_states.append(state)
+        )
+
+        bridge._on_input_status('{"state":"idle","input":"mocap_live"}')
+        self.assertEqual(len(bridge._readiness.calls), 1)
+        self.assertEqual(observed_states, [])
+        self.assertIsNone(bridge._last_error)
+
+        bridge._on_teleop_state("teleop")
+        self.assertEqual(observed_states, ["teleop"])
 
 
 if __name__ == "__main__":

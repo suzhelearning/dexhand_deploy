@@ -369,14 +369,15 @@ class MarvinHardwareBridge:
             self._last_error = f"invalid_teleop_state: {exc}"
 
     def _on_input_status(self, text: str) -> None:
-        now = time.monotonic()
         try:
-            self._readiness.observe_input_status(text, received_at=now)
-            payload = json.loads(text)
-            state = payload.get("state")
-            if isinstance(state, str):
-                self._observe_state(state, now)
-        except (ValueError, json.JSONDecodeError) as exc:
+            # /pico_body/status 只承载 readiness/诊断。teleop 状态唯一
+            # 权威是 /pico_body/teleop_state；若把两个 topic 的 state
+            # 合并，不同 Zenoh publisher 的交叉到达会让旧 idle 覆盖
+            # teleop，触发 idle_command_not_at_home 并锁存回 Home。
+            self._readiness.observe_input_status(
+                text, received_at=time.monotonic()
+            )
+        except ValueError as exc:
             self._last_error = f"invalid_input_status: {exc}"
 
     def _on_sim_status(self, text: str) -> None:
