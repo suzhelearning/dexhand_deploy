@@ -27,6 +27,7 @@ fi
 #   pixi run sim_mocap_live
 #   pixi run sim_mocap_live -- --topics-only
 #   pixi run sim_mocap_live -- --right-rigid-id right_arm --step-mm 10
+#   pixi run sim_mocap_live -- --circle-speed-mm-s 30
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common.sh"
@@ -37,6 +38,7 @@ RIGHT_RIGID_ID="right_arm"
 CONNECT_ENDPOINT=""
 SIDE=right
 STEP_MM=10.0
+CIRCLE_SPEED_MM_S=""
 MUJOCO_PID=""
 SIM_PID=""
 
@@ -55,6 +57,7 @@ usage() {
                          仅当 scouting 不可达时才需显式连 router）
   --side SIDE            控制侧：right（仅右臂，默认）/ both（双臂同步）
   --step-mm MM           每次按键位置步长（默认 10mm）
+  --circle-speed-mm-s N  正面圆轨迹峰值速度 mm/s（默认取配置 50）
   键盘 c / Enter         c 装载右臂正面圆；Enter 按住推进、松开暂停
   -h, --help
 
@@ -120,6 +123,15 @@ while (($#)); do
         exit 2
       fi
       STEP_MM="$2"
+      shift
+      ;;
+    --circle-speed-mm-s)
+      if (($# < 2)); then
+        printf '%s\n' '错误：--circle-speed-mm-s 缺少数值。' >&2
+        usage >&2
+        exit 2
+      fi
+      CIRCLE_SPEED_MM_S="$2"
       shift
       ;;
     -h|--help)
@@ -193,20 +205,28 @@ register_teleop_process_group "${SIM_PID}" sim-ik-solver 5
 printf '%s\n' \
   '启动 Motive 定零 + 键盘步进/Enter 保压正面圆轨迹：虚拟目标 → IK' \
   "  刚体=${LEFT_RIGID_ID}/${RIGHT_RIGID_ID}  side=${SIDE}  step_mm=${STEP_MM}" \
+  "  圆峰值速度=${CIRCLE_SPEED_MM_S:-<配置默认>}mm/s" \
   "  Router=${CONNECT_ENDPOINT:-<scouting>}  MuJoCo=${WITH_MUJOCO}" \
   '  s 定零；方向键/1/0 手动步进；零位按 c 装载 r=100mm 正面圆；' \
   '  持续按住 Enter 才推进，松开即暂停，再按继续；s 回 Home；q 安全退出。' \
   '该任务不会连接 Marvin 控制器。'
 
 # 动捕实时节点前台运行：stdin 直连终端（raw 模式读键）。
-"${LIVE_NODE}" \
-  --config "${PARAMETERS}" \
-  --param "rate:=60" \
-  --left-rigid-id "${LEFT_RIGID_ID}" \
-  --right-rigid-id "${RIGHT_RIGID_ID}" \
-  --side "${SIDE}" \
-  --step-mm "${STEP_MM}" \
+live_arguments=(
+  --config "${PARAMETERS}"
+  --param "rate:=60"
+  --left-rigid-id "${LEFT_RIGID_ID}"
+  --right-rigid-id "${RIGHT_RIGID_ID}"
+  --side "${SIDE}"
+  --step-mm "${STEP_MM}"
   --connect-endpoint "${CONNECT_ENDPOINT}"
+)
+if [[ -n "${CIRCLE_SPEED_MM_S}" ]]; then
+  live_arguments+=(
+    --param "circle_maximum_speed_mm_s:=${CIRCLE_SPEED_MM_S}"
+  )
+fi
+"${LIVE_NODE}" "${live_arguments[@]}"
 LIVE_EXIT=$?
 
 exit "${LIVE_EXIT}"

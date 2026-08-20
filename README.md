@@ -680,6 +680,7 @@ pixi run real_mocap_step -- --confirm-real
 
 ```bash
 pixi run sim_mocap_live                         # 默认仅右臂、10mm/键
+pixi run sim_mocap_live -- --circle-speed-mm-s 30 # 圆峰值速度改为 30mm/s
 pixi run sim_mocap_live -- --step-mm 5
 pixi run sim_mocap_live -- --topics-only
 pixi run sim_mocap_live -- --right-rigid-id right_arm
@@ -687,6 +688,48 @@ pixi run sim_mocap_live -- --right-rigid-id right_arm
 # 真机（先起上面的 sim 主机，再确认硬件安全后）
 pixi run real_mocap_live -- --confirm-real
 ```
+
+### 正面圆轨迹录制与坐标对齐对比
+
+录制器同时订阅三路数据：
+
+- `pico_body/right_arm_target_pose`：`right_chest` 系下的控制目标；
+- `pico_body_sim/right_arm/solved_pose`：IK 解算的右臂末端位姿；
+- `mocap/hands/frame`：Motive 系下 `right_arm` 刚体实测位姿。
+
+三路原始坐标和接收时间分别保留。对比时各自减去装载圆轨迹前的零点，
+再使用控制链同一组
+`world_to_chest(right) @ pico_to_robot` 矩阵把 Motive 相对位移映射
+到 `right_chest`；不会直接叠加两个原生坐标系。按接收时间线性对齐，
+同时给出直接误差和自动估计时间滞后后的误差。
+
+```bash
+# Terminal 1：先启动仿真主机；真机对比时再另起 real_mocap_live
+pixi run sim_mocap_live -- --circle-speed-mm-s 30
+
+# Terminal 2：必须在 Terminal 1 按 s、c 之前启动
+pixi run mocap_circle_compare
+
+# 然后回 Terminal 1：s 定零 → c 装载 → 持续按住 Enter；
+# 整圆结束后 Terminal 2 自动保存并退出。
+```
+
+默认输出到 `log/mocap_circle_compare/YYYYmmdd_HHMMSS/`：
+
+- `raw_target_right_chest.csv`、`raw_solved_right_chest.csv`、
+  `raw_motive_right_arm.csv`：三路原始样本；
+- `comparison_right_chest.csv`：同一时间轴、统一 `right_chest` 相对位移
+  和三维误差；
+- `summary.json`：样本数、坐标矩阵、直接 RMSE/P95/最大误差、估计滞后
+  和滞后补偿误差；
+- `trajectory_comparison.svg`：控制目标、IK 解算和 Motive 实测的轨迹
+  平面叠图及 X/Y/Z 时序图；
+- `raw_status.jsonl`：圆速度、进度、Enter 保压状态等原始 status。
+
+可用 `--output-dir PATH`、`--right-rigid-id NAME_OR_ID`、
+`--maximum-lag-seconds N` 调整录制。`--circle-speed-mm-s` 属于
+`sim_mocap_live` 主机参数；真机桥复用该主机的 IK 命令，因此真机
+对比时也由 Terminal 1 的该参数决定画圆速度。
 
 按 `s` 定零时，所选刚体必须存在、`tracking_valid=true` 且最新帧不超过
 0.5s；默认只要求 `right_arm`。终端每 0.5s 显示所选 Motive 刚体的
