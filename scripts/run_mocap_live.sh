@@ -190,9 +190,10 @@ SIM_PID=$!
 register_teleop_process_group "${SIM_PID}" sim-ik-solver 5
 
 printf '%s\n' \
-  '启动 Motive 刚体定零 + 键盘位置步进：参考位姿 + 键盘增量 → IK' \
+  '启动 Motive 刚体定零 + 连续键盘位置步进：参考位姿 + 键盘增量 → IK' \
   "  刚体=${LEFT_RIGID_ID}/${RIGHT_RIGID_ID}  side=${SIDE}  step_mm=${STEP_MM}" \
   "  Router=${CONNECT_ENDPOINT:-<scouting>}  MuJoCo=${WITH_MUJOCO}" \
+  '  s 开始/回 Home 后重新待命；方向键可连续累计；q 安全退出；Motive 位姿每 0.5s 显示。' \
   '该任务不会连接 Marvin 控制器。'
 
 # 动捕实时节点前台运行：stdin 直连终端（raw 模式读键）。

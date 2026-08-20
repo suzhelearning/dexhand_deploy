@@ -546,7 +546,7 @@ key，不发布控制命令；结束后会打印输入速度/加速度、椭球�
 | `pixi run real -- --confirm-real` | 复用正在运行的 sim，启动真机桥 | **是** |
 | `pixi run sim_controller_only` | 纯手柄 IK 的 MuJoCo 仿真 | 否 |
 | `pixi run sim_mocap_step` | mocap 键盘步进控制（动捕系 10mm/键，s 启停） | 否 |
-| `pixi run sim_mocap_live` | Motive `right_arm` 定零 + 键盘位置步进（默认右臂 10mm/键） | 否 |
+| `pixi run sim_mocap_live` | Motive `right_arm` 定零 + 连续键盘位置步进（默认右臂 10mm/键） | 否 |
 | `pixi run real_mocap_step -- --confirm-real` | 复用键盘步进仿真，启动真机桥 | **是** |
 | `pixi run real_mocap_live -- --confirm-real` | 复用 Motive 定零键盘步进仿真，启动真机桥 | **是** |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
@@ -611,7 +611,14 @@ pixi run real_mocap_step -- --confirm-real
 | 按键 | 动捕系增量 | 按键 | 动捕系增量 |
 | --- | --- | --- | --- |
 | `↑` / `↓` | `+z` / `-z` | `←` / `→` | `+x` / `-x` |
-| `1` / `0` | `+y` / `-y` | `s` | 定零开始 / 结束回 Home |
+| `1` / `0` | `+y` / `-y` | `s` | armed 时定零开始 / 步进中回 Home |
+| `q` / Ctrl+C | 步进中回 Home 后退出；armed 时直接退出 | | |
+
+一次按 `s` 开始后，方向键/`1`/`0` 可无限次累计，每次都在当前键盘
+目标上增加 10mm；节点不会自动停止。第二次按 `s` 才请求回 Home；
+收到 IK 的 `return_complete=true` 且 `at_home=true` 后重新进入 armed，
+进程不退出，可再次按 `s` 开始新一轮。只有 `q` / Ctrl+C 才最终退出。
+回 Home 过程中按 `q` 会等待安全 Home 完成，不会立即断开。
 
 ```bash
 pixi run sim_mocap_live                         # 默认仅右臂、10mm/键
@@ -624,9 +631,13 @@ pixi run real_mocap_live -- --confirm-real
 ```
 
 按 `s` 定零时，所选刚体必须存在、`tracking_valid=true` 且最新帧不超过
-0.5s；默认只要求 `right_arm`。status 标识
-`control_mode=motive_reference_keyboard_step`，真机桥拒绝旧的连续刚体
-反馈模式。默认仅发布右臂目标；`--side both` 才要求左右刚体同时有效。
+0.5s；默认只要求 `right_arm`。终端每 0.5s 显示所选 Motive 刚体的
+`frame`、跟踪状态、帧龄、位置 `p[m]`、四元数 `q[xyzw]`、累计键盘
+位移 `key_delta[mm]` 和阶段；同一数据写入 status 的 `motive_pose`。
+刚体后续随机器人运动只用于显示和跟踪健康检查，不反馈进目标。status
+标识 `control_mode=motive_reference_keyboard_step`，真机桥拒绝旧的
+连续刚体反馈模式。默认仅发布右臂目标；`--side both` 才要求左右刚体
+同时有效。
 
 ## 控制原理
 

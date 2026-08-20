@@ -127,6 +127,13 @@ class _InitializeCapture:
         self.frame = frame
         return {"pico_left_wrist", "pico_right_wrist"}
 
+class _CapturePublisher:
+    def __init__(self) -> None:
+        self.values: list[dict] = []
+
+    def put_json(self, value: dict) -> None:
+        self.values.append(value)
+
 
 class MocapLiveReferenceKeyboardTest(unittest.TestCase):
     """机器人末端刚体只用于定零，后续实测随动不得改变虚拟目标。"""
@@ -186,6 +193,88 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
         np.testing.assert_array_equal(
             stepped.left_pose, _REFERENCE_POSE
         )
+
+        for sequence in ("\x1b[A", "\x1b[A", "1", "\x1b[D"):
+            for byte in sequence:
+                node._on_key(byte)
+        continuous = node._command_frame()
+        self.assertEqual(node._phase, "stepping")
+        np.testing.assert_allclose(
+            continuous.right_pose[:3],
+            right_reference[:3] + np.array([0.01, 0.01, 0.03]),
+        )
+
+    def test_s_rearms_after_home_and_q_exits_after_home(self) -> None:
+        node = MocapLiveNode.__new__(MocapLiveNode)
+        node._parser = ArrowKeyParser()
+        node._echo = lambda event: None
+        node._phase = "stepping"
+        node._phase_started = time.monotonic()
+        node._return_complete = False
+        node._at_home = False
+        node._exit_after_return = False
+        node._command_lock = threading.Lock()
+        node._accumulators = {"left": object(), "right": object()}
+        node._last_conditioning = {"left": {}, "right": {}}
+        states = []
+        node._publish_state = states.append
+
+        node._on_key("s")
+        self.assertEqual(node._phase, "returning")
+        self.assertFalse(node._exit_after_return)
+        node._return_complete = True
+        node._at_home = True
+        self.assertTrue(node._tick())
+        self.assertEqual(node._phase, "armed")
+        self.assertIsNone(node._accumulators)
+        self.assertEqual(states[-1], "idle")
+
+        node._phase = "stepping"
+        node._accumulators = {"left": object(), "right": object()}
+        node._on_key("q")
+        self.assertEqual(node._phase, "returning")
+        self.assertTrue(node._exit_after_return)
+        node._return_complete = True
+        node._at_home = True
+        self.assertFalse(node._tick())
+
+    def test_status_contains_live_motive_pose_and_valid_idle_state(self) -> None:
+        node = MocapLiveNode.__new__(MocapLiveNode)
+        node._frame_lock = threading.Lock()
+        node._latest_frame = {
+            "frame_number": 42,
+            "rigid_bodies": [
+                {
+                    "id": 10,
+                    "position": [0.41, -0.12, 0.28],
+                    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+                    "tracking_valid": True,
+                }
+            ],
+        }
+        node._latest_received_monotonic = time.monotonic()
+        node._rigid_body_names = {}
+        node._missing_rigid_warned = set()
+        node._rigid_ids = {"left": 1, "right": 10}
+        node._active_sides = ("right",)
+        node._command_lock = threading.Lock()
+        node._accumulators = None
+        node._phase = "armed"
+        node._at_home = True
+        node._side = "right"
+        node._step_mm = 10.0
+        node._last_conditioning = {"left": None, "right": None}
+        node._status_pub = _CapturePublisher()
+
+        node._publish_status()
+
+        status = node._status_pub.values[-1]
+        self.assertEqual(status["state"], "idle")
+        self.assertTrue(status["at_safe_home"])
+        observed = status["motive_pose"]["right"]
+        self.assertEqual(observed["frame_number"], 42)
+        self.assertTrue(observed["tracking_valid"])
+        self.assertEqual(observed["position_m"], [0.41, -0.12, 0.28])
 
 
 class MocapKeyboardStepMappingTest(unittest.TestCase):

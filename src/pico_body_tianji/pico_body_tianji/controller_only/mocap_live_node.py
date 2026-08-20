@@ -11,8 +11,8 @@
     上/下          动捕 +z/-z
     左/右          动捕 +x/-x
     1/0            动捕 +y/-y
-    s              记录参考开始 / 结束回 Home
-    q / Ctrl+C     安全退出
+    s              记录参考开始 / 回 Home 后重新待命
+    q / Ctrl+C     回 Home 后安全退出
 
 虚拟位姿经与 mocap 回放相同的相对增量映射链：pico_to_robot →
 world→chest → One-Euro → 1:1 目标整形，再通过 Zenoh 发布给
@@ -49,6 +49,7 @@ from ..zenoh_util import (
     LiveToken,
     ZenohJsonSub,
     ZenohPub,
+    ZenohTextSub,
     key,
     load_node_config,
     load_tianji_config,
@@ -62,6 +63,8 @@ _LOG = logging.getLogger("mocap_live")
 
 FRAME_KEY = "mocap/hands/frame"
 RIGID_BODY_NAMES_KEY = "mocap/rigid_body_names"
+AT_HOME_KEY = "pico_body_sim/at_home"
+RETURN_COMPLETE_KEY = "pico_body_sim/return_complete"
 
 # 跟随中单侧失效容忍：超过该秒数未收到有效动捕帧即整体停止映射
 # （真机桥侧另有命令超时软停保护）。
@@ -201,6 +204,22 @@ class MocapLiveNode:
         self._state_pub = ZenohPub(session, key("/pico_body/teleop_state"))
         self._status_pub = ZenohPub(session, key("/pico_body/status"))
         self._live = LiveToken(session, "mocap_live")
+        self._at_home = False
+        self._return_complete = False
+        self._exit_after_return = False
+        self._at_home_sub = ZenohTextSub(
+            session, AT_HOME_KEY, self._on_at_home_text
+        )
+        self._return_complete_sub = ZenohTextSub(
+            session,
+            RETURN_COMPLETE_KEY,
+            self._on_return_complete_text,
+        )
+        self._session.get(
+            AT_HOME_KEY,
+            self._on_at_home_query,
+            timeout=1.0,
+        )
 
         # 最新动捕帧（订阅回调写入，tick 读取）。
         self._frame_lock = threading.Lock()
@@ -237,7 +256,8 @@ class MocapLiveNode:
         _LOG.info(
             "Motive 刚体定零键盘步进已就绪：%s（刚体 %s/%s），"
             "每键 %g mm（动捕系），控制 %s；按 s 记录零点开始，"
-            "再按 s 回 Home，q 退出",
+            "可连续累计；再按 s 回 Home 后重新待命，q 安全退出；"
+            "终端每 0.5s 显示 Motive 位姿",
             FRAME_KEY,
             self._rigid_ids["left"],
             self._rigid_ids["right"],
@@ -305,6 +325,17 @@ class MocapLiveNode:
                 return None
             return values
         return None
+
+    def _on_at_home_query(self, reply) -> None:
+        if reply.ok and reply.result.payload:
+            self._on_at_home_text(bytes(reply.result.payload).decode("utf-8"))
+
+    def _on_at_home_text(self, payload: str) -> None:
+        self._at_home = payload.strip() == "true"
+
+    def _on_return_complete_text(self, payload: str) -> None:
+        if payload.strip() == "true":
+            self._return_complete = True
 
     # -- 键盘 ---------------------------------------------------------------
 
@@ -400,6 +431,9 @@ class MocapLiveNode:
                     return
                 with self._command_lock:
                     self._accumulators = accumulators
+                self._return_complete = False
+                self._at_home = False
+                self._exit_after_return = False
                 self._phase = "stepping"
                 self._phase_started = time.monotonic()
                 self._publish_state("teleop")
@@ -409,9 +443,10 @@ class MocapLiveNode:
                     "/".join(self._active_sides),
                 )
             elif self._phase == "stepping":
-                self._phase = "returning"
-                self._phase_started = time.monotonic()
+                self._begin_return(exit_after_return=False)
                 _LOG.info("键盘 's'：请求结束并回 Home")
+            elif self._phase == "returning":
+                _LOG.info("正在回 Home；完成后可再次按 s 开始")
             return
         if self._phase != "stepping" or event not in AXIS_STEPS:
             return
@@ -464,12 +499,32 @@ class MocapLiveNode:
                 for side in ("left", "right")
             }
 
+    def _begin_return(self, *, exit_after_return: bool) -> None:
+        self._return_complete = False
+        self._exit_after_return = exit_after_return
+        self._phase = "returning"
+        self._phase_started = time.monotonic()
+
+    def _complete_return(self) -> None:
+        with self._command_lock:
+            self._accumulators = None
+        self._last_conditioning = {
+            "left": None,
+            "right": None,
+        }
+        self._phase = "armed"
+        self._phase_started = time.monotonic()
+        self._publish_state("idle")
+
     def _handle_interrupt(self) -> None:
-        """q / Ctrl+C 退出：跟随中先回 Home（安全），否则直接退出。"""
+        """q / Ctrl+C：跟随或回零中先等 Home，否则直接退出。"""
         if self._phase == "stepping":
-            self._phase = "returning"
-            self._phase_started = time.monotonic()
-            _LOG.info("按键 q/Ctrl+C：请求结束并回 Home")
+            self._begin_return(exit_after_return=True)
+            _LOG.info("按键 q/Ctrl+C：请求回 Home 后退出")
+            return
+        if self._phase == "returning":
+            self._exit_after_return = True
+            _LOG.info("按键 q/Ctrl+C：等待回 Home 完成后退出")
             return
         _LOG.info("按键 q/Ctrl+C：退出")
         self._quit = True
@@ -492,7 +547,7 @@ class MocapLiveNode:
                 "elbow_constraint":
                     "published_default_zsp_backend_selected",
                 "smpl_used": False,
-                "at_safe_home": state == "idle",
+                "at_safe_home": state == "idle" and self._at_home,
                 "left_rigid_id": self._rigid_ids["left"],
                 "right_rigid_id": self._rigid_ids["right"],
                 "side": self._side,
@@ -558,15 +613,21 @@ class MocapLiveNode:
             )
 
     def _tick(self) -> bool:
-        """rate Hz 映射虚拟键盘目标；返回 False 表示回 Home 流程结束。"""
+        """rate Hz 映射虚拟目标；仅 q 回零完成后返回 False。"""
         if self._phase == "armed":
             self._publish_state("idle")
             return True
         if self._phase == "returning":
             self._publish_state("returning")
-            if time.monotonic() - self._phase_started >= 3.0:
-                _LOG.info("键盘步进结束并已请求回 Home")
+            if not (self._return_complete and self._at_home):
+                return True
+            if self._exit_after_return:
+                _LOG.info("已确认 IK 回到安全 Home，退出")
                 return False
+            self._complete_return()
+            _LOG.info(
+                "已确认 IK 回到安全 Home；保持运行，按 s 可再次开始"
+            )
             return True
         self._publish_state("teleop")
         # 只消费按 s 时冻结的参考 + 键盘累计增量。这里禁止读取
@@ -590,22 +651,43 @@ class MocapLiveNode:
         with self._frame_lock:
             frame = self._latest_frame
             received_at = self._latest_received_monotonic
-        frame_fresh = (
-            frame is not None
-            and time.monotonic() - received_at <= _FRAME_STALE_S
+        now = time.monotonic()
+        age_s = None if frame is None else max(0.0, now - received_at)
+        frame_fresh = age_s is not None and age_s <= _FRAME_STALE_S
+        frame_number = (
+            frame.get("frame_number") if isinstance(frame, dict) else None
         )
-        tracking = {
-            side: (
-                self._side_pose(frame, side) is not None
-                if frame_fresh else False
-            )
-            for side in ("left", "right")
-        }
+        tracking: dict[str, bool] = {}
+        motive_pose: dict[str, dict[str, object]] = {}
+        for side in ("left", "right"):
+            pose = self._side_pose(frame, side) if frame is not None else None
+            tracking[side] = frame_fresh and pose is not None
+            if side not in self._active_sides:
+                continue
+            motive_pose[side] = {
+                "frame_number": frame_number,
+                "age_ms": None if age_s is None else age_s * 1000.0,
+                "tracking_valid": tracking[side],
+                "position_m": (
+                    None
+                    if pose is None
+                    else [float(value) for value in pose[:3]]
+                ),
+                "orientation_xyzw": (
+                    None
+                    if pose is None
+                    else [float(value) for value in pose[3:]]
+                ),
+            }
+        accumulated_delta_mm = self._accumulated_delta_mm()
+        state = {
+            "armed": "idle",
+            "stepping": "teleop",
+            "returning": "returning",
+        }[self._phase]
         status = {
             "phase": self._phase,
-            "state": (
-                "teleop" if self._phase == "stepping" else self._phase
-            ),
+            "state": state,
             "source": "live",
             "input": "mocap_live",
             "scope": "mocap_live",
@@ -613,17 +695,55 @@ class MocapLiveNode:
             "elbow_constraint": "published_default_zsp_backend_selected",
             "smpl_used": False,
             "motion_trackers_required": True,
+            "at_safe_home": state == "idle" and self._at_home,
             "left_rigid_id": self._rigid_ids["left"],
             "right_rigid_id": self._rigid_ids["right"],
             "side": self._side,
             "control_mode": "motive_reference_keyboard_step",
             "step_mm": self._step_mm,
-            "accumulated_delta_mm": self._accumulated_delta_mm(),
+            "accumulated_delta_mm": accumulated_delta_mm,
             "tracking": tracking,
+            "motive_pose": motive_pose,
             "target_conditioning": self._last_conditioning,
             "error": None,
         }
         self._status_pub.put_json(status)
+        for side, observed in motive_pose.items():
+            position = observed["position_m"]
+            orientation = observed["orientation_xyzw"]
+            if position is None or orientation is None:
+                _LOG.info(
+                    "Motive %s frame=%s tracking=invalid age=%s phase=%s",
+                    side,
+                    observed["frame_number"],
+                    "n/a"
+                    if observed["age_ms"] is None
+                    else f"{observed['age_ms']:.0f}ms",
+                    self._phase,
+                )
+                continue
+            delta = accumulated_delta_mm[side]
+            _LOG.info(
+                "Motive %s frame=%s tracking=%s age=%.0fms "
+                "p[m]=(%+.4f,%+.4f,%+.4f) "
+                "q[xyzw]=(%+.4f,%+.4f,%+.4f,%+.4f) "
+                "key_delta[mm]=(%+.1f,%+.1f,%+.1f) phase=%s",
+                side,
+                observed["frame_number"],
+                "ok" if observed["tracking_valid"] else "stale",
+                observed["age_ms"],
+                position[0],
+                position[1],
+                position[2],
+                orientation[0],
+                orientation[1],
+                orientation[2],
+                orientation[3],
+                delta[0],
+                delta[1],
+                delta[2],
+                self._phase,
+            )
 
     def run(self) -> int:
         """主循环：rate Hz 映射 + 0.5s 状态；结束返回 0。"""
@@ -653,6 +773,8 @@ class MocapLiveNode:
             try:
                 self._frame_sub.close()
                 self._names_sub.close()
+                self._at_home_sub.close()
+                self._return_complete_sub.close()
                 for pub in (
                     *self._pose_pubs.values(),
                     *self._elbow_pubs.values(),
@@ -671,6 +793,10 @@ class MocapLiveNode:
 
 
 def main(argv=None) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     args = parse_cli_args(
         extra={
             "--left-rigid-id": {
@@ -757,8 +883,10 @@ def main(argv=None) -> int:
     try:
         _LOG.warning(
             "等待 Motive 刚体帧与键盘 's'；按 s 冻结当前 right_arm "
-            "位姿为零点，再用 上/下/左/右/1/0 按 %g mm 累计位置；"
-            "后续刚体随动不进入目标；再按 s 回 Home，按 q 退出",
+            "位姿为零点，再用 上/下/左/右/1/0 连续累计（每键 %g mm）；"
+            "后续刚体随动只显示、不进入目标；再按 s 回 Home 后仍保持"
+            "运行，可再次按 s 开始；按 q 回 Home 后退出；终端每 0.5s "
+            "显示 Motive 位姿",
             args.step_mm,
         )
         return node.run()
@@ -767,10 +895,5 @@ def main(argv=None) -> int:
     finally:
         node.close()
 
-
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
     raise SystemExit(main())
