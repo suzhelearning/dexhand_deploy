@@ -74,7 +74,7 @@ pixi --version
 两个终端即可驱动真机：
 
 ```bash
-# 终端 1：Motive 定零 + 连续键盘位置步进（主机链路，含 IK 解算）
+# 终端 1：Motive 定零 + 键盘步进/正面圆轨迹（主机链路，含 IK）
 pixi run sim_mocap_live
 
 # 终端 2：真机桥（确认机械臂安全、急停释放后执行）
@@ -90,13 +90,15 @@ pixi run real_mocap_live -- --confirm-real
 | --- | --- |
 | `s` | 冻结 `right_arm` 当前位姿为零点，开始控制 |
 | `↑/↓/←/→/1/0` | 连续累计步进（每键 10mm，动捕系），可无限次 |
+| `c` | 零位装载右臂正面圆轨迹；此时不会自行运动 |
+| 按住 `Enter` | 推进圆轨迹；松开后一个 60Hz 控制周期内暂停，再按继续 |
 | `s` | 请求回 Home；回零完成后程序不退出，可再次按 `s` 开始新一轮 |
 | `q` / Ctrl+C | 回 Home 完成后安全退出 |
 
 `real_mocap_live` 只复用 `sim_mocap_live` 的 IK 关节命令，不会启动
 第二套输入或 IK；跟踪误差、命令超时、限速斜坡与急停检测等安全保护
 全部在真机桥侧生效。完整说明见后文
-「Motive 刚体定零 + 键盘位置步进（sim_mocap_live / real_mocap_live）」。
+「Motive 刚体定零 + 键盘步进/正面圆轨迹（sim_mocap_live / real_mocap_live）」。
 
 ## 第一次使用：推荐顺序
 
@@ -634,23 +636,47 @@ pixi run real_mocap_step -- --confirm-real
 命令就绪且位于 Home 时进入 armed_idle，随后按 `s` 开始、方向键
 步进（默认仅右臂 10mm/键）、再按 `s` 回 Home、`q` 退出。
 
-**Motive 刚体定零 + 键盘位置步进（sim_mocap_live / real_mocap_live）**：
+**Motive 刚体定零 + 键盘步进/正面圆轨迹（sim_mocap_live / real_mocap_live）**：
 订阅 `mocap/hands/frame`，默认读取贴在机器人右臂末端的 Motive
 `right_arm` 刚体。按 `s` 时只冻结其当前位姿作为控制零点；之后不再
 把刚体实测随动送入目标，避免“机器人运动 → 刚体运动 → 目标再次增加”
 的正反馈。虚拟目标由键盘在冻结参考上累计位置，四元数保持不变：
 
-| 按键 | 动捕系增量 | 按键 | 动捕系增量 |
+| 按键 | 动捕系增量/动作 | 按键 | 动捕系增量/动作 |
 | --- | --- | --- | --- |
 | `↑` / `↓` | `+z` / `-z` | `←` / `→` | `+x` / `-x` |
-| `1` / `0` | `+y` / `-y` | `s` | armed 时定零开始 / 步进中回 Home |
-| `q` / Ctrl+C | 步进中回 Home 后退出；armed 时直接退出 | | |
+| `1` / `0` | `+y` / `-y` | `s` | armed 时定零开始 / 控制中回 Home |
+| `c` | 零位装载右臂正面圆 | `Enter` | 按住推进 / 松开暂停 / 再按继续 |
 
 一次按 `s` 开始后，方向键/`1`/`0` 可无限次累计，每次都在当前键盘
 目标上增加 10mm；节点不会自动停止。第二次按 `s` 才请求回 Home；
 收到 IK 的 `return_complete=true` 且 `at_home=true` 后重新进入 armed，
 进程不退出，可再次按 `s` 开始新一轮。只有 `q` / Ctrl+C 才最终退出。
 回 Home 过程中按 `q` 会等待安全 Home 完成，不会立即断开。
+
+保持键盘累计位移为零时按 `c` 只会**装载**轨迹，不会自行运动。
+随后必须持续按住物理 `Enter`（主键盘 `Return` 或数字键盘
+`KP_Enter`）；只有按住期间轨迹时钟才推进：
+
+1. 按住 `Enter`：从冻结的 Motive 参考点沿 `+y` 上移 200mm；
+2. 继续按住：以 `(x=0, y=+100mm)` 为圆心、100mm 为半径，在
+   Motive `x-y` 平面从 `+z` 一侧看顺时针画圆；
+3. 前半圈回到参考零点，不停顿地继续后半圈；
+4. 整圈结束后保持在参考点上方 200mm，按 `s` 才回 Home。
+
+任意时刻松开 `Enter`，轨迹在下一个 60Hz 控制周期内暂停并持续发布
+当前位置；暂停时间不计入轨迹进度。再次按住会从同一位置继续，没有
+重置或目标跳变，可以反复“按住→暂停→继续→暂停”。这不是依赖终端
+按键自动重复的超时估计：节点通过 X11 `XQueryKeymap` 直接读取物理
+按下/松开状态。若 `DISPLAY`/libX11 不可用，`c` 会明确拒绝启动，
+不会降级成无法可靠识别松手的模式。
+
+直线和圆相位使用 minimum-jerk 曲线，段首尾速度、加速度均为零；
+默认峰值笛卡尔速度 50mm/s，需要累计按住约 31.1s（暂停会增加实际
+用时）。轨迹只允许默认 `--side right`；若已手动步进偏离零点或使用
+`--side both`，`c` 会明确拒绝，不会跳变到轨迹起点。参数位于
+`controller_only_ik.yaml` 的 `mocap_live.circle_radius_mm` 和
+`mocap_live.circle_maximum_speed_mm_s`。
 
 ```bash
 pixi run sim_mocap_live                         # 默认仅右臂、10mm/键
@@ -664,8 +690,11 @@ pixi run real_mocap_live -- --confirm-real
 
 按 `s` 定零时，所选刚体必须存在、`tracking_valid=true` 且最新帧不超过
 0.5s；默认只要求 `right_arm`。终端每 0.5s 显示所选 Motive 刚体的
-`frame`、跟踪状态、帧龄、位置 `p[m]`、四元数 `q[xyzw]`、累计键盘
+`frame`、跟踪状态、帧龄、位置 `p[m]`、四元数 `q[xyzw]`、累计目标
 位移 `key_delta[mm]` 和阶段；同一数据写入 status 的 `motive_pose`。
+圆轨迹进度和保压状态写入 `circle_trajectory`，包括
+`elapsed_hold_s`、`deadman_available`、`deadman_pressed` 和
+`deadman_error`。
 刚体后续随机器人运动只用于显示和跟踪健康检查，不反馈进目标。status
 标识 `control_mode=motive_reference_keyboard_step`，真机桥拒绝旧的
 连续刚体反馈模式。默认仅发布右臂目标；`--side both` 才要求左右刚体

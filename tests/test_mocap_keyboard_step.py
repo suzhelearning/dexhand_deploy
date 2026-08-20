@@ -13,6 +13,8 @@ from pico_body_tianji.controller_only.controller_only_mapper import (
 from pico_body_tianji.controller_only.mocap_keyboard_step import (
     AXIS_STEPS,
     ArrowKeyParser,
+    HoldToRunClock,
+    MotiveFrontCircleTrajectory,
     StepAccumulator,
 )
 from pico_body_tianji.controller_only.mocap_live_node import MocapLiveNode
@@ -43,6 +45,7 @@ class ArrowKeyParserTest(unittest.TestCase):
     def test_single_bytes_pass_through(self) -> None:
         parser = ArrowKeyParser()
         self.assertEqual(parser.feed("s"), "s")
+        self.assertEqual(parser.feed("c"), "c")
         self.assertEqual(parser.feed("1"), "1")
         self.assertEqual(parser.feed("0"), "0")
 
@@ -119,6 +122,108 @@ class StepAccumulatorTest(unittest.TestCase):
         np.testing.assert_allclose(pose[:3], [0.0, 0.025, 0.0])
 
 
+class MotiveFrontCircleTrajectoryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.trajectory = MotiveFrontCircleTrajectory(
+            radius_mm=100.0,
+            maximum_speed_mm_s=50.0,
+        )
+
+    def test_required_waypoints_and_clockwise_direction(self) -> None:
+        start = self.trajectory.sample(0.0)
+        np.testing.assert_allclose(start.delta_m, [0.0, 0.0, 0.0])
+        self.assertEqual(start.segment, "rise")
+
+        top = self.trajectory.sample(
+            self.trajectory.rise_duration_s
+        )
+        np.testing.assert_allclose(top.delta_m, [0.0, 0.2, 0.0])
+        self.assertEqual(top.segment, "circle")
+
+        clockwise = self.trajectory.sample(
+            self.trajectory.rise_duration_s
+            + 0.25 * self.trajectory.circle_duration_s
+        )
+        self.assertGreater(clockwise.delta_m[0], 0.0)
+        self.assertLess(clockwise.delta_m[1], 0.2)
+        self.assertEqual(clockwise.delta_m[2], 0.0)
+
+        origin = self.trajectory.sample(
+            self.trajectory.rise_duration_s
+            + 0.5 * self.trajectory.circle_duration_s
+        )
+        np.testing.assert_allclose(
+            origin.delta_m, [0.0, 0.0, 0.0], atol=1.0e-12
+        )
+        self.assertFalse(origin.complete)
+
+        end = self.trajectory.sample(
+            self.trajectory.total_duration_s
+        )
+        np.testing.assert_allclose(
+            end.delta_m, [0.0, 0.2, 0.0], atol=1.0e-12
+        )
+        self.assertEqual(end.segment, "complete")
+        self.assertTrue(end.complete)
+
+    def test_path_is_continuous_at_rise_to_circle_transition(self) -> None:
+        before = self.trajectory.sample(
+            self.trajectory.rise_duration_s - 1.0e-6
+        )
+        after = self.trajectory.sample(
+            self.trajectory.rise_duration_s + 1.0e-6
+        )
+        self.assertLess(
+            float(np.linalg.norm(after.delta_m - before.delta_m)),
+            1.0e-9,
+        )
+
+    def test_invalid_geometry_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "radius_mm"):
+            MotiveFrontCircleTrajectory(radius_mm=0.0)
+        with self.assertRaisesRegex(ValueError, "maximum_speed_mm_s"):
+            MotiveFrontCircleTrajectory(maximum_speed_mm_s=float("nan"))
+
+
+class HoldToRunClockTest(unittest.TestCase):
+    def test_only_pressed_intervals_advance_and_resume(self) -> None:
+        clock = HoldToRunClock()
+        self.assertEqual(clock.update(10.0, False), 0.0)
+        self.assertEqual(clock.update(11.0, True), 0.0)
+        self.assertEqual(clock.update(12.5, True), 1.5)
+        self.assertEqual(clock.update(12.5, False), 1.5)
+        self.assertEqual(clock.update(20.0, False), 1.5)
+        self.assertEqual(clock.update(21.0, True), 1.5)
+        self.assertEqual(clock.update(23.0, True), 3.5)
+
+    def test_rejects_non_monotonic_time(self) -> None:
+        clock = HoldToRunClock()
+        clock.update(10.0, False)
+        with self.assertRaisesRegex(ValueError, "不能倒退"):
+            clock.update(9.0, True)
+
+    def test_stalled_poll_cannot_advance_more_than_one_cycle(self) -> None:
+        clock = HoldToRunClock(maximum_step_s=1.0 / 60.0)
+        clock.update(10.0, True)
+        elapsed = clock.update(20.0, False)
+        self.assertAlmostEqual(elapsed, 1.0 / 60.0)
+        self.assertFalse(clock.running)
+
+
+class _FakeDeadman:
+    def __init__(self) -> None:
+        self.pressed = False
+        self.error: RuntimeError | None = None
+
+    def is_pressed(self) -> bool:
+        if self.error is not None:
+            raise self.error
+        return self.pressed
+
+    def close(self) -> None:
+        pass
+
+
 class _InitializeCapture:
     def __init__(self) -> None:
         self.frame: ControllerFrame | None = None
@@ -142,6 +247,12 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
     def _node() -> MocapLiveNode:
         node = MocapLiveNode.__new__(MocapLiveNode)
         node._phase_lock = threading.RLock()
+        node._rate = 60.0
+        node._circle_plan = MotiveFrontCircleTrajectory()
+        node._circle_clock = None
+        node._circle_sample = None
+        node._circle_deadman = _FakeDeadman()
+        node._circle_deadman_error = None
         return node
 
     def test_right_arm_reference_freezes_then_keyboard_steps(self) -> None:
@@ -208,6 +319,138 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
         np.testing.assert_allclose(
             continuous.right_pose[:3],
             right_reference[:3] + np.array([0.01, 0.01, 0.03]),
+        )
+
+    def test_c_requires_hold_and_resumes_without_jump(self) -> None:
+        node = self._node()
+        node._parser = ArrowKeyParser()
+        node._echo = lambda event: None
+        node._phase = "stepping"
+        node._side = "right"
+        node._active_sides = ("right",)
+        node._command_lock = threading.Lock()
+        node._accumulators = {
+            side: StepAccumulator(_REFERENCE_POSE, 10.0)
+            for side in ("left", "right")
+        }
+
+        node._on_key("c")
+        self.assertIsNotNone(node._circle_clock)
+        self.assertAlmostEqual(
+            node._circle_clock.maximum_step_s, 1.0 / 60.0
+        )
+        # 后续用稀疏关键时刻验证几何；单周期上限由上面的断言及纯时钟
+        # 测试覆盖，避免在本测试机械循环 1800 个 60Hz tick。
+        node._circle_clock.maximum_step_s = None
+
+        # 未按 Enter 时，无论墙钟过去多久都保持起点。
+        self.assertFalse(node._advance_circle(100.0))
+        self.assertFalse(node._advance_circle(110.0))
+        np.testing.assert_array_equal(
+            node._accumulators["right"].delta_m(),
+            [0.0, 0.0, 0.0],
+        )
+
+        # 第一次按住：推进到 +y 200mm 最高点。
+        node._circle_deadman.pressed = True
+        self.assertFalse(node._advance_circle(110.0))
+        top_at = 110.0 + node._circle_plan.rise_duration_s
+        self.assertFalse(node._advance_circle(top_at))
+        np.testing.assert_allclose(
+            node._accumulators["right"].delta_m(),
+            [0.0, 0.2, 0.0],
+        )
+
+        # 第一次松开：保持最高点，暂停时间不计入轨迹时钟。
+        node._circle_deadman.pressed = False
+        self.assertFalse(node._advance_circle(top_at))
+        self.assertFalse(node._advance_circle(top_at + 5.0))
+        np.testing.assert_allclose(
+            node._accumulators["right"].delta_m(),
+            [0.0, 0.2, 0.0],
+        )
+
+        # 再次按住：从最高点继续半圈到参考零点。
+        node._circle_deadman.pressed = True
+        resumed_at = top_at + 5.0
+        self.assertFalse(node._advance_circle(resumed_at))
+        origin_at = (
+            resumed_at + 0.5 * node._circle_plan.circle_duration_s
+        )
+        self.assertFalse(node._advance_circle(origin_at))
+        np.testing.assert_allclose(
+            node._accumulators["right"].delta_m(),
+            [0.0, 0.0, 0.0],
+            atol=1.0e-12,
+        )
+
+        # 再次松开仍保持零点；第三次按住完成剩余半圈。
+        node._circle_deadman.pressed = False
+        self.assertFalse(node._advance_circle(origin_at))
+        self.assertFalse(node._advance_circle(origin_at + 4.0))
+        np.testing.assert_allclose(
+            node._accumulators["right"].delta_m(),
+            [0.0, 0.0, 0.0],
+            atol=1.0e-12,
+        )
+        node._circle_deadman.pressed = True
+        final_resume_at = origin_at + 4.0
+        self.assertFalse(node._advance_circle(final_resume_at))
+        self.assertTrue(
+            node._advance_circle(
+                final_resume_at
+                + 0.5 * node._circle_plan.circle_duration_s
+            )
+        )
+        self.assertIsNone(node._circle_clock)
+        np.testing.assert_allclose(
+            node._accumulators["right"].delta_m(),
+            [0.0, 0.2, 0.0],
+            atol=1.0e-12,
+        )
+        self.assertTrue(node._circle_sample.complete)
+
+    def test_deadman_read_failure_pauses_without_progress(self) -> None:
+        node = self._node()
+        node._command_lock = threading.Lock()
+        node._accumulators = {
+            side: StepAccumulator(_REFERENCE_POSE, 10.0)
+            for side in ("left", "right")
+        }
+        node._circle_clock = HoldToRunClock()
+        node._circle_sample = node._circle_plan.sample(0.0)
+        node._circle_deadman.error = RuntimeError("X11 disconnected")
+
+        self.assertFalse(node._advance_circle(100.0))
+        self.assertFalse(node._advance_circle(120.0))
+
+        np.testing.assert_array_equal(
+            node._accumulators["right"].delta_m(),
+            [0.0, 0.0, 0.0],
+        )
+        self.assertEqual(node._circle_clock.elapsed_s, 0.0)
+        self.assertEqual(node._circle_deadman_error, "X11 disconnected")
+
+    def test_c_rejects_nonzero_manual_offset(self) -> None:
+        node = self._node()
+        node._parser = ArrowKeyParser()
+        node._echo = lambda event: None
+        node._phase = "stepping"
+        node._side = "right"
+        node._active_sides = ("right",)
+        node._command_lock = threading.Lock()
+        node._accumulators = {
+            side: StepAccumulator(_REFERENCE_POSE, 10.0)
+            for side in ("left", "right")
+        }
+        node._accumulators["right"].step("1")
+
+        node._on_key("c")
+
+        self.assertIsNone(node._circle_clock)
+        np.testing.assert_allclose(
+            node._accumulators["right"].delta_m(),
+            [0.0, 0.01, 0.0],
         )
 
 
@@ -382,6 +625,12 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
         self.assertEqual(observed["frame_number"], 42)
         self.assertTrue(observed["tracking_valid"])
         self.assertEqual(observed["position_m"], [0.41, -0.12, 0.28])
+        circle = status["circle_trajectory"]
+        self.assertFalse(circle["active"])
+        self.assertEqual(circle["plane"], "motive_xy")
+        self.assertEqual(circle["clockwise_view"], "motive_positive_z")
+        self.assertEqual(circle["radius_mm"], 100.0)
+        self.assertEqual(circle["top_offset_mm"], 200.0)
 
 
 class MocapKeyboardStepMappingTest(unittest.TestCase):

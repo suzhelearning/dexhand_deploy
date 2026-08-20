@@ -55,6 +55,10 @@ mocap_live:
     maximum_angular_speed_rad_s: 1.55
     maximum_linear_acceleration_m_s2: 3.5
     maximum_angular_acceleration_rad_s2: 9.0
+    # c 键轨迹：Motive x-y 正面圆；上移 2r，半圈经过参考零点。
+    # minimum-jerk 保证段首尾速度/加速度为零，50mm/s 为峰值。
+    circle_radius_mm: 100.0
+    circle_maximum_speed_mm_s: 50.0
     left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
     right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
 

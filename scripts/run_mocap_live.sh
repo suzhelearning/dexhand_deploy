@@ -12,12 +12,12 @@ if ! python -c 'import zenoh' 2>/dev/null; then
   fi
 fi
 
-# Motive 刚体定零 + 键盘位置步进仿真（Zenoh 通讯版，无 ROS）。
+# Motive 刚体定零 + 键盘步进/正面圆轨迹仿真（Zenoh，无 ROS）。
 #
-# 订阅 Motive 刚体位姿；'s' 仅冻结 right_arm 当前位姿为零点，
-# 后续目标由键盘在动捕系累计位置增量，刚体随机器人运动不反馈到
-# 目标。's' 结束回 Home、'q' 退出。IK 与 MuJoCo 后台受管，
-# 节点前台直连终端（raw 模式读键）。
+# 's' 冻结 right_arm 当前位姿为零点；方向键/1/0 手动累计。零位
+# 按 'c' 只装载圆轨迹；物理 Enter 按住期间才推进，松开即暂停，
+# 再按从暂停点继续。轨迹上移 200mm 后画 r=100mm 正面圆。's' 回
+# Home，'q' 安全退出。节点前台运行，并通过 X11 检测 Enter 松开。
 #
 # 前置：Windows Motive + natnet-zenoh publisher 已发布
 # mocap/hands/frame；本机 zenohd Router（tcp/0.0.0.0:7447）常驻
@@ -55,6 +55,7 @@ usage() {
                          仅当 scouting 不可达时才需显式连 router）
   --side SIDE            控制侧：right（仅右臂，默认）/ both（双臂同步）
   --step-mm MM           每次按键位置步长（默认 10mm）
+  键盘 c / Enter         c 装载右臂正面圆；Enter 按住推进、松开暂停
   -h, --help
 
 本脚本只启动纯运动学仿真，不加载 Marvin SDK，不连接实体机械臂。
@@ -190,10 +191,11 @@ SIM_PID=$!
 register_teleop_process_group "${SIM_PID}" sim-ik-solver 5
 
 printf '%s\n' \
-  '启动 Motive 刚体定零 + 连续键盘位置步进：参考位姿 + 键盘增量 → IK' \
+  '启动 Motive 定零 + 键盘步进/Enter 保压正面圆轨迹：虚拟目标 → IK' \
   "  刚体=${LEFT_RIGID_ID}/${RIGHT_RIGID_ID}  side=${SIDE}  step_mm=${STEP_MM}" \
   "  Router=${CONNECT_ENDPOINT:-<scouting>}  MuJoCo=${WITH_MUJOCO}" \
-  '  s 开始/回 Home 后重新待命；方向键可连续累计；q 安全退出；Motive 位姿每 0.5s 显示。' \
+  '  s 定零；方向键/1/0 手动步进；零位按 c 装载 r=100mm 正面圆；' \
+  '  持续按住 Enter 才推进，松开即暂停，再按继续；s 回 Home；q 安全退出。' \
   '该任务不会连接 Marvin 控制器。'
 
 # 动捕实时节点前台运行：stdin 直连终端（raw 模式读键）。

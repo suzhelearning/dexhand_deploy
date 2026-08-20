@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
-"""Motive 刚体定零 + 键盘位置步进节点（Zenoh 通讯版，无 ROS）。
+"""Motive 刚体定零 + 键盘步进/正面圆轨迹节点（Zenoh，无 ROS）。
 
-订阅 `mocap/hands/frame` 中的 Motive 刚体位姿（y-up 右手系、米制）。
-默认用贴在机器人右臂末端的 ``right_arm`` 刚体：按 ``s`` 时仅记录
-其当前位姿作为控制零点；开始后不再把刚体实测位姿送入目标映射，
-避免“机器人运动 → 刚体随动 → 目标再次增加”的正反馈。
+订阅 ``mocap/hands/frame`` 中的 Motive 刚体位姿（y-up 右手系、米制）。
+默认使用机器人右臂末端的 ``right_arm``：按 ``s`` 时冻结当前位姿
+作为控制零点；开始后刚体实测运动不再反馈进目标，避免正反馈。
 
-键盘在冻结的参考位姿上累计位置增量，四元数保持不变：
+键盘命令在冻结参考上生成虚拟目标，四元数保持不变：
 
     上/下          动捕 +z/-z
     左/右          动捕 +x/-x
     1/0            动捕 +y/-y
+    c              装载 x-y 正面顺时针圆轨迹
+    Enter          按住推进轨迹 / 松开立即暂停
     s              记录参考开始 / 回 Home 后重新待命
     q / Ctrl+C     回 Home 后安全退出
 
-虚拟位姿经与 mocap 回放相同的相对增量映射链：pico_to_robot →
-world→chest → One-Euro → 1:1 目标整形，再通过 Zenoh 发布给
-``tianji_kinematic_sim``。默认每键 10mm、仅发布右臂目标。
-
-身份与真机验收：liveliness 注册 ``tj/live/mocap_live``；status
-保持 ``input=mocap_live``、``scope=mocap_live``，供真机桥
-host_readiness 校验。Motive 跟踪仅用于开始时定零及状态观测。
+``c`` 只装载轨迹，不会自行运动。X11 物理 ``Return``/``KP_Enter``
+按住期间轨迹时钟才推进；松开后下一个控制周期内暂停并保持目标，再按
+从同一点继续。键位状态不可用时拒绝自动运动。圆心在参考点上方
+100mm：最高点 +200mm，顺时针半圈经过零点，整圈结束于 +200mm。
 """
 
 from __future__ import annotations
@@ -40,9 +38,12 @@ from .controller_only_trace import _assert_replay_graph_is_safe
 from .mocap_keyboard_step import (
     AXIS_STEPS,
     ArrowKeyParser,
+    CircleTrajectorySample,
+    HoldToRunClock,
+    MotiveFrontCircleTrajectory,
     StepAccumulator,
 )
-from .raw_keyboard import raw_keyboard
+from .raw_keyboard import X11KeyState, raw_keyboard
 from .target_conditioner import TargetConditioningSettings
 from ..controller_frame import ControllerFrame
 from ..zenoh_util import (
@@ -98,6 +99,8 @@ DEFAULT_PARAMETERS = {
     "maximum_angular_speed_rad_s": 1.55,
     "maximum_linear_acceleration_m_s2": 3.5,
     "maximum_angular_acceleration_rad_s2": 9.0,
+    "circle_radius_mm": 100.0,
+    "circle_maximum_speed_mm_s": 50.0,
     "left_default_zsp_direction": [
         0.45638698,
         -0.74604902,
@@ -146,6 +149,24 @@ class MocapLiveNode:
         self._rate = rate
         self._side = side
         self._step_mm = float(step_mm)
+        self._circle_plan = MotiveFrontCircleTrajectory(
+            radius_mm=float(params["circle_radius_mm"]),
+            maximum_speed_mm_s=float(
+                params["circle_maximum_speed_mm_s"]
+            ),
+        )
+        try:
+            self._circle_deadman: X11KeyState | None = X11KeyState(
+                ("Return", "KP_Enter")
+            )
+            self._circle_deadman_error: str | None = None
+        except RuntimeError as exc:
+            self._circle_deadman = None
+            self._circle_deadman_error = str(exc)
+            _LOG.error(
+                "正面圆轨迹已禁用：无法可靠读取 Enter 按下/松开：%s",
+                exc,
+            )
         self._active_sides = (
             ("right",) if side == "right" else ("left", "right")
         )
@@ -249,6 +270,8 @@ class MocapLiveNode:
         # 按 s 后由 Motive 参考位姿构造；随后只由键盘更新。
         self._command_lock = threading.Lock()
         self._accumulators: dict[str, StepAccumulator] | None = None
+        self._circle_clock: HoldToRunClock | None = None
+        self._circle_sample: CircleTrajectorySample | None = None
         self._parser = ArrowKeyParser()
         self._last_conditioning: dict[str, object] = {
             "left": None,
@@ -263,15 +286,21 @@ class MocapLiveNode:
 
         side_label = "仅右臂" if side == "right" else "双臂同步"
         _LOG.info(
-            "Motive 刚体定零键盘步进已就绪：%s（刚体 %s/%s），"
-            "每键 %g mm（动捕系），控制 %s；按 s 记录零点开始，"
-            "可连续累计；再按 s 回 Home 后重新待命，q 安全退出；"
-            "终端每 0.5s 显示 Motive 位姿",
+            "Motive 刚体定零键盘控制已就绪：%s（刚体 %s/%s），"
+            "每键 %g mm（动捕系），控制 %s；按 s 记录零点，"
+            "方向键/1/0 连续步进；按 c 装载正面圆轨迹后，必须"
+            "按住 Enter 才推进，松开即暂停"
+            "（r=%gmm，最高点=%gmm，峰值=%gmm/s，需按住 %.1fs）；"
+            "再按 s 回 Home，q 安全退出；终端每 0.5s 显示状态",
             FRAME_KEY,
             self._rigid_ids["left"],
             self._rigid_ids["right"],
             self._step_mm,
             side_label,
+            self._circle_plan.radius_mm,
+            2.0 * self._circle_plan.radius_mm,
+            self._circle_plan.maximum_speed_mm_s,
+            self._circle_plan.total_duration_s,
         )
 
     # -- 动捕帧 -------------------------------------------------------------
@@ -358,6 +387,7 @@ class MocapLiveNode:
         "right": "→",
         "1": "1",
         "0": "0",
+        "c": "c",
         "s": "s",
         "q": "q",
     }
@@ -449,6 +479,8 @@ class MocapLiveNode:
                         return
                     with self._command_lock:
                         self._accumulators = accumulators
+                        self._circle_clock = None
+                        self._circle_sample = None
                     self._return_complete = False
                     self._at_home = False
                     self._exit_after_return = False
@@ -457,7 +489,8 @@ class MocapLiveNode:
                     self._publish_state("teleop")
                 _LOG.info(
                     "键盘 's'：已冻结 %s 参考位姿；后续 Motive 随动"
-                    "不进入目标，方向键/1/0 开始步进",
+                    "不进入目标。方向键/1/0 手动步进；保持零位时按 c "
+                    "执行正面圆轨迹",
                     "/".join(self._active_sides),
                 )
             elif phase == "stepping":
@@ -477,6 +510,57 @@ class MocapLiveNode:
             elif phase == "returning":
                 _LOG.info("正在回 Home；完成后可再次按 s 开始")
             return
+        if event == "c":
+            self._echo("c")
+            with self._phase_lock:
+                if self._phase != "stepping":
+                    _LOG.info("按键 'c'：请先按 s 冻结 Motive 参考零点")
+                    return
+                if self._side != "right":
+                    _LOG.warning(
+                        "按键 'c'：正面圆轨迹只允许 --side right，"
+                        "拒绝双臂联动"
+                    )
+                    return
+                if self._circle_deadman is None:
+                    _LOG.error(
+                        "按键 'c'：拒绝启动；Enter 松开检测不可用：%s",
+                        self._circle_deadman_error,
+                    )
+                    return
+                with self._command_lock:
+                    if self._accumulators is None:
+                        return
+                    if self._circle_clock is not None:
+                        _LOG.info("按键 'c'：正面圆轨迹已经装载")
+                        return
+                    current_delta = self._accumulators["right"].delta_m()
+                    if np.linalg.norm(current_delta) > 1.0e-9:
+                        _LOG.warning(
+                            "按键 'c'：当前已偏离 Motive 零点 "
+                            "(%+.1f,%+.1f,%+.1f)mm；请先回 Home、"
+                            "重新按 s 定零后再执行",
+                            *(current_delta * 1000.0),
+                        )
+                        return
+                    self._circle_clock = HoldToRunClock(
+                        maximum_step_s=1.0 / self._rate
+                    )
+                    self._circle_sample = self._circle_plan.sample(0.0)
+                    self._accumulators["right"].set_delta_m(
+                        self._circle_sample.delta_m
+                    )
+            _LOG.info(
+                "按键 'c'：右臂正面圆轨迹已装载；必须一直按住 Enter "
+                "才推进，松开即暂停，再按从暂停处继续。有效运动 %.1fs："
+                "先上移 %.0fmm，再从 Motive +z 侧看顺时针画 "
+                "r=%.0fmm 整圆，半圈回零点，结束保持在上方 %.0fmm",
+                self._circle_plan.total_duration_s,
+                2.0 * self._circle_plan.radius_mm,
+                self._circle_plan.radius_mm,
+                2.0 * self._circle_plan.radius_mm,
+            )
+            return
         if event not in AXIS_STEPS:
             return
         with self._phase_lock:
@@ -485,6 +569,12 @@ class MocapLiveNode:
             self._echo(event)
             with self._command_lock:
                 if self._accumulators is None:
+                    return
+                if self._circle_clock is not None:
+                    _LOG.info(
+                        "正面圆轨迹已装载；方向键已忽略，"
+                        "按住 Enter 推进，按 s 可回 Home"
+                    )
                     return
                 for side in self._active_sides:
                     self._accumulators[side].step(event)
@@ -531,8 +621,81 @@ class MocapLiveNode:
                 for side in ("left", "right")
             }
 
+    def _advance_circle(self, now: float) -> bool:
+        """按 Enter 物理保压推进轨迹；完成瞬间返回 True。"""
+        with self._command_lock:
+            if self._circle_clock is None or self._accumulators is None:
+                return False
+            try:
+                pressed = (
+                    self._circle_deadman is not None
+                    and self._circle_deadman.is_pressed()
+                )
+            except RuntimeError as exc:
+                pressed = False
+                message = str(exc)
+                if message != self._circle_deadman_error:
+                    self._circle_deadman_error = message
+                    _LOG.error(
+                        "Enter 松开检测失效，轨迹已安全暂停：%s", exc
+                    )
+            was_running = self._circle_clock.running
+            elapsed_s = self._circle_clock.update(now, pressed)
+            if self._circle_clock.running != was_running:
+                if self._circle_clock.running:
+                    _LOG.info(
+                        "Enter 已按住：从 %.3fs 继续正面圆轨迹",
+                        elapsed_s,
+                    )
+                else:
+                    _LOG.warning(
+                        "Enter 已松开：正面圆轨迹暂停在 %.3fs",
+                        elapsed_s,
+                    )
+            sample = self._circle_plan.sample(elapsed_s)
+            self._accumulators["right"].set_delta_m(sample.delta_m)
+            self._circle_sample = sample
+            if sample.complete:
+                self._circle_clock = None
+                return True
+            return False
+
+    def _circle_status(self) -> dict[str, object]:
+        with self._command_lock:
+            sample = self._circle_sample
+            clock = self._circle_clock
+            active = clock is not None
+            deadman_pressed = False if clock is None else clock.running
+            elapsed_s = (
+                self._circle_plan.total_duration_s
+                if sample is not None and sample.complete
+                else 0.0 if clock is None else clock.elapsed_s
+            )
+        return {
+            "active": active,
+            "plane": "motive_xy",
+            "clockwise_view": "motive_positive_z",
+            "radius_mm": self._circle_plan.radius_mm,
+            "top_offset_mm": 2.0 * self._circle_plan.radius_mm,
+            "maximum_speed_mm_s":
+                self._circle_plan.maximum_speed_mm_s,
+            "required_hold_duration_s": self._circle_plan.total_duration_s,
+            "elapsed_hold_s": elapsed_s,
+            "deadman_key": "Return_or_KP_Enter",
+            "deadman_available": self._circle_deadman is not None,
+            "deadman_pressed": deadman_pressed,
+            "deadman_error": self._circle_deadman_error,
+            "segment": None if sample is None else sample.segment,
+            "segment_progress": (
+                None if sample is None else sample.segment_progress
+            ),
+            "complete": False if sample is None else sample.complete,
+        }
+
     def _begin_return(self, *, exit_after_return: bool) -> None:
         with self._phase_lock:
+            with self._command_lock:
+                self._circle_clock = None
             self._return_complete = False
             self._exit_after_return = exit_after_return
             self._phase = "returning"
@@ -542,6 +705,8 @@ class MocapLiveNode:
         with self._phase_lock:
             with self._command_lock:
                 self._accumulators = None
+                self._circle_clock = None
+                self._circle_sample = None
             self._last_conditioning = {
                 "left": None,
                 "right": None,
@@ -668,6 +833,12 @@ class MocapLiveNode:
                 )
                 return True
             self._publish_state("teleop")
+            if self._advance_circle(time.monotonic()):
+                _LOG.info(
+                    "右臂正面圆轨迹完成：已经过参考零点并保持在"
+                    " Motive +y %.0fmm",
+                    2.0 * self._circle_plan.radius_mm,
+                )
             # 只消费按 s 时冻结的参考 + 键盘累计增量。这里禁止读取
             # _latest_frame；right_arm 随机器人运动不能形成控制反馈。
             command_frame = self._command_frame()
@@ -722,6 +893,7 @@ class MocapLiveNode:
                 ),
             }
         accumulated_delta_mm = self._accumulated_delta_mm()
+        circle_trajectory = self._circle_status()
         state = {
             "armed": "idle",
             "stepping": "teleop",
@@ -744,6 +916,7 @@ class MocapLiveNode:
             "control_mode": "motive_reference_keyboard_step",
             "step_mm": self._step_mm,
             "accumulated_delta_mm": accumulated_delta_mm,
+            "circle_trajectory": circle_trajectory,
             "tracking": tracking,
             "motive_pose": motive_pose,
             "target_conditioning": target_conditioning,
@@ -828,7 +1001,11 @@ class MocapLiveNode:
                 try:
                     self._live.close()
                 finally:
-                    self._session.close()
+                    try:
+                        if self._circle_deadman is not None:
+                            self._circle_deadman.close()
+                    finally:
+                        self._session.close()
 
     def _stop(self) -> None:
         self._stop_event.set()
@@ -925,11 +1102,16 @@ def main(argv=None) -> int:
     try:
         _LOG.warning(
             "等待 Motive 刚体帧与键盘 's'；按 s 冻结当前 right_arm "
-            "位姿为零点，再用 上/下/左/右/1/0 连续累计（每键 %g mm）；"
-            "后续刚体随动只显示、不进入目标；再按 s 回 Home 后仍保持"
-            "运行，可再次按 s 开始；按 q 回 Home 后退出；终端每 0.5s "
-            "显示 Motive 位姿",
+            "位姿为零点。方向键/1/0 连续累计（每键 %gmm）；零位"
+            "按 c 只装载圆轨迹，必须持续按住 Enter 才运动，松开"
+            "立即暂停，再按从暂停处继续。轨迹：先上移 %.0fmm，"
+            "再在 Motive x-y 平面从 +z 侧看顺时针画 r=%.0fmm "
+            "整圆，半圈经过零点，结束保持在上方 %.0fmm。按 s 回 "
+            "Home，按 q 安全退出",
             args.step_mm,
+            2.0 * node._circle_plan.radius_mm,
+            node._circle_plan.radius_mm,
+            2.0 * node._circle_plan.radius_mm,
         )
         return node.run()
     except KeyboardInterrupt:
