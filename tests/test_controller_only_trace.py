@@ -21,6 +21,15 @@ class ControllerOnlyTraceMetricsTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "marvin_hardware_bridge"):
             _assert_replay_graph_is_safe(_Graph())
 
+    def test_replay_rejects_another_mocap_h5_replay(self) -> None:
+        class _Graph:
+            @staticmethod
+            def get_node_names_and_namespaces():
+                return [(("mocap_h5_replay"), "/")]
+
+        with self.assertRaisesRegex(RuntimeError, "mocap_h5_replay"):
+            _assert_replay_graph_is_safe(_Graph())
+
     def test_metrics_aggregate_official_diagnostics(self) -> None:
         frames = []
         for index in range(3):

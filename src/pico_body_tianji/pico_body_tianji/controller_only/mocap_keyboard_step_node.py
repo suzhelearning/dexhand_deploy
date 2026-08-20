@@ -10,8 +10,9 @@
     's' 开始回放（armed 时）/ 结束并回 Home（步进中）
     'q' / Ctrl+C 退出（步进中先回 Home 再退出）
 
-命令经与在线 PICO 相同的映射链路（增量相对参考帧 → pico_to_robot →
-world→chest → One-Euro → 1:1 目标整形）经 Zenoh 发布到
+命令经与在线 PICO 相同的映射链路（增量相对参考帧 → mocap_to_robot
+（Motive 系 +X 左 / +Z 前，与 PICO 系水平轴相差 180°，不能复用
+pico_to_robot）→ world→chest → One-Euro → 1:1 目标整形）经 Zenoh 发布到
 tianji_kinematic_sim（key：/pico_body/{left,right}_arm_target_pose 与
 _elbow_direction，JSON 与 zenoh 分支 C++ 节点协议一致），机器人末端
 每次按键移动 10mm。方向键为 raw 模式转义序列（\\x1b[A/B/C/D），由
@@ -156,8 +157,9 @@ class MocapKeyboardStepNode:
                 params["maximum_angular_acceleration_rad_s2"]
             ),
         )
+        tianji_config = load_tianji_config()
         self._mapper = ControllerOnlyTeleopMapper(
-            load_tianji_config(),
+            tianji_config,
             rate=rate,
             min_cutoff=float(params["min_cutoff"]),
             beta=float(params["beta"]),
@@ -166,6 +168,9 @@ class MocapKeyboardStepNode:
                 side: params[f"{side}_default_zsp_direction"]
                 for side in ("left", "right")
             },
+            # Motive 系(+X 左, +Z 前)与 PICO 系(+X 右, +Z 后)水平轴
+            # 相差 180°，必须用独立的动捕同向映射，不能复用 pico_to_robot。
+            input_to_robot=tianji_config.mocap_to_robot,
         )
         self._accumulator = StepAccumulator(
             reference_pose=_REFERENCE_POSE, step_mm=step_mm

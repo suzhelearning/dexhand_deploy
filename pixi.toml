@@ -14,6 +14,7 @@ mujoco = ">=3.2,<4"
 packaging = ">=24,<26"
 lark = ">=1.1,<2"
 netifaces = ">=0.11,<1"
+h5py = ">=3.10,<4"
 
 [pypi-dependencies]
 # zenoh-python：PyPI 包名 eclipse-zenoh，import 名 zenoh
@@ -26,6 +27,7 @@ real = { cmd = "bash scripts/run_real.sh", depends-on = ["doctor"] }
 real_controller_only = { cmd = "bash scripts/run_controller_only_real.sh", depends-on = ["doctor"] }
 real_mocap_step = { cmd = "bash scripts/run_mocap_step_real.sh", depends-on = ["doctor"] }
 real_mocap_live = { cmd = "bash scripts/run_mocap_live_real.sh", depends-on = ["doctor"] }
+real_mocap_h5 = { cmd = "bash scripts/run_mocap_h5_real.sh", depends-on = ["doctor"], description = "复用低速 H5+IK 主机链路，经安全桥驱动 Marvin 真机（必须 --confirm-real）" }
 status = { cmd = "bash scripts/status.sh", depends-on = ["doctor"] }
 pico-probe = "bash scripts/probe_pico.sh"
 pico-adb = { cmd = "bash scripts/adb_reverse.sh", description = "PICO 经 adb reverse 访问本机 XRoboToolkit 服务（60061/63901）" }
@@ -37,6 +39,7 @@ replay-controller-only = { cmd = "bash scripts/run_controller_only_replay.sh", d
 sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --mujoco-only", depends-on = ["doctor"] }
 sim_mocap_step = { cmd = "bash scripts/run_mocap_step.sh --mujoco-only", description = "mocap 键盘步进控制（动捕系 10mm/键，s 启停，Zenoh）" }
 sim_mocap_live = { cmd = "bash scripts/run_mocap_live.sh --mujoco-only", description = "Motive right_arm 定零 + 连续键盘位置步进 + 实时位姿显示（默认右臂 10mm/键，Zenoh）" }
+sim_mocap_h5 = { cmd = "bash scripts/run_mocap_h5_replay.sh --mujoco-only", description = "从 Motive right_arm 实测 Home 移动到 HDF5 Manus 右腕绝对轨迹的 Enter 保压回放（右臂，Zenoh）" }
 mocap_circle_compare = { cmd = "bash scripts/run_mocap_circle_compare.sh", description = "同步录制右臂目标/IK 与 Motive right_arm 轨迹并生成坐标对齐对比图" }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
 

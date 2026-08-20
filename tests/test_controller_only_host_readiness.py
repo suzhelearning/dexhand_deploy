@@ -75,6 +75,42 @@ def _mocap_step_status() -> dict:
     }
 
 
+def _mocap_h5_status() -> dict:
+    return {
+        "state": "idle",
+        "source": "offline_replay",
+        "input": "mocap_h5_replay",
+        "scope": "mocap_replay",
+        "mapping": "motive_absolute_h5_from_measured_home_conditioned_v1",
+        "control_mode": "h5_right_wrist_to_right_arm_hold_to_run",
+        "body_tracking": "disabled",
+        "motion_trackers_required": True,
+        "elbow_constraint": "published_default_zsp_backend_selected",
+        "smpl_used": False,
+        "at_safe_home": True,
+        "side": "right",
+        "phase": "armed",
+        "speed": 0.1,
+        "yaw_deg": 0.0,
+        "deadman_available": True,
+        "deadman_pressed": False,
+        "deadman_error": None,
+        "source_complete": False,
+        "motive_right_arm": {
+            "tracking_valid": True,
+            "resolved_id": 3,
+        },
+        "recording": {
+            "hands": {
+                "right": {
+                    "valid_frames": 399,
+                },
+            },
+        },
+        "error": None,
+    }
+
+
 def _observe_safe_host(
     gate: HostReadinessGate,
     input_status: dict,
@@ -255,6 +291,61 @@ class MocapLiveHostReadinessTest(unittest.TestCase):
 
         self.assertFalse(decision.ready)
         self.assertEqual(decision.reason, "mocap_live_not_ready")
+
+
+class MocapH5HostReadinessTest(unittest.TestCase):
+    def test_safe_armed_h5_host_is_ready(self) -> None:
+        gate = _gate("controller_only")
+        _observe_safe_host(gate, _mocap_h5_status())
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertTrue(decision.ready)
+        self.assertEqual(decision.reason, "ready")
+
+    def test_h5_host_requires_fresh_resolved_motive_rigid_body(self) -> None:
+        gate = _gate("controller_only")
+        status = _mocap_h5_status()
+        status["motive_right_arm"]["tracking_valid"] = False
+        _observe_safe_host(gate, status)
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertFalse(decision.ready)
+        self.assertEqual(decision.reason, "mocap_h5_not_ready")
+
+    def test_h5_host_rejects_missing_motive_status(self) -> None:
+        gate = _gate("controller_only")
+        status = _mocap_h5_status()
+        status["motive_right_arm"] = None
+        _observe_safe_host(gate, status)
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertFalse(decision.ready)
+        self.assertEqual(decision.reason, "mocap_h5_not_ready")
+
+    def test_h5_host_requires_released_deadman_at_arm(self) -> None:
+        gate = _gate("controller_only")
+        status = _mocap_h5_status()
+        status["deadman_pressed"] = True
+        _observe_safe_host(gate, status)
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertFalse(decision.ready)
+        self.assertEqual(decision.reason, "mocap_h5_not_ready")
+
+    def test_h5_host_rejects_speed_above_initial_real_limit(self) -> None:
+        gate = _gate("controller_only")
+        status = _mocap_h5_status()
+        status["speed"] = 0.5
+        _observe_safe_host(gate, status)
+
+        decision = gate.evaluate(now=10.02)
+
+        self.assertFalse(decision.ready)
+        self.assertEqual(decision.reason, "mocap_h5_not_ready")
 
 
 class _InputStatusCapture:

@@ -151,10 +151,10 @@ def main() -> int:
         s0 = solved[0]["position"]
         s1 = solved[-1]["position"]
         sx = round(s1["x"] - s0["x"], 3)
-        print(f"目标位移 x：{dx} m（动捕 +z 30mm → 机器人 -x）")
+        print(f"目标位移 x：{dx} m（动捕 +z 30mm → 机器人 +x，mocap_to_robot）")
         print(f"solved 位移 x：{sx} m")
-        # 动捕 +z 30mm → chest 系 -x 方向；容忍收敛误差
-        if not (-0.033 <= dx <= -0.027):
+        # 动捕 +z 30mm → chest 系 +x 方向（同向映射）；容忍收敛误差
+        if not (0.027 <= dx <= 0.033):
             failures.append(f"目标 x 位移异常：{dx}")
 
     print(f"左臂帧数：{len(left)}，右臂帧数：{len(right)}，"

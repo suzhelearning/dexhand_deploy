@@ -251,13 +251,17 @@ class CircleTrajectoryCapture:
 
 
 def right_motive_to_chest_matrix() -> np.ndarray:
-    """返回与在线控制器完全相同的 Motive/PICO → right_chest 旋转。"""
+    """返回与在线控制器完全相同的 Motive → right_chest 旋转。
+
+    Motive 系(+X 左, +Z 前)与 PICO 系(+X 右, +Z 后)水平轴相差 180°，
+    必须使用独立的 mocap_to_robot 同向映射。
+    """
     config = load_tianji_config()
     matrix = (
         np.asarray(
             config.get_world_to_chest_rotation("right"), dtype=np.float64
         )
-        @ np.asarray(config.pico_to_robot, dtype=np.float64)
+        @ np.asarray(config.mocap_to_robot, dtype=np.float64)
     )
     if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
         raise RuntimeError("right Motive→chest 坐标矩阵无效")

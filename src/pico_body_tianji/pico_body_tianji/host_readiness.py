@@ -213,6 +213,55 @@ class HostReadinessGate:
                 return HostReadiness(
                     False, "mocap_keyboard_step_not_ready"
                 )
+        elif source.get("input") == "mocap_h5_replay":
+            # H5 真机回放仅接受尚未开始、已确认 Home 的低速绝对轨迹
+            # 主机。Motive 刚体在连接前必须新鲜有效；Enter 必须可用
+            # 且处于松开状态，避免真机桥刚 armed 就开始运动。
+            motive = source.get("motive_right_arm")
+            recording = source.get("recording")
+            right_summary = (
+                recording.get("hands", {}).get("right", {})
+                if isinstance(recording, dict)
+                else {}
+            )
+            speed = source.get("speed")
+            yaw_deg = source.get("yaw_deg")
+            if not (
+                source.get("source") == "offline_replay"
+                and source.get("mapping")
+                == "motive_absolute_h5_from_measured_home_conditioned_v1"
+                and source.get("control_mode")
+                == "h5_right_wrist_to_right_arm_hold_to_run"
+                and source.get("body_tracking") == "disabled"
+                and source.get("motion_trackers_required") is True
+                and source.get("elbow_constraint")
+                == "published_default_zsp_backend_selected"
+                and source.get("smpl_used") is False
+                and source.get("scope") == "mocap_replay"
+                and source.get("side") == "right"
+                and source.get("phase") == "armed"
+                and source.get("at_safe_home") is True
+                and source.get("deadman_available") is True
+                and source.get("deadman_pressed") is False
+                and source.get("deadman_error") is None
+                and source.get("source_complete") is False
+                and source.get("error") is None
+                and isinstance(motive, dict)
+                and motive.get("tracking_valid") is True
+                and isinstance(motive.get("resolved_id"), int)
+                and not isinstance(motive.get("resolved_id"), bool)
+                and motive.get("resolved_id") > 0
+                and isinstance(right_summary.get("valid_frames"), int)
+                and not isinstance(right_summary.get("valid_frames"), bool)
+                and right_summary.get("valid_frames") > 0
+                and isinstance(speed, (int, float))
+                and not isinstance(speed, bool)
+                and 0.0 < float(speed) <= 0.25
+                and isinstance(yaw_deg, (int, float))
+                and not isinstance(yaw_deg, bool)
+                and float(yaw_deg) == 0.0
+            ):
+                return HostReadiness(False, "mocap_h5_not_ready")
         elif not (
             source.get("source") == "live"
             and source.get("input") == "pico_controllers_only"

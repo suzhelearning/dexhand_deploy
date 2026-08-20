@@ -202,8 +202,9 @@ class MocapLiveNode:
                 params["maximum_angular_acceleration_rad_s2"]
             ),
         )
+        tianji_config = load_tianji_config()
         self._mapper = ControllerOnlyTeleopMapper(
-            load_tianji_config(),
+            tianji_config,
             rate=rate,
             min_cutoff=float(params["min_cutoff"]),
             beta=float(params["beta"]),
@@ -212,6 +213,9 @@ class MocapLiveNode:
                 side: params[f"{side}_default_zsp_direction"]
                 for side in ("left", "right")
             },
+            # Motive 系(+X 左, +Z 前)与 PICO 系(+X 右, +Z 后)水平轴
+            # 相差 180°，必须用独立的动捕同向映射，不能复用 pico_to_robot。
+            input_to_robot=tianji_config.mocap_to_robot,
         )
 
         self._pose_pubs = {
@@ -314,11 +318,16 @@ class MocapLiveNode:
         # natnet-zenoh 发布格式：{"names": {str(id): name}}
         payload = mapping.get("names", mapping)
         with self._frame_lock:
-            self._rigid_body_names = {
+            names = {
                 int(rid): str(name)
                 for rid, name in payload.items()
             }
-        _LOG.info("刚体名映射已更新：%s", self._rigid_body_names)
+            changed = names != self._rigid_body_names
+            self._rigid_body_names = names
+        # 发布端周期性重发名称映射（约 5s/次）；仅在实际变化时记录，
+        # 避免刷屏。
+        if changed:
+            _LOG.info("刚体名映射已更新：%s", names)
 
     def _resolve_rigid_id(self, side: str) -> int | None:
         """刚体参数（int id 或名字）→ 当前 id；名字未发布返回 None。"""

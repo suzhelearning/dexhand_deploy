@@ -78,6 +78,12 @@ def raw_keyboard(
         saved = termios.tcgetattr(fd)
         try:
             tty.setraw(fd)
+            # tty.setraw 同时关闭 OPOST/ONLCR，导致所有共享该终端的
+            # 日志只下移不回到行首，最终呈“阶梯状”。键盘只需要 raw
+            # 输入；恢复原输出模式，保留正常的 CRLF 换行。
+            raw_attributes = termios.tcgetattr(fd)
+            raw_attributes[1] = saved[1]
+            termios.tcsetattr(fd, termios.TCSANOW, raw_attributes)
             while not stop_event.is_set():
                 if not _drain(fd, on_key, on_idle):
                     break

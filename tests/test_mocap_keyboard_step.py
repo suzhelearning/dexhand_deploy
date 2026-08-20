@@ -658,6 +658,8 @@ class MocapKeyboardStepMappingTest(unittest.TestCase):
                 side: config.get_default_zsp_direction(side)
                 for side in ("left", "right")
             },
+            # mocap 链路必须使用独立的动捕同向映射，不能复用 pico_to_robot。
+            input_to_robot=config.mocap_to_robot,
         )
 
     def test_one_key_press_maps_to_exactly_step_mm(self) -> None:
@@ -694,8 +696,8 @@ class MocapKeyboardStepMappingTest(unittest.TestCase):
                  else targets.right_pose[:3])
                 for targets in settled
             ]
-            # 动捕 +z → 机器人世界 -x（pico_to_robot）；每次按键
-            # 收敛后目标位移恰为 10mm。
+            # 动捕 +z（操作者前）→ 机器人世界 +x（mocap_to_robot 同向
+            # 映射）；每次按键收敛后目标位移恰为 10mm。
             step_distances = [
                 float(np.linalg.norm(positions[i + 1] - positions[i]))
                 for i in range(len(positions) - 1)
@@ -706,6 +708,35 @@ class MocapKeyboardStepMappingTest(unittest.TestCase):
                     msg=f"{side} 第 {index + 1} 次按键目标位移 "
                         f"{distance*1000:.1f}mm ≠ 10mm",
                 )
+
+
+class MocapToRobotMatrixTest(unittest.TestCase):
+    """mocap_to_robot 同向映射的轴方向契约。"""
+
+    def test_motive_axes_map_same_direction_as_operator(self) -> None:
+        config = TianjiConfig.load()
+        matrix = np.asarray(config.mocap_to_robot, dtype=np.float64)
+
+        self.assertEqual(matrix.shape, (3, 3))
+        np.testing.assert_allclose(matrix @ matrix.T, np.eye(3), atol=1.0e-9)
+        self.assertAlmostEqual(np.linalg.det(matrix), 1.0)
+        # 操作者左(+X) -> 机器人左(+Y)；前(+Z) -> 机器人前(+X)；上 -> 上。
+        np.testing.assert_allclose(
+            matrix @ np.array([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]
+        )
+        np.testing.assert_allclose(
+            matrix @ np.array([0.0, 0.0, 1.0]), [1.0, 0.0, 0.0]
+        )
+        np.testing.assert_allclose(
+            matrix @ np.array([0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]
+        )
+
+    def test_mocap_matrix_differs_from_pico_matrix(self) -> None:
+        config = TianjiConfig.load()
+        # PICO +X 右 -> 机器人 -Y(右)；与动捕同向映射方向相反。
+        self.assertFalse(
+            np.allclose(config.mocap_to_robot, config.pico_to_robot)
+        )
 
 
 if __name__ == "__main__":

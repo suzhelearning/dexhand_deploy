@@ -192,6 +192,7 @@ Pixi 负责锁定 Python、Pinocchio（pin）和 eclipse-zenoh 绑定；构建�
 | 纯手柄链路 | `src/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml` | `pixi run sim_controller_only` | `pixi run real_controller_only` |
 | mocap 键盘步进 | `src/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml` | `pixi run sim_mocap_step` | `pixi run real_mocap_step -- --confirm-real` |
 | mocap 实时定零步进 | 同上 | `pixi run sim_mocap_live` | `pixi run real_mocap_live -- --confirm-real` |
+| mocap HDF5 右腕回放 | 同上 | `pixi run sim_mocap_h5 -- TAKE.h5` | `pixi run real_mocap_h5 -- --confirm-real` |
 
 配置先按运行模式分组；每种模式各有一个 Sim/IK 配置和一个 Real 配置：
 
@@ -219,11 +220,8 @@ tianji_kinematic_sim:
 与 YAML 键一致；旧式 `ros__parameters` 嵌套结构仍可读取，新写法为节点
 段内直接平铺参数。
 
-因此运行命令始终只有
-`sim`、`real`、`sim_controller_only`、`real_controller_only`、
-`sim_mocap_step`、`real_mocap_step`、`sim_mocap_live`、
-`real_mocap_live` 八个，不会把模式名与 IK 名组合
-成新命令。
+运行模式和 IK 后端正交：命令选择输入/输出链路，YAML 中的
+`ik_backend` 选择求解器。不要把模式名与 IK 名组合成新命令。
 
 官方库路径和机型配置保持空字符串即可，运行时包装器会使用项目内的
 `runtime/tianji_official`。修改完成后，在项目根目录依次执行：
@@ -572,7 +570,7 @@ key，不发布控制命令；结束后会打印输入速度/加速度、椭球�
 并将原始 JSONL 保存到 `diagnostics/`。传入 `--duration 0` 可一直采集到
 `Ctrl+C`。
 
-## 四个运行入口
+## 运行入口
 
 | 命令 | 作用 | 是否连接真机 |
 |---|---|---|
@@ -581,14 +579,16 @@ key，不发布控制命令；结束后会打印输入速度/加速度、椭球�
 | `pixi run sim_controller_only` | 纯手柄 IK 的 MuJoCo 仿真 | 否 |
 | `pixi run sim_mocap_step` | mocap 键盘步进控制（动捕系 10mm/键，s 启停） | 否 |
 | `pixi run sim_mocap_live` | Motive `right_arm` 定零 + 连续键盘位置步进（默认右臂 10mm/键） | 否 |
+| `pixi run sim_mocap_h5 -- TAKE.h5` | 选择一个 mocap HDF5，回放 Manus 右腕轨迹（Enter 保压） | 否 |
 | `pixi run real_mocap_step -- --confirm-real` | 复用键盘步进仿真，启动真机桥 | **是** |
 | `pixi run real_mocap_live -- --confirm-real` | 复用 Motive 定零键盘步进仿真，启动真机桥 | **是** |
+| `pixi run real_mocap_h5 -- --confirm-real` | 复用低速 H5 + IK 主机，启动真机安全桥 | **是** |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
 
 `doctor`、`test`、`pico-probe`、`status`、`controller-only-joints` 和
 `controller-only-real-diagnostic` 是检查/观测工具，不是新的运行模式。
-`sim` 两个入口均可追加 `-- --mujoco-only` 或 `-- --topics-only`，
-但入口名不变。
+需要关闭 MuJoCo 时，支持该选项的仿真入口可追加
+`-- --topics-only`；默认是 `--mujoco-only`。
 
 ## mocap 键盘步进控制（sim_mocap_step）
 
@@ -635,6 +635,84 @@ pixi run real_mocap_step -- --confirm-real
 `host_readiness` 显式接受 `mocap_keyboard_step` 身份；桥只在双臂
 命令就绪且位于 Home 时进入 armed_idle，随后按 `s` 开始、方向键
 步进（默认仅右臂 10mm/键）、再按 `s` 回 Home、`q` 退出。
+
+## 可选 HDF5 右腕轨迹回放（sim_mocap_h5 / real_mocap_h5）
+
+每次运行通过位置参数选择一个 `mocap-acquisition` v4.0 HDF5；路径
+不固定。节点读取 `hands/right/wrist_position`、
+`hands/right/wrist_quaternion_xyzw` 和 `hands/right/valid`，同时订阅
+实时 `mocap/hands/frame` 与 `mocap/rigid_body_names`。H5 手腕位姿和
+实时 `right_arm` 都按同一个 Motive y-up 世界坐标系的**绝对位姿**
+解释。按 `s` 时捕获贴在天机末端的 `right_arm` Home 位姿作为 IK
+增量起点；第一阶段从该实测 Home 移动到 H5 绝对第 0 帧，随后按文件
+`time_ns` 跟踪整条绝对轨迹。节点只发布右臂 IK 目标，左臂保持 Home。
+真机模式由独立的 `real_mocap_h5` 安全桥复用这套 H5 + IK 主机链路。
+
+```bash
+# 选择本次要执行的轨迹
+pixi run sim_mocap_h5 -- /path/to/take.h5
+
+# 换另一个文件；无需修改配置或源码
+pixi run sim_mocap_h5 -- /path/to/another_take.h5
+
+# 只校验文件结构、有效帧和时长；不启动 IK，不运动
+pixi run sim_mocap_h5 -- /path/to/take.h5 --validate-only
+
+# 可选：无 MuJoCo、回放倍速、Motive +Y 朝向修正
+pixi run sim_mocap_h5 -- /path/to/take.h5 --topics-only
+pixi run sim_mocap_h5 -- /path/to/take.h5 --speed 0.5 --yaw-deg 10
+
+# 刚体名称不是 right_arm 时可显式指定名称或数字 id
+pixi run sim_mocap_h5 -- /path/to/take.h5 --right-rigid-id tianji_tcp
+```
+
+首次真机测试必须先在仿真中完整确认轨迹、方向和工作空间，再用两个
+终端启动。以下示例中的刚体 ID 必须与 `mocap/hands/frame` 实际一致：
+
+```bash
+# 终端 1：低速 H5 + IK 主机；启动后先不要按 s / Enter
+pixi run sim_mocap_h5 -- \
+  /home/current/data/20260819/20260819_151737_102784_take003.h5 \
+  --topics-only --speed 0.1 --yaw-deg 0 --right-rigid-id 3
+
+# 终端 2：确认实体急停、48V、清场和刚体 ID 后启动真机桥
+pixi run real_mocap_h5 -- --confirm-real
+```
+
+真机桥连接时会先以受限速度把双臂送到配置的安全 Home。等待终端 2
+明确提示“真机链路已就绪”（内部 `phase=armed_idle`）后，才能回到
+终端 1 按 `s` 和保压 `Enter`。
+H5 真机入口只接受 `speed <= 0.25`、`yaw-deg = 0`、`phase=armed`、
+IK 与目标均在 Home、Motive `right_arm` 新鲜有效、Enter 已松开的
+主机；任一条件不满足都不会连接机器人。真机桥默认速度/加速度比例
+均为 10%，并继续执行关节限位、单周期步长、跟踪误差、命令超时和
+软急停保护。首次测试不要提高比例。
+
+安全操作顺序：
+
+1. 确认 Windows `natnet-zenoh` 发布器正在发送有效 `right_arm`，
+   并等待 IK 确认 Home。
+2. 按 `s`：冻结当前 `right_arm` 位姿作为机械臂固定 Home 在本次
+   Motive 坐标系下的实测起点。
+3. **按住 `Enter`**：从实测 Home 渐进移动到 H5 动捕系绝对第 0 帧；
+   松开立即保持，再按继续。
+4. 程序提示“已到达并稳定保持轨迹 0 帧”后，先完全松开 `Enter`，
+   再按 `r` 装载正式轨迹。
+5. 正式回放仍由 **`Enter` 保压**：按住推进源轨迹时间，松开暂停，
+   再按从当前时间继续；播放完成后保持末帧。
+6. 任意活动阶段按 `s` 取消并回 Home；按 `q` 则回 Home 后退出。
+   已在 Home 时按 `q` 直接退出。
+
+Enter 门控读取 X11 的物理 `Return` / `KP_Enter` 按下和松开状态；
+没有 `DISPLAY` 时拒绝自动运动。目标增量直接由两个绝对 Motive 位姿
+计算：`Δp(t)=p_h5(t)-p_right_arm_home`，
+`ΔR(t)=R_h5(t)·inverse(R_right_arm_home)`；再从机械臂固定 IK Home
+位姿施加该增量。不会平移或旋转 H5 轨迹去贴合本次 Home。若 H5
+第 0 帧无效，轨迹加载器仅用首个有效位姿钳制填充第 0 帧。实时刚体
+在开始时提供 Home 起点，回放中用于发布实际/期望跟踪误差诊断，
+不会把每帧实测运动再次叠加进 IK 目标。状态中的
+`motive_right_arm` 包含实际/期望绝对位姿及位置、姿态误差。首次
+增加或修改运行文件后需重新执行 `pixi run -e ik-build deploy-ik`。
 
 **Motive 刚体定零 + 键盘步进/正面圆轨迹（sim_mocap_live / real_mocap_live）**：
 订阅 `mocap/hands/frame`，默认读取贴在机器人右臂末端的 Motive
@@ -699,7 +777,8 @@ pixi run real_mocap_live -- --confirm-real
 
 三路原始坐标和接收时间分别保留。对比时各自减去装载圆轨迹前的零点，
 再使用控制链同一组
-`world_to_chest(right) @ pico_to_robot` 矩阵把 Motive 相对位移映射
+`world_to_chest(right) @ mocap_to_robot` 矩阵（Motive 系与 PICO 系
+水平轴相差 180°，动捕链路专用同向映射）把 Motive 相对位移映射
 到 `right_chest`；不会直接叠加两个原生坐标系。按接收时间线性对齐，
 同时给出直接误差和自动估计时间滞后后的误差。
 

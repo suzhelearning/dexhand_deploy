@@ -467,6 +467,9 @@ def _assert_replay_graph_is_safe(session) -> None:
         "tianji_arm_node",
         "pico_controller_only_input",
         "pico_controller_input",
+        "mocap_keyboard_step",
+        "mocap_live",
+        "mocap_h5_replay",
     }
     conflicts = sorted(forbidden.intersection(names))
     if conflicts:

@@ -38,12 +38,14 @@ class ControllerOnlyTeleopMapper:
         beta: float = 0.7,
         conditioning_settings: TargetConditioningSettings | None = None,
         default_zsp_directions: dict[str, object] | None = None,
+        input_to_robot: object | None = None,
     ):
         self._controller = IncrementalController(
             config,
             rate=rate,
             min_cutoff=min_cutoff,
             beta=beta,
+            input_to_robot=input_to_robot,
         )
         self._default_elbow_directions = {
             side: self._unit_direction(

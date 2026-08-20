@@ -168,6 +168,7 @@ install(
     scripts/marvin_hardware_bridge
     scripts/mocap_keyboard_step
     scripts/mocap_live
+    scripts/mocap_h5_replay
     scripts/mujoco_joint_viewer.py
   DESTINATION lib/${PROJECT_NAME}
 )

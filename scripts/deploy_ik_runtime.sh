@@ -17,6 +17,7 @@ RUNTIME_PROGRAMS=(
   marvin_hardware_bridge
   mocap_keyboard_step
   mocap_live
+  mocap_h5_replay
   mujoco_joint_viewer.py
 )
 BACKUP_DIR="${BUNDLE_ROOT}/staging/runtime-backup"
