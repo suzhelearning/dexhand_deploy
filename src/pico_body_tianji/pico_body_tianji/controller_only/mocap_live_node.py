@@ -70,6 +70,11 @@ RETURN_COMPLETE_KEY = "pico_body_sim/return_complete"
 # （真机桥侧另有命令超时软停保护）。
 _FRAME_STALE_S = 0.5
 
+# raw 模式终端 key repeat 仍生效：按住 s 稍久会收到多个 s，第二个 s
+# 会把刚开始的步进立即切换为回 Home（用户感知为“自动回 Home”）。
+# stepping 开始后该窗口内的重复 s 忽略；正常“开始→回 Home”间隔远大于此。
+_S_DEBOUNCE_S = 0.5
+
 
 _AXIS_LABELS = {
     "up": "动捕 +z",
@@ -443,6 +448,14 @@ class MocapLiveNode:
                     "/".join(self._active_sides),
                 )
             elif self._phase == "stepping":
+                now = time.monotonic()
+                if now - self._phase_started < _S_DEBOUNCE_S:
+                    _LOG.info(
+                        "键盘 's'：开始后 %.0fms 内的重复 s 已忽略"
+                        "（终端 key repeat 连击）",
+                        (now - self._phase_started) * 1000.0,
+                    )
+                    return
                 self._begin_return(exit_after_return=False)
                 _LOG.info("键盘 's'：请求结束并回 Home")
             elif self._phase == "returning":

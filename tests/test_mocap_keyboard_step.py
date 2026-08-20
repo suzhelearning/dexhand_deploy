@@ -204,12 +204,48 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
             right_reference[:3] + np.array([0.01, 0.01, 0.03]),
         )
 
-    def test_s_rearms_after_home_and_q_exits_after_home(self) -> None:
+    def test_s_within_debounce_window_ignored(self) -> None:
         node = MocapLiveNode.__new__(MocapLiveNode)
         node._parser = ArrowKeyParser()
         node._echo = lambda event: None
         node._phase = "stepping"
         node._phase_started = time.monotonic()
+        node._return_complete = False
+        node._at_home = False
+        node._exit_after_return = False
+        node._command_lock = threading.Lock()
+        node._accumulators = {"left": object(), "right": object()}
+        node._last_conditioning = {"left": {}, "right": {}}
+        node._publish_state = lambda state: None
+
+        node._on_key("s")
+        self.assertEqual(node._phase, "stepping")
+        self.assertFalse(node._exit_after_return)
+
+    def test_s_after_debounce_window_returns(self) -> None:
+        node = MocapLiveNode.__new__(MocapLiveNode)
+        node._parser = ArrowKeyParser()
+        node._echo = lambda event: None
+        node._phase = "stepping"
+        node._phase_started = time.monotonic() - 0.6
+        node._return_complete = False
+        node._at_home = False
+        node._exit_after_return = False
+        node._command_lock = threading.Lock()
+        node._accumulators = {"left": object(), "right": object()}
+        node._last_conditioning = {"left": {}, "right": {}}
+        node._publish_state = lambda state: None
+
+        node._on_key("s")
+        self.assertEqual(node._phase, "returning")
+        self.assertFalse(node._exit_after_return)
+
+    def test_s_rearms_after_home_and_q_exits_after_home(self) -> None:
+        node = MocapLiveNode.__new__(MocapLiveNode)
+        node._parser = ArrowKeyParser()
+        node._echo = lambda event: None
+        node._phase = "stepping"
+        node._phase_started = time.monotonic() - 0.6
         node._return_complete = False
         node._at_home = False
         node._exit_after_return = False
