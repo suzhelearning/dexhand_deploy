@@ -68,6 +68,36 @@ source ~/.bashrc
 pixi --version
 ```
 
+## 快速开始：Motive 动捕真机运行
+
+环境就绪且 Windows 侧 Motive 动捕发布已运行（`windows_pub.sh`）时，
+两个终端即可驱动真机：
+
+```bash
+# 终端 1：Motive 定零 + 连续键盘位置步进（主机链路，含 IK 解算）
+pixi run sim_mocap_live
+
+# 终端 2：真机桥（确认机械臂安全、急停释放后执行）
+pixi run real_mocap_live -- --confirm-real
+```
+
+- 终端 1 先等日志出现 `刚体名映射已更新：{..., 10: 'right_arm'}` 和
+  `Motive right frame=... tracking=ok`（动捕数据已到）；
+- 终端 2 等 `真机链路已就绪：保持安全零位，主机开始遥操作后跟随`，
+  再回到终端 1 操作；
+
+| 按键 | 作用 |
+| --- | --- |
+| `s` | 冻结 `right_arm` 当前位姿为零点，开始控制 |
+| `↑/↓/←/→/1/0` | 连续累计步进（每键 10mm，动捕系），可无限次 |
+| `s` | 请求回 Home；回零完成后程序不退出，可再次按 `s` 开始新一轮 |
+| `q` / Ctrl+C | 回 Home 完成后安全退出 |
+
+`real_mocap_live` 只复用 `sim_mocap_live` 的 IK 关节命令，不会启动
+第二套输入或 IK；跟踪误差、命令超时、限速斜坡与急停检测等安全保护
+全部在真机桥侧生效。完整说明见后文
+「Motive 刚体定零 + 键盘位置步进（sim_mocap_live / real_mocap_live）」。
+
 ## 第一次使用：推荐顺序
 
 ### 1. 获取简化版项目并进入目录
@@ -158,7 +188,8 @@ Pixi 负责锁定 Python、Pinocchio（pin）和 eclipse-zenoh 绑定；构建�
 | --- | --- | --- | --- |
 | PICO + SMPL 全身链路 | `src/pico_body_tianji/config/mode/full_body/preview.yaml` | `pixi run sim` | `pixi run real` |
 | 纯手柄链路 | `src/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml` | `pixi run sim_controller_only` | `pixi run real_controller_only` |
-| mocap 键盘步进 | `src/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml` | `pixi run sim_mocap_step` | —（真机桥主机输入） |
+| mocap 键盘步进 | `src/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml` | `pixi run sim_mocap_step` | `pixi run real_mocap_step -- --confirm-real` |
+| mocap 实时定零步进 | 同上 | `pixi run sim_mocap_live` | `pixi run real_mocap_live -- --confirm-real` |
 
 配置先按运行模式分组；每种模式各有一个 Sim/IK 配置和一个 Real 配置：
 
@@ -188,7 +219,8 @@ tianji_kinematic_sim:
 
 因此运行命令始终只有
 `sim`、`real`、`sim_controller_only`、`real_controller_only`、
-`sim_mocap_step`、`real_mocap_step` 六个，不会把模式名与 IK 名组合
+`sim_mocap_step`、`real_mocap_step`、`sim_mocap_live`、
+`real_mocap_live` 八个，不会把模式名与 IK 名组合
 成新命令。
 
 官方库路径和机型配置保持空字符串即可，运行时包装器会使用项目内的
