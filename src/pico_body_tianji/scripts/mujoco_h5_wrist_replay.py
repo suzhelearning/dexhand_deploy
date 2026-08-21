@@ -493,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
                         end_index,
                         np.round(pose_at(frame_index)[0], 3).tolist(),
                     )
+                viewer.sync()
                 time.sleep(1.0 / 120.0)
     except KeyboardInterrupt:
         pass
