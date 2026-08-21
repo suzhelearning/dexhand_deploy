@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""机械臂+wuji2 场景的纯 H5 数据回放（不启动 IK/Motive/Zenoh）。
+"""机械臂+wuji2 场景的 H5 数据回放（不启动 IK、不控制机械臂）。
 
-加载机械臂+wuji2 组合 URDF 并摆到 sim_mocap_h5 的 Home 关节角（IK
-求解 init_pos/init_quat 的确定性配置，非零位）；只把 H5 右手 21 点
-关键点经固定 Manus→wuji2 外参转到 wuji2 局部坐标，再叠在 Home
-r_wrist 上，按时间轴播放手部位姿移动。机械臂关节保持 Home 不变。
+加载组合 URDF 并摆到 sim_mocap_h5 的 Home 关节角；订阅 Motive
+``right_arm`` 只用于定位动捕原点，世界轴固定使用
+``Motive→Robot world→MuJoCo``。H5 右手 21 点世界坐标据此映射到
+MuJoCo，并按时间轴播放；机械臂关节保持 Home 不变。
 
-与 sim_mocap_h5 的区别：本脚本不驱动 IK，不读 Motive marker，不发布
-目标话题，只做确定性数据可视化，用于离线核对 H5 手姿态在机器人场景
-中的运动。
+与 ``sim_mocap_h5`` 的区别：本脚本不驱动 IK、不发布目标话题，只读取
+一次实时 right_arm 原点标定并可视化 H5 数据。
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ from scipy.spatial.transform import Rotation
 
 from pico_body_tianji.controller_only.mocap_h5 import (
     HAND_KEYPOINT_EDGES,
+    compose_pose,
     load_mocap_h5,
 )
 from pico_body_tianji.controller_only.mocap_h5_replay_node import (
@@ -33,11 +33,14 @@ from pico_body_tianji.controller_only.mocap_h5_replay_node import (
 )
 from pico_body_tianji.joint_state_model import urdf_joint_names
 from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
+from tianji_world_output.config_loader import get_config
 
 from mujoco_joint_viewer import (
     _POINT_COLORS,
     _add_frame_zero_skeleton,
+    _frame_from_axis_geoms,
     _quat_wxyz_from_z_axis,
+    _sim_from_motive_rotation,
 )
 
 
@@ -151,8 +154,8 @@ def _read_right_arm_pose(spec: str | None) -> np.ndarray:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "机械臂+wuji2 场景纯 H5 手部数据回放；机械臂保持 Home，"
-            "只移动手部骨架；不启动 IK/Motive/Zenoh"
+            "机械臂+wuji2 场景 H5 手部数据回放；机械臂保持 Home，"
+            "只移动手部骨架；不启动 IK，只读 right_arm 定位原点"
         )
     )
     parser.add_argument("h5", type=Path)
@@ -188,21 +191,6 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _wrist_frame_mj(data, model, axis_x_geom_id: int,
-                    axis_z_geom_id: int) -> tuple[np.ndarray, np.ndarray]:
-    axis_x_matrix = data.geom_xmat[axis_x_geom_id].reshape(3, 3)
-    axis_z_matrix = data.geom_xmat[axis_z_geom_id].reshape(3, 3)
-    axis_x = axis_x_matrix[:, 2].copy()
-    axis_z = axis_z_matrix[:, 2].copy()
-    axis_x /= np.linalg.norm(axis_x)
-    axis_z /= np.linalg.norm(axis_z)
-    axis_y = np.cross(axis_z, axis_x)
-    axis_y /= np.linalg.norm(axis_y)
-    axis_z = np.cross(axis_x, axis_y)
-    rotation = np.column_stack((axis_x, axis_y, axis_z))
-    origin_x = data.geom_xpos[axis_x_geom_id] - 0.045 * axis_x
-    origin_z = data.geom_xpos[axis_z_geom_id] - 0.045 * axis_z
-    return 0.5 * (origin_x + origin_z), rotation
 
 
 def _update_skeleton(model, data, point_geom_ids, bone_geom_ids,
@@ -288,57 +276,75 @@ def main(argv: list[str] | None = None) -> int:
         model.geom_sameframe[geom_id] = 0
         model.geom_rgba[geom_id, 3] = 0.0
 
-    axis_x_geom_id = mujoco.mj_name2id(
+    wrist_axis_x = mujoco.mj_name2id(
         model, mujoco.mjtObj.mjOBJ_GEOM, "r_wrist_axis_0"
     )
-    axis_z_geom_id = mujoco.mj_name2id(
+    wrist_axis_z = mujoco.mj_name2id(
         model, mujoco.mjtObj.mjOBJ_GEOM, "r_wrist_axis_2"
     )
-    if axis_x_geom_id < 0 or axis_z_geom_id < 0:
+    tcp_axis_x = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_GEOM, "TCP_Link_R_axis_0"
+    )
+    tcp_axis_z = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_GEOM, "TCP_Link_R_axis_2"
+    )
+    if min(wrist_axis_x, wrist_axis_z, tcp_axis_x, tcp_axis_z) < 0:
         raise RuntimeError(
-            "纯数据回放需要 --wuji2 组合 URDF（缺少 r_wrist 坐标轴 geom）"
+            "纯数据回放需要 --wuji2 组合 URDF（缺少 TCP/r_wrist 坐标轴）"
         )
-    home_position_mj, home_rotation_mj = _wrist_frame_mj(
-        data, model, axis_x_geom_id, axis_z_geom_id
+    home_position_mj, _home_wrist_rotation_mj = (
+        _frame_from_axis_geoms(
+            data, wrist_axis_x, wrist_axis_z, 0.045
+        )
+    )
+    _home_tcp_position_mj, home_tcp_rotation_mj = (
+        _frame_from_axis_geoms(
+            data, tcp_axis_x, tcp_axis_z, 0.025
+        )
     )
 
-    # 定位动捕原点：right_arm 刚体（Motive 系）经外参推导 r_wrist Home
-    # 在 Motive 系，再与 MuJoCo Home r_wrist 对齐，建立 Motive->MuJoCo 变换。
-    rigid_to_marker = _configured_pose("right_rigid_to_marker_mocap")
-    marker_to_wrist = _configured_pose("right_marker_to_wrist")
+    # Home 关节角、TCP Home 位姿与 mocap_to_robot 必须来自同一机器人配置。
+    tianji_config = get_config()
+    configured_home = np.concatenate(
+        (
+            np.asarray(tianji_config.init_joints["left"]),
+            np.asarray(tianji_config.init_joints["right"]),
+        )
+    )
+    if not np.allclose(home_joints, configured_home, atol=1.0e-6):
+        raise ValueError(
+            "controller_only_ik.yaml Home 关节角与 tianji_robot.yaml "
+            "init_joints 不一致，无法建立确定的世界轴映射"
+        )
+
+    # 固定世界轴：Motive→Robot world→MuJoCo。
+    # right_arm marker 的局部姿态不参与该旋转。
+    rotation_sim_from_motive = _sim_from_motive_rotation(
+        home_tcp_rotation_mj, tianji_config
+    )
+
+    # right_arm 仅定位动捕原点：其姿态只用于把局部 marker/wrist 平移
+    # 偏置旋转到 Motive 世界，再用对应的 MuJoCo Home r_wrist 求平移。
     rigid_pose = _read_right_arm_pose(args.right_arm_pose)
-    # compose_pose(a, b) 语义：p = p_a + R_a @ p_b，R = R_a @ R_b。
-    marker_position = (
-        rigid_pose[:3]
-        + Rotation.from_quat(rigid_pose[3:7]).as_matrix()
-        @ rigid_to_marker[:3]
+    marker_home_motive = compose_pose(
+        rigid_pose,
+        _configured_pose("right_rigid_to_marker_mocap"),
     )
-    marker_rotation = (
-        Rotation.from_quat(rigid_pose[3:7])
-        * Rotation.from_quat(rigid_to_marker[3:7])
-    )
-    marker_pose_full = np.concatenate(
-        (marker_position, marker_rotation.as_quat())
-    )
-    wrist_position = (
-        marker_pose_full[:3]
-        + marker_rotation.as_matrix() @ marker_to_wrist[:3]
-    )
-    wrist_rotation = (
-        marker_rotation * Rotation.from_quat(marker_to_wrist[3:7])
-    )
-    wrist_home_motive = np.concatenate(
-        (wrist_position, wrist_rotation.as_quat())
-    )
-    rotation_home_motive = Rotation.from_quat(
-        wrist_home_motive[3:7]
-    ).as_matrix()
-    rotation_sim_from_motive = (
-        home_rotation_mj @ rotation_home_motive.T
+    wrist_home_motive = compose_pose(
+        marker_home_motive,
+        _configured_pose("right_marker_to_wrist"),
     )
     translation_sim_from_motive = (
         home_position_mj
         - rotation_sim_from_motive @ wrist_home_motive[:3]
+    )
+    _LOG.info(
+        "坐标标定：Motive +X→Sim %s，+Y→Sim %s，+Z→Sim %s；"
+        "原点平移=%s；right_arm 姿态仅用于局部偏置",
+        np.round(rotation_sim_from_motive[:, 0], 4).tolist(),
+        np.round(rotation_sim_from_motive[:, 1], 4).tolist(),
+        np.round(rotation_sim_from_motive[:, 2], 4).tolist(),
+        np.round(translation_sim_from_motive, 4).tolist(),
     )
 
     def motive_to_sim(points: np.ndarray) -> np.ndarray:
@@ -379,8 +385,8 @@ def main(argv: list[str] | None = None) -> int:
     duration_s = float(time_ns[end_index] - start_ns) / 1.0e9
 
     _LOG.info(
-        "纯数据回放：%s；右手有效=%d/%d；首帧=%d 末帧=%d；时长=%.3fs；"
-        "speed=%g；机械臂保持 Home，仅移动手部骨架；不启动 IK/Motive/Zenoh",
+        "H5 数据回放：%s；右手有效=%d/%d；首帧=%d 末帧=%d；时长=%.3fs；"
+        "speed=%g；机械臂保持 Home；只读 right_arm 原点，不启动 IK",
         recording.path,
         int(hand.valid.sum()),
         recording.frame_count,

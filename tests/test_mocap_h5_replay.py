@@ -27,6 +27,7 @@ from pico_body_tianji.controller_only.mocap_h5_replay_node import (
     _configured_pose,
 )
 from pico_body_tianji.controller_only.raw_keyboard import raw_keyboard
+from pico_body_tianji.joint_state_model import urdf_joint_names
 from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
 
 
@@ -496,7 +497,7 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
-    def test_motive_frame_zero_uses_home_calibrated_world_transform(self) -> None:
+    def test_motive_frame_zero_uses_fixed_world_axes_and_home_origin(self) -> None:
         viewer = self._viewer_module()
         root = Path(__file__).resolve().parents[1]
         urdf = (
@@ -510,23 +511,48 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
             assets,
         )
         data = mujoco.MjData(model)
-        mujoco.mj_forward(model, data)
         session = _FakeZenohSession()
         skeleton = viewer.FrameZeroHandSkeleton(
             session,
             model,
             "/pico_body_sim/frame0_hand_skeleton",
         )
+        config = skeleton._tianji_config
+        home = np.concatenate(
+            (
+                np.asarray(config.init_joints["left"]),
+                np.asarray(config.init_joints["right"]),
+            )
+        )
+        for name, angle_deg in zip(urdf_joint_names(), home):
+            joint_id = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_JOINT, name
+            )
+            data.qpos[model.jnt_qposadr[joint_id]] = np.deg2rad(
+                float(angle_deg)
+            )
+        mujoco.mj_forward(model, data)
 
-        wrist_position_sim, wrist_rotation_sim = skeleton._wrist_frame_mj(
-            data
+        wrist_position_sim, _wrist_rotation_sim = (
+            viewer._frame_from_axis_geoms(
+                data,
+                skeleton._wrist_axis_x_geom_id,
+                skeleton._wrist_axis_z_geom_id,
+                0.045,
+            )
+        )
+        _tcp_position_sim, tcp_rotation_sim = (
+            viewer._frame_from_axis_geoms(
+                data,
+                skeleton._tcp_axis_x_geom_id,
+                skeleton._tcp_axis_z_geom_id,
+                0.025,
+            )
         )
         wrist_position_motive = np.array([1.0, 2.0, 3.0])
-        wrist_rotation_motive = Rotation.from_euler(
+        # 故意使用任意 marker/wrist 局部姿态；世界轴映射不得依赖它。
+        wrist_quaternion_motive = Rotation.from_euler(
             "xyz", [0.35, -0.2, 0.65]
-        ).as_matrix()
-        wrist_quaternion_motive = Rotation.from_matrix(
-            wrist_rotation_motive
         ).as_quat()
         points_motive = np.empty((21, 3), dtype=np.float64)
         points_motive[0] = wrist_position_motive
@@ -539,8 +565,8 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
                         [lateral, -0.025 * (joint + 1), 0.004 * finger]
                     )
                 )
-        rotation_sim_from_motive = (
-            wrist_rotation_sim @ wrist_rotation_motive.T
+        rotation_sim_from_motive = viewer._sim_from_motive_rotation(
+            tcp_rotation_sim, config
         )
         points_sim = (
             (points_motive - wrist_position_motive)

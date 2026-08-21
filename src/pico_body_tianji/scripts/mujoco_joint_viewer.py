@@ -11,12 +11,17 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 import zenoh
+from scipy.spatial.transform import Rotation
 
 from pico_body_tianji.controller_only.mocap_h5 import HAND_KEYPOINT_EDGES
 from pico_body_tianji.joint_state_model import urdf_joint_names
 from pico_body_tianji.mujoco_joint_state import apply_joint_positions
 from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
 from pico_body_tianji.zenoh_util import ZenohJsonSub, key, open_session, parse_cli_args
+from tianji_world_output.config_loader import get_config
+from tianji_world_output.transform_utils import (
+    get_chest_to_world_rotation,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -169,19 +174,76 @@ def _quat_wxyz_from_z_axis(direction: np.ndarray) -> np.ndarray:
         [w, -vector[1] / (2.0 * w), vector[0] / (2.0 * w), 0.0]
     )
 
+def _frame_from_axis_geoms(
+    data,
+    axis_x_geom_id: int,
+    axis_z_geom_id: int,
+    axis_half_length: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    axis_x = data.geom_xmat[axis_x_geom_id].reshape(3, 3)[:, 2].copy()
+    axis_z = data.geom_xmat[axis_z_geom_id].reshape(3, 3)[:, 2].copy()
+    axis_x /= np.linalg.norm(axis_x)
+    axis_z /= np.linalg.norm(axis_z)
+    axis_y = np.cross(axis_z, axis_x)
+    axis_y /= np.linalg.norm(axis_y)
+    axis_z = np.cross(axis_x, axis_y)
+    rotation = np.column_stack((axis_x, axis_y, axis_z))
+    origin_x = (
+        data.geom_xpos[axis_x_geom_id]
+        - axis_half_length * axis_x
+    )
+    origin_z = (
+        data.geom_xpos[axis_z_geom_id]
+        - axis_half_length * axis_z
+    )
+    return 0.5 * (origin_x + origin_z), rotation
+
+
+def _sim_from_motive_rotation(
+    home_tcp_rotation_mj: np.ndarray,
+    tianji_config=None,
+) -> np.ndarray:
+    """固定世界轴：Motive→Robot world→MuJoCo。"""
+    config = tianji_config or get_config()
+    tcp_rotation_chest = Rotation.from_quat(
+        config.init_quat["right"]
+    ).as_matrix()
+    tcp_rotation_world = (
+        get_chest_to_world_rotation("right") @ tcp_rotation_chest
+    )
+    rotation_sim_from_world = (
+        home_tcp_rotation_mj @ tcp_rotation_world.T
+    )
+    result = (
+        rotation_sim_from_world
+        @ np.asarray(config.mocap_to_robot, dtype=np.float64)
+    )
+    if not np.allclose(
+        result @ result.T, np.eye(3), atol=1.0e-6
+    ) or not np.isclose(np.linalg.det(result), 1.0, atol=1.0e-6):
+        raise ValueError("Motive→MuJoCo 世界轴映射不是 det=+1 正交矩阵")
+    return result
+
 
 class FrameZeroHandSkeleton:
-    """按 Home r_wrist 标定，把 Motive frame0 关键点变换到 MuJoCo。"""
+    """固定世界轴映射 frame0；right_arm/wrist Home 只定位原点。"""
 
     def __init__(self, session, model, topic: str):
         self._pending: dict | None = None
         self._received_once = False
-        self._home_wrist_pose_mj: tuple[np.ndarray, np.ndarray] | None = None
+        self._sim_from_motive: tuple[np.ndarray, np.ndarray] | None = None
+        self._tianji_config = get_config()
         self._wrist_axis_x_geom_id = self._required_geom(
             model, "r_wrist_axis_0"
         )
         self._wrist_axis_z_geom_id = self._required_geom(
             model, "r_wrist_axis_2"
+        )
+        self._tcp_axis_x_geom_id = self._required_geom(
+            model, "TCP_Link_R_axis_0"
+        )
+        self._tcp_axis_z_geom_id = self._required_geom(
+            model, "TCP_Link_R_axis_2"
         )
         self._point_geom_ids = [
             self._required_geom(model, f"frame0_kp_{index:02d}")
@@ -208,32 +270,6 @@ class FrameZeroHandSkeleton:
             raise RuntimeError(f"MuJoCo 模型缺少 frame0 骨架 geom：{name}")
         return geom_id
 
-    def _wrist_frame_mj(
-        self, data
-    ) -> tuple[np.ndarray, np.ndarray]:
-        axis_x_matrix = data.geom_xmat[
-            self._wrist_axis_x_geom_id
-        ].reshape(3, 3)
-        axis_z_matrix = data.geom_xmat[
-            self._wrist_axis_z_geom_id
-        ].reshape(3, 3)
-        axis_x = axis_x_matrix[:, 2].copy()
-        axis_z = axis_z_matrix[:, 2].copy()
-        axis_x /= np.linalg.norm(axis_x)
-        axis_z /= np.linalg.norm(axis_z)
-        axis_y = np.cross(axis_z, axis_x)
-        axis_y /= np.linalg.norm(axis_y)
-        axis_z = np.cross(axis_x, axis_y)
-        rotation = np.column_stack((axis_x, axis_y, axis_z))
-        origin_x = (
-            data.geom_xpos[self._wrist_axis_x_geom_id]
-            - 0.045 * axis_x
-        )
-        origin_z = (
-            data.geom_xpos[self._wrist_axis_z_geom_id]
-            - 0.045 * axis_z
-        )
-        return 0.5 * (origin_x + origin_z), rotation
 
     @property
     def received_once(self) -> bool:
@@ -273,28 +309,36 @@ class FrameZeroHandSkeleton:
             return False
 
         frozen = bool(payload.get("frozen", False))
-        if not frozen or self._home_wrist_pose_mj is None:
-            self._home_wrist_pose_mj = self._wrist_frame_mj(data)
-        home_position_mj, home_rotation_mj = self._home_wrist_pose_mj
-        quaternion_motive = home_pose_motive[3:7]
-        quaternion_norm = float(np.linalg.norm(quaternion_motive))
-        if quaternion_norm < 1.0e-9:
-            _LOG.warning("忽略 Motive Home wrist 四元数为零的骨架消息")
-            return False
-        x, y, z, w = quaternion_motive / quaternion_norm
-        home_rotation_motive = np.array(
-            [
-                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-                [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-            ]
-        )
-        rotation_mj_from_motive = (
-            home_rotation_mj @ home_rotation_motive.T
-        )
-        translation_mj_from_motive = (
-            home_position_mj
-            - rotation_mj_from_motive @ home_pose_motive[:3]
+        if not frozen or self._sim_from_motive is None:
+            home_position_mj, _home_wrist_rotation = (
+                _frame_from_axis_geoms(
+                    data,
+                    self._wrist_axis_x_geom_id,
+                    self._wrist_axis_z_geom_id,
+                    0.045,
+                )
+            )
+            _home_tcp_position, home_tcp_rotation = (
+                _frame_from_axis_geoms(
+                    data,
+                    self._tcp_axis_x_geom_id,
+                    self._tcp_axis_z_geom_id,
+                    0.025,
+                )
+            )
+            rotation_mj_from_motive = _sim_from_motive_rotation(
+                home_tcp_rotation, self._tianji_config
+            )
+            translation_mj_from_motive = (
+                home_position_mj
+                - rotation_mj_from_motive @ home_pose_motive[:3]
+            )
+            self._sim_from_motive = (
+                rotation_mj_from_motive,
+                translation_mj_from_motive,
+            )
+        rotation_mj_from_motive, translation_mj_from_motive = (
+            self._sim_from_motive
         )
         points_mj = (
             points_motive @ rotation_mj_from_motive.T

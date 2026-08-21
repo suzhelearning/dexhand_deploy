@@ -700,12 +700,30 @@ pixi run sim_mocap_h5 -- /path/to/take.h5 --right-rigid-id tianji_tcp
 有效时、按 `s` 前持续预览“此刻按 s”会到达的 frame0 目标；按 `s`
 采样实时 marker 后冻结骨架。随后按住 `Enter`，即可把实际 wuji2 手
 移动到固定骨架处，直接检查指尖、手心和每根手指的方向是否一致。
-骨架不经过 `right_chest` 重建，也不再用 wrist quaternion 二次旋转
-关键点；按 `s` 时以同一物理 `r_wrist` 标定唯一的世界变换
-`T_sim_from_motive = T_sim_wuji2_home *
-inverse(T_motive_wuji2_home)`，然后直接变换 H5 的
-`keypoints_world`。因此骨段长度保持不变，显示姿态就是 H5 的绝对
-frame0 姿态。
+骨架不经过 `right_chest` 重建，也不使用 marker/wrist 局部姿态定义
+世界轴。旋转固定为
+`R_sim_from_motive = R_sim_from_robot_world * mocap_to_robot`；
+`right_arm → marker → r_wrist` 只计算 Motive Home 原点位置，再用
+`t_sim_from_motive = p_sim_wrist_home -
+R_sim_from_motive * p_motive_wrist_home` 求平移。关键点只应用这一组
+固定世界轴 + Home 原点变换，因此骨段长度和 H5 绝对姿态保持不变。
+
+### 机械臂 Home 场景纯 H5 数据回放（sim_mocap_h5_replay）
+
+机械臂加载 wuji2 组合 URDF 并保持配置 Home 关节角，不启动 IK、不
+发布控制目标。运行时只订阅一次 Motive `right_arm` 定位动捕原点；
+世界旋转始终使用固定 `mocap_to_robot`，然后播放 H5 右手 21 点轨迹：
+
+```bash
+pixi run sim_mocap_h5_replay -- /path/to/take.h5 --loop
+```
+
+`Space` 暂停/继续，`R` 从首帧重播。无实时 Motive 时可传固定标定：
+
+```bash
+pixi run sim_mocap_h5_replay -- /path/to/take.h5 \
+  --right-arm-pose=x,y,z,qx,qy,qz,qw
+```
 
 
 首次真机测试必须先在仿真中完整确认轨迹、方向和工作空间，再用两个

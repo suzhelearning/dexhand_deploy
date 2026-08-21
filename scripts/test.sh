@@ -40,6 +40,7 @@ python -m unittest \
   tests.test_mocap_circle_compare \
   tests.test_mocap_h5 \
   tests.test_mocap_h5_replay \
+  tests.test_mocap_h5_wrist_replay \
   tests.test_regrind_h5
 
 # 优先用 staging 调试版；未构建时退回 runtime 部署的 .bin。

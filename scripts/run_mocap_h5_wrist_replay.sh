@@ -20,6 +20,7 @@ PAUSED=false
 VALIDATE_ONLY=false
 HEADLESS=false
 YAW_DEG=0.0
+RIGHT_ARM_POSE=""
 
 usage() {
   cat <<'EOF'
@@ -28,11 +29,10 @@ usage() {
   bash scripts/run_mocap_h5_wrist_replay.sh TAKE.h5 [选项]
 
 说明：
-  机械臂+wuji2 组合 URDF 场景的纯 H5 数据回放：机械臂摆到
-  controller_only_ik.yaml 的 left/right_home_deg 关节角（与
-  sim_mocap_h5 的 Home 一致），只把 H5 右手 21 点关键点经
-  Manus→wuji2 外参转到局部坐标后叠在 Home r_wrist 上按时间播放。
-  不启动 IK/Motive/Zenoh。
+  机械臂+wuji2 组合 URDF 场景的 H5 数据回放：机械臂摆到
+  controller_only_ik.yaml 的 Home 关节角；读取 Motive right_arm
+  仅用于定位动捕原点，世界旋转固定使用 mocap_to_robot；H5 右手
+  21 点按时间轴播放。不启动 IK，不控制机械臂。
 
   Home 关节角（度）：
     left  [55, -65, -70, -60, 60, 0, 0]
@@ -42,6 +42,8 @@ usage() {
   --speed N       播放倍速（默认 1.0）
   --hold-s N      首帧停留秒数（默认 2.0）
   --yaw-deg N     绕 Motive +Y 旋转整条轨迹（默认 0）
+  --right-arm-pose P  固定 right_arm Motive 位姿 x,y,z,qx,qy,qz,qw；
+                      缺省时订阅 mocap/hands/frame
   --loop          循环播放
   --paused        开始即暂停
   --validate-only 只校验并输出首末帧腕点，不打开窗口
@@ -79,6 +81,17 @@ while (($#)); do
         exit 2
       fi
       YAW_DEG="$2"
+      shift
+      ;;
+    --right-arm-pose=*)
+      RIGHT_ARM_POSE="${1#--right-arm-pose=}"
+      ;;
+    --right-arm-pose)
+      if (($# < 2)); then
+        printf '%s\n' '错误：--right-arm-pose 缺少位姿。' >&2
+        exit 2
+      fi
+      RIGHT_ARM_POSE="$2"
       shift
       ;;
     --loop)
@@ -144,6 +157,9 @@ arguments=(
   --hold-s "${HOLD_S}"
   --yaw-deg "${YAW_DEG}"
 )
+if [[ -n "${RIGHT_ARM_POSE}" ]]; then
+  arguments+=("--right-arm-pose=${RIGHT_ARM_POSE}")
+fi
 if [[ "${LOOP}" == true ]]; then
   arguments+=(--loop)
 fi
@@ -158,10 +174,11 @@ if [[ "${HEADLESS}" == true ]]; then
 fi
 
 printf '%s\n' \
-  '启动机械臂+wuji2 纯 H5 数据回放：' \
+  '启动机械臂+wuji2 H5 数据回放：' \
   "  H5=${H5_PATH}" \
   "  speed=${SPEED} hold_s=${HOLD_S} yaw_deg=${YAW_DEG}" \
   "  loop=${LOOP} paused=${PAUSED}" \
-  '  机械臂保持 Home；只播放右手 21 点手部轨迹；不启动 IK/Motive/Zenoh。'
+  "  right_arm_pose=${RIGHT_ARM_POSE:-<live Motive>}" \
+  '  机械臂保持 Home；right_arm 只定位原点；不启动 IK。'
 
 exec python "${VIEWER}" "${arguments[@]}"
