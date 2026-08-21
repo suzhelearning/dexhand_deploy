@@ -31,8 +31,8 @@ class ControllerOnlyRealProfileTest(unittest.TestCase):
         ik = _parameters(IK_CONFIG, "tianji_kinematic_sim")
 
         self.assertEqual(real["rate"], 90.0)
-        self.assertEqual(real["velocity_ratio"], 50)
-        self.assertEqual(real["acceleration_ratio"], 70)
+        self.assertEqual(real["velocity_ratio"], 65)
+        self.assertEqual(real["acceleration_ratio"], 85)
 
         ratio_step = (
             real["maximum_output_step_deg"]
@@ -42,8 +42,8 @@ class ControllerOnlyRealProfileTest(unittest.TestCase):
         speed_step = real["maximum_teleop_speed_deg_s"] / real["rate"]
         effective_step = min(ratio_step, speed_step)
 
-        self.assertAlmostEqual(effective_step, 0.25)
-        self.assertAlmostEqual(effective_step * real["rate"], 22.5)
+        self.assertAlmostEqual(effective_step, 0.8)
+        self.assertAlmostEqual(effective_step * real["rate"], 72.0)
         self.assertGreater(effective_step, ik["max_joint_step_deg"])
 
     def test_shell_defaults_match_yaml_profile(self):

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
+import threading
 import time
 
 import numpy as np
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import JointState
-from std_msgs.msg import String
 
 from .hardware_safety import (
     HardwareSafetyController,
@@ -21,7 +19,19 @@ from .marvin_hardware import (
     MarvinHardwareSession,
 )
 from .marvin_state import command_states_compatible
+from .zenoh_util import (
+    ZenohJsonSub,
+    ZenohPub,
+    ZenohTextSub,
+    key,
+    load_node_config,
+    open_session,
+    parse_cli_args,
+    parse_param_override,
+    stamp_now,
+)
 
+_LOG = logging.getLogger("marvin_hardware_bridge")
 
 SIDES = ("left", "right")
 CONFLICTING_CONTROLLER_NAMES = {
@@ -29,6 +39,32 @@ CONFLICTING_CONTROLLER_NAMES = {
     "tianji_arm_node",
 }
 OUTPUT_STEP_REFERENCE_VELOCITY_RATIO = 10
+
+DEFAULT_PARAMETERS = {
+    "robot_ip": "",
+    "rate": 30.0,
+    "velocity_ratio": 10,
+    "acceleration_ratio": 10,
+    "host_status_timeout_s": 1.0,
+    "command_timeout_s": 0.15,
+    "state_timeout_s": 1.0,
+    "feedback_timeout_s": 0.15,
+    "maximum_pair_skew_s": 0.03,
+    "maximum_output_step_deg": 0.5,
+    "maximum_teleop_speed_deg_s": 40.0,
+    "maximum_tracking_error_deg": 8.0,
+    "return_minimum_duration_s": 2.0,
+    "return_max_speed_deg_s": 10.0,
+    "home_tolerance_deg": 1.0,
+    "host_input_mode": "smpl",
+    "feedback_hard_limit_padding_deg": 5.0,
+    "left_home_deg": [55.0, -65.0, -70.0, -60.0, 60.0, 0.0, 0.0],
+    "right_home_deg": [-55.0, -65.0, 70.0, -60.0, -60.0, 0.0, 0.0],
+    "lower_limits_deg": [
+        -165.0, -115.0, -165.0, -140.0, -165.0, -55.0, -85.0,
+    ],
+    "upper_limits_deg": [165.0, 115.0, 165.0, 55.0, 165.0, 55.0, 85.0],
+}
 
 
 def _source_stamp_is_fresh(
@@ -105,95 +141,61 @@ def create_official_marvin_session() -> MarvinHardwareSession:
     return session
 
 
-class MarvinHardwareBridge(Node):
+class MarvinHardwareBridge:
     """主机 IK 关节流到 Marvin 双臂的真机安全桥。"""
 
-    def __init__(self):
-        super().__init__("marvin_hardware_bridge")
-        self._declare_parameters()
-        self._rate_hz = float(self.get_parameter("rate").value)
+    def __init__(self, session, params: dict):
+        self._session = session
+        self._log = _LOG
+        self._params = params
+
+        self._rate_hz = float(params["rate"])
         if self._rate_hz <= 0.0:
             raise ValueError("rate 必须为正数")
-        self._command_timeout_s = float(
-            self.get_parameter("command_timeout_s").value
-        )
+        self._command_timeout_s = float(params["command_timeout_s"])
         self._left_home = self._parameter_vector("left_home_deg")
         self._right_home = self._parameter_vector("right_home_deg")
-        self._lower_limits = self._parameter_vector(
-            "lower_limits_deg"
-        )
-        self._upper_limits = self._parameter_vector(
-            "upper_limits_deg"
-        )
-        self._robot_ip = str(self.get_parameter("robot_ip").value)
+        self._lower_limits = self._parameter_vector("lower_limits_deg")
+        self._upper_limits = self._parameter_vector("upper_limits_deg")
+        self._robot_ip = str(params["robot_ip"])
         if not self._robot_ip:
             raise ValueError("robot_ip 必须配置为 Marvin 控制器地址")
-        velocity_ratio = int(self.get_parameter("velocity_ratio").value)
+        velocity_ratio = int(params["velocity_ratio"])
         self._maximum_output_step_deg = _scaled_output_step_deg(
-            configured_step_deg=float(
-                self.get_parameter("maximum_output_step_deg").value
-            ),
+            configured_step_deg=float(params["maximum_output_step_deg"]),
             velocity_ratio=velocity_ratio,
-            reference_velocity_ratio=(
-                OUTPUT_STEP_REFERENCE_VELOCITY_RATIO
-            ),
+            reference_velocity_ratio=OUTPUT_STEP_REFERENCE_VELOCITY_RATIO,
             rate_hz=self._rate_hz,
             maximum_teleop_speed_deg_s=float(
-                self.get_parameter(
-                    "maximum_teleop_speed_deg_s"
-                ).value
+                params["maximum_teleop_speed_deg_s"]
             ),
         )
 
         self._readiness = HostReadinessGate(
             left_home_deg=self._left_home,
             right_home_deg=self._right_home,
-            freshness_timeout_s=float(
-                self.get_parameter("host_status_timeout_s").value
-            ),
-            command_timeout_s=float(
-                self.get_parameter("command_timeout_s").value
-            ),
-            maximum_pair_skew_s=float(
-                self.get_parameter("maximum_pair_skew_s").value
-            ),
-            home_tolerance_deg=float(
-                self.get_parameter("home_tolerance_deg").value
-            ),
-            input_mode=str(
-                self.get_parameter("host_input_mode").value
-            ),
+            freshness_timeout_s=float(params["host_status_timeout_s"]),
+            command_timeout_s=float(params["command_timeout_s"]),
+            maximum_pair_skew_s=float(params["maximum_pair_skew_s"]),
+            home_tolerance_deg=float(params["home_tolerance_deg"]),
+            input_mode=str(params["host_input_mode"]),
         )
         settings = HardwareSafetySettings(
-            command_timeout_s=float(
-                self.get_parameter("command_timeout_s").value
-            ),
-            state_timeout_s=float(
-                self.get_parameter("state_timeout_s").value
-            ),
-            feedback_timeout_s=float(
-                self.get_parameter("feedback_timeout_s").value
-            ),
-            maximum_pair_skew_s=float(
-                self.get_parameter("maximum_pair_skew_s").value
-            ),
+            command_timeout_s=float(params["command_timeout_s"]),
+            state_timeout_s=float(params["state_timeout_s"]),
+            feedback_timeout_s=float(params["feedback_timeout_s"]),
+            maximum_pair_skew_s=float(params["maximum_pair_skew_s"]),
             maximum_output_step_deg=self._maximum_output_step_deg,
             maximum_tracking_error_deg=float(
-                self.get_parameter(
-                    "maximum_tracking_error_deg"
-                ).value
+                params["maximum_tracking_error_deg"]
             ),
             return_minimum_duration_s=float(
-                self.get_parameter(
-                    "return_minimum_duration_s"
-                ).value
+                params["return_minimum_duration_s"]
             ),
             return_max_speed_deg_s=float(
-                self.get_parameter("return_max_speed_deg_s").value
+                params["return_max_speed_deg_s"]
             ),
-            home_tolerance_deg=float(
-                self.get_parameter("home_tolerance_deg").value
-            ),
+            home_tolerance_deg=float(params["home_tolerance_deg"]),
         )
         self._safety = HardwareSafetyController(
             left_home_deg=self._left_home,
@@ -203,7 +205,7 @@ class MarvinHardwareBridge(Node):
             settings=settings,
         )
 
-        self._session: MarvinHardwareSession | None = None
+        self._marvin: MarvinHardwareSession | None = None
         self._phase = "waiting_for_safe_host"
         self._readiness_reason = "not_evaluated"
         self._last_action = "none"
@@ -211,9 +213,11 @@ class MarvinHardwareBridge(Node):
         self._tracking_error_detail = None
         self._command_count = 0
         self._latest_feedback: MarvinFeedback | None = None
+        self._live_cache: set | None = None
+        self._live_cache_at = 0.0
         self._reset_runtime_diagnostics()
-        self._create_ros_interfaces()
-        self.get_logger().warning(
+        self._create_zenoh_interfaces()
+        self._log.warning(
             "真机桥已确认启动，但尚未连接 Marvin；"
             "等待同机 IK 链路处于 idle 安全零位。"
             "连接时会自动清除已释放的历史锁存错误；"
@@ -222,69 +226,8 @@ class MarvinHardwareBridge(Node):
             f"（{self._maximum_output_step_deg * self._rate_hz:.2f}°/s）。"
         )
 
-    def _declare_parameters(self) -> None:
-        defaults = {
-            "robot_ip": "",
-            "rate": 30.0,
-            "velocity_ratio": 10,
-            "acceleration_ratio": 10,
-            "host_status_timeout_s": 1.0,
-            "command_timeout_s": 0.15,
-            "state_timeout_s": 1.0,
-            "feedback_timeout_s": 0.15,
-            "maximum_pair_skew_s": 0.03,
-            "maximum_output_step_deg": 0.5,
-            "maximum_teleop_speed_deg_s": 40.0,
-            "maximum_tracking_error_deg": 8.0,
-            "return_minimum_duration_s": 2.0,
-            "return_max_speed_deg_s": 10.0,
-            "home_tolerance_deg": 1.0,
-            "host_input_mode": "smpl",
-            "feedback_hard_limit_padding_deg": 5.0,
-            "left_home_deg": [
-                55.0,
-                -65.0,
-                -70.0,
-                -60.0,
-                60.0,
-                0.0,
-                0.0,
-            ],
-            "right_home_deg": [
-                -55.0,
-                -65.0,
-                70.0,
-                -60.0,
-                -60.0,
-                0.0,
-                0.0,
-            ],
-            "lower_limits_deg": [
-                -165.0,
-                -115.0,
-                -165.0,
-                -140.0,
-                -165.0,
-                -55.0,
-                -85.0,
-            ],
-            "upper_limits_deg": [
-                165.0,
-                115.0,
-                165.0,
-                55.0,
-                165.0,
-                55.0,
-                85.0,
-            ],
-        }
-        for name, value in defaults.items():
-            self.declare_parameter(name, value)
-
     def _parameter_vector(self, name: str) -> np.ndarray:
-        values = np.asarray(
-            self.get_parameter(name).value, dtype=np.float64
-        )
+        values = np.asarray(self._params[name], dtype=np.float64)
         if values.shape != (7,) or not np.isfinite(values).all():
             raise ValueError(f"{name} 必须包含 7 个有限数值")
         return values
@@ -349,55 +292,46 @@ class MarvinHardwareBridge(Node):
             self._last_tracking_error_abs_deg,
         )
 
-    def _create_ros_interfaces(self) -> None:
+    def _create_zenoh_interfaces(self) -> None:
         for side in SIDES:
-            self.create_subscription(
-                JointState,
-                f"/pico_body_sim/{side}_arm/joint_commands",
-                lambda message, side=side: self._on_command(
-                    side, message
-                ),
-                1,
+            ZenohJsonSub(
+                self._session,
+                key(f"/pico_body_sim/{side}_arm/joint_commands"),
+                lambda data, side=side: self._on_command(side, data),
             )
-        self.create_subscription(
-            String,
-            "/pico_body/teleop_state",
+        ZenohTextSub(
+            self._session,
+            key("/pico_body/teleop_state"),
             self._on_teleop_state,
-            1,
         )
-        self.create_subscription(
-            String,
-            "/pico_body/status",
+        ZenohTextSub(
+            self._session,
+            key("/pico_body/status"),
             self._on_input_status,
-            1,
         )
-        self.create_subscription(
-            String,
-            "/pico_body_sim/status",
+        ZenohTextSub(
+            self._session,
+            key("/pico_body_sim/status"),
             self._on_sim_status,
-            1,
         )
         self._feedback_publishers = {
-            side: self.create_publisher(
-                JointState, f"/{side}_arm/joint_states", 10
-            )
+            side: ZenohPub(self._session, key(f"/{side}_arm/joint_states"))
             for side in SIDES
         }
-        self._status_publisher = self.create_publisher(
-            String, "/pico_body_real/status", 10
+        self._status_publisher = ZenohPub(
+            self._session, key("/pico_body_real/status")
         )
-        self.create_timer(1.0 / self._rate_hz, self._tick)
-        self.create_timer(0.5, self._publish_status)
 
-    def _on_command(self, side: str, message: JointState) -> None:
+    def _on_command(self, side: str, data: dict) -> None:
         now = time.monotonic()
+        stamp = data.get("stamp") or {}
         stamp_ns = (
-            int(message.header.stamp.sec) * 1_000_000_000
-            + int(message.header.stamp.nanosec)
+            int(stamp.get("sec", 0)) * 1_000_000_000
+            + int(stamp.get("nanosec", 0))
         )
         if not _source_stamp_is_fresh(
             stamp_ns,
-            self.get_clock().now().nanoseconds,
+            time.time_ns(),
             self._command_timeout_s,
         ):
             self._last_error = f"stale_{side}_command_stamp"
@@ -405,21 +339,21 @@ class MarvinHardwareBridge(Node):
         try:
             self._readiness.observe_command(
                 side,
-                message.position,
-                frame_id=message.header.frame_id,
+                data["position"],
+                frame_id=data.get("frame_id"),
                 received_at=now,
             )
             self._safety.observe_command(
                 side,
-                message.position,
-                frame_id=message.header.frame_id,
+                data["position"],
+                frame_id=data.get("frame_id"),
                 received_at=now,
             )
         except ValueError as exc:
             self._last_error = f"invalid_{side}_command: {exc}"
 
-    def _on_teleop_state(self, message: String) -> None:
-        self._observe_state(message.data, time.monotonic())
+    def _on_teleop_state(self, state: str) -> None:
+        self._observe_state(state, time.monotonic())
 
     def _observe_state(self, state: str, received_at: float) -> None:
         try:
@@ -434,36 +368,61 @@ class MarvinHardwareBridge(Node):
         except ValueError as exc:
             self._last_error = f"invalid_teleop_state: {exc}"
 
-    def _on_input_status(self, message: String) -> None:
-        now = time.monotonic()
+    def _on_input_status(self, text: str) -> None:
         try:
+            # /pico_body/status 只承载 readiness/诊断。teleop 状态唯一
+            # 权威是 /pico_body/teleop_state；若把两个 topic 的 state
+            # 合并，不同 Zenoh publisher 的交叉到达会让旧 idle 覆盖
+            # teleop，触发 idle_command_not_at_home 并锁存回 Home。
             self._readiness.observe_input_status(
-                message.data, received_at=now
+                text, received_at=time.monotonic()
             )
-            payload = json.loads(message.data)
-            state = payload.get("state")
-            if isinstance(state, str):
-                self._observe_state(state, now)
-        except (ValueError, json.JSONDecodeError) as exc:
+        except ValueError as exc:
             self._last_error = f"invalid_input_status: {exc}"
 
-    def _on_sim_status(self, message: String) -> None:
+    def _on_sim_status(self, text: str) -> None:
         try:
             self._readiness.observe_sim_status(
-                message.data, received_at=time.monotonic()
+                text, received_at=time.monotonic()
             )
         except ValueError as exc:
             self._last_error = f"invalid_sim_status: {exc}"
+
+    def _live_controller_names(self) -> set:
+        """liveliness 查询 tj/live/*，2 秒缓存（替代 ros2 node list）。"""
+        now = time.monotonic()
+        if self._live_cache is not None and now - self._live_cache_at < 2.0:
+            return self._live_cache
+        names: set = set()
+        done = threading.Event()
+
+        def handler(reply) -> None:
+            if reply.ok:
+                names.add(
+                    str(reply.result.key_expr).rsplit("/", 1)[-1]
+                )
+            done.set()
+
+        try:
+            self._session.liveliness().get(
+                "tj/live/*", handler, timeout=1.0
+            )
+            done.wait(1.2)
+        except Exception:
+            pass
+        self._live_cache = names
+        self._live_cache_at = now
+        return names
 
     def _tick(self) -> None:
         if self._phase == "waiting_for_safe_host":
             self._try_start_hardware()
             return
-        if self._session is None:
+        if self._marvin is None:
             return
         self._observe_tick_timing(time.monotonic())
         try:
-            feedback = self._session.read_feedback()
+            feedback = self._marvin.read_feedback()
             self._latest_feedback = feedback
             self._publish_feedback(feedback)
             now = time.monotonic()
@@ -503,7 +462,7 @@ class MarvinHardwareBridge(Node):
                             "signed_error_deg": detail.signed_error_deg,
                             "absolute_error_deg": detail.absolute_error_deg,
                         }
-                        self.get_logger().error(
+                        self._log.error(
                             "跟踪误差保护触发："
                             f"{detail.side} J{detail.joint_index}，"
                             f"commanded={detail.commanded_deg:.3f}°, "
@@ -512,7 +471,7 @@ class MarvinHardwareBridge(Node):
                         )
                 self._trip_soft_stop(decision.reason)
                 return
-            self._session.send_joint_targets(
+            self._marvin.send_joint_targets(
                 decision.left_joints_deg,
                 decision.right_joints_deg,
             )
@@ -522,7 +481,7 @@ class MarvinHardwareBridge(Node):
 
     def _try_start_hardware(self) -> None:
         conflicts = (
-            set(self.get_node_names()) & CONFLICTING_CONTROLLER_NAMES
+            self._live_controller_names() & CONFLICTING_CONTROLLER_NAMES
         )
         if conflicts:
             self._readiness_reason = (
@@ -535,62 +494,50 @@ class MarvinHardwareBridge(Node):
             return
         self._phase = "connecting"
         try:
-            self._session = create_official_marvin_session()
-            feedback = self._session.connect_and_prepare(
+            self._marvin = create_official_marvin_session()
+            feedback = self._marvin.connect_and_prepare(
                 self._robot_ip,
-                velocity_ratio=int(
-                    self.get_parameter("velocity_ratio").value
-                ),
+                velocity_ratio=int(self._params["velocity_ratio"]),
                 acceleration_ratio=int(
-                    self.get_parameter("acceleration_ratio").value
+                    self._params["acceleration_ratio"]
                 ),
                 lower_limits_deg=self._lower_limits,
                 upper_limits_deg=self._upper_limits,
                 hard_limit_padding_deg=float(
-                    self.get_parameter(
-                        "feedback_hard_limit_padding_deg"
-                    ).value
+                    self._params["feedback_hard_limit_padding_deg"]
                 ),
             )
             self._latest_feedback = feedback
-            feedback = self._session.move_to_home(
+            feedback = self._marvin.move_to_home(
                 self._left_home,
                 self._right_home,
                 rate_hz=self._rate_hz,
                 minimum_duration_s=float(
-                    self.get_parameter(
-                        "return_minimum_duration_s"
-                    ).value
+                    self._params["return_minimum_duration_s"]
                 ),
                 max_speed_deg_s=float(
-                    self.get_parameter(
-                        "return_max_speed_deg_s"
-                    ).value
+                    self._params["return_max_speed_deg_s"]
                 ),
                 maximum_tracking_error_deg=float(
-                    self.get_parameter(
-                        "maximum_tracking_error_deg"
-                    ).value
+                    self._params["maximum_tracking_error_deg"]
                 ),
                 home_tolerance_deg=float(
-                    self.get_parameter("home_tolerance_deg").value
+                    self._params["home_tolerance_deg"]
                 ),
                 lower_limits_deg=self._lower_limits,
                 upper_limits_deg=self._upper_limits,
                 hard_limit_padding_deg=float(
-                    self.get_parameter(
-                        "feedback_hard_limit_padding_deg"
-                    ).value
+                    self._params["feedback_hard_limit_padding_deg"]
                 ),
                 required_state=1,
                 feedback_timeout_s=float(
-                    self.get_parameter("feedback_timeout_s").value
+                    self._params["feedback_timeout_s"]
                 ),
             )
             self._phase = "waiting_for_post_home_snapshot"
             self._reset_runtime_diagnostics()
             self._last_error = None
-            self.get_logger().warning(
+            self._log.warning(
                 "Marvin 双臂已在低速位置模式缓慢到达安全零位；"
                 "等待主机链路刷新后，可按右手柄 A 启动遥操作。"
             )
@@ -613,19 +560,20 @@ class MarvinHardwareBridge(Node):
             return
         readiness = self._readiness.evaluate(now=now)
         self._readiness_reason = readiness.reason
-        self._session.send_joint_targets(
+        self._marvin.send_joint_targets(
             self._left_home, self._right_home
         )
         self._command_count += 1
         if readiness.ready:
             self._phase = "armed_idle"
-            self.get_logger().warning(
-                "真机链路已就绪：保持安全零位，按右手柄 A 开始。"
+            self._log.warning(
+                "真机链路已就绪：保持安全零位，主机开始遥操作后跟随"
+                "（PICO 按右手柄 A / mocap 键盘按 s）。"
             )
 
     def _fail_startup(self, error: BaseException) -> None:
         self._last_error = f"startup_error: {error}"
-        session = self._session
+        session = self._marvin
         if session is not None:
             try:
                 session.soft_stop_once()
@@ -635,14 +583,14 @@ class MarvinHardwareBridge(Node):
                 session.shutdown()
             except BaseException:
                 pass
-        self._session = None
+        self._marvin = None
         self._phase = "failed"
-        self.get_logger().error(self._last_error)
+        self._log.error(self._last_error)
 
     def _trip_soft_stop(self, reason: str) -> None:
         self._last_action = f"soft_stop:{reason}"
         self._last_error = reason
-        session = self._session
+        session = self._marvin
         if session is not None:
             try:
                 session.soft_stop_once()
@@ -654,28 +602,25 @@ class MarvinHardwareBridge(Node):
                 self._last_error = (
                     f"{self._last_error}; shutdown_failed: {exc}"
                 )
-        self._session = None
+        self._marvin = None
         self._phase = "soft_stopped"
-        self.get_logger().error(
+        self._log.error(
             f"真机链路已锁存软急停并释放连接：{self._last_error}"
         )
 
     def _publish_feedback(self, feedback: MarvinFeedback) -> None:
-        stamp = self.get_clock().now().to_msg()
+        stamp = stamp_now()
         for side, joints in (
             ("left", feedback.left_joints_deg),
             ("right", feedback.right_joints_deg),
         ):
-            message = JointState()
-            message.header.stamp = stamp
-            message.header.frame_id = (
-                f"{side}_base_marvin_degrees_measured"
-            )
-            message.name = [
-                f"{side}_joint_{index}" for index in range(1, 8)
-            ]
-            message.position = joints.tolist()
-            self._feedback_publishers[side].publish(message)
+            message = {
+                "stamp": stamp,
+                "frame_id": f"{side}_base_marvin_degrees_measured",
+                "name": [f"{side}_joint_{index}" for index in range(1, 8)],
+                "position": joints.tolist(),
+            }
+            self._feedback_publishers[side].put_json(message)
 
     def _publish_status(self) -> None:
         feedback = self._latest_feedback
@@ -690,7 +635,7 @@ class MarvinHardwareBridge(Node):
             "readiness": self._readiness_reason,
             "last_action": self._last_action,
             "error": self._last_error,
-            "robot_connected": self._session is not None,
+            "robot_connected": self._marvin is not None,
             "arm_states": (
                 None if feedback is None else feedback.arm_states
             ),
@@ -746,15 +691,37 @@ class MarvinHardwareBridge(Node):
                 else feedback.acceleration_ratios
             ),
         }
-        self._status_publisher.publish(
-            String(data=json.dumps(payload, ensure_ascii=False))
+        self._status_publisher.put_text(
+            json.dumps(payload, ensure_ascii=False)
         )
 
+    def run(self) -> None:
+        """主循环：rate Hz 控制 tick + 0.5 s 状态。"""
+        tick_interval = 1.0 / self._rate_hz
+        status_interval = 0.5
+        next_tick = time.monotonic() + tick_interval
+        next_status = next_tick + status_interval
+        while True:
+            now = time.monotonic()
+            if now >= next_tick:
+                self._tick()
+                next_tick += tick_interval
+            if now >= next_status:
+                self._publish_status()
+                next_status += status_interval
+            time.sleep(
+                max(0.001, min(next_tick, next_status) - time.monotonic())
+            )
+
     def close_hardware(self) -> None:
-        session = self._session
-        self._session = None
+        session = self._marvin
+        self._marvin = None
         if session is not None:
             session.shutdown()
+
+    def close(self) -> None:
+        self.close_hardware()
+        self._session.close()
 
 
 def _remove_confirmation(arguments) -> tuple[bool, list[str]]:
@@ -770,7 +737,7 @@ def _remove_confirmation(arguments) -> tuple[bool, list[str]]:
 
 def main(args=None) -> int:
     arguments = list(sys.argv[1:] if args is None else args)
-    confirmed, ros_arguments = _remove_confirmation(arguments)
+    confirmed, remaining = _remove_confirmation(arguments)
     if not confirmed:
         print(
             "拒绝启动：marvin_hardware_bridge 必须提供 --confirm-real",
@@ -778,11 +745,22 @@ def main(args=None) -> int:
         )
         return 2
 
-    rclpy.init(args=ros_arguments)
+    parsed = parse_cli_args(argv=remaining)
+    overrides = {}
+    for spec in parsed.param:
+        k, v = parse_param_override(spec)
+        overrides[k] = v
+    params = load_node_config(
+        parsed.config,
+        "marvin_hardware_bridge",
+        DEFAULT_PARAMETERS,
+        overrides,
+    )
+    session = open_session()
     node = None
     try:
-        node = MarvinHardwareBridge()
-        rclpy.spin(node)
+        node = MarvinHardwareBridge(session, params)
+        node.run()
     except KeyboardInterrupt:
         pass
     finally:
@@ -790,11 +768,13 @@ def main(args=None) -> int:
             try:
                 node.close_hardware()
             finally:
-                node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+                node.close()
     return 0
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     raise SystemExit(main())

@@ -174,15 +174,29 @@ class HostReadinessGate:
                 and source.get("error") is None
             ):
                 return HostReadiness(False, "pico_smpl_not_live")
-        elif source.get("input") in ("mocap_h5_replay",
-                                     "mocap_keyboard_step"):
-            # mocap 主机（HDF5 确定性轨迹回放 / 键盘步进控制）：
-            # 要求就绪字段与 preview-only 身份，接受离线来源。
-            expected_scope = (
-                "mocap_replay"
-                if source.get("input") == "mocap_h5_replay"
-                else "mocap_keyboard_step"
-            )
+        elif source.get("input") == "mocap_live":
+            # Motive 刚体仅用于按 s 定零，随后由键盘累计虚拟目标；
+            # 要求新控制模式身份及动捕跟踪器可用于初始参考。
+            if not (
+                source.get("source") == "live"
+                and source.get("mapping")
+                == "controller_relative_end_pose_conditioned_v1"
+                and source.get("control_mode")
+                == "motive_reference_keyboard_step"
+                and source.get("body_tracking") == "disabled"
+                and source.get("motion_trackers_required") is True
+                and source.get("elbow_constraint")
+                == "published_default_zsp_backend_selected"
+                and source.get("smpl_used") is False
+                and source.get("scope") == "mocap_live"
+                and source.get("at_safe_home") is True
+                and source.get("error") is None
+            ):
+                return HostReadiness(False, "mocap_live_not_ready")
+        elif source.get("input") == "mocap_keyboard_step":
+            # mocap 键盘步进主机：确定性逐点验收/标定输入，
+            # 接受离线来源（source=offline_replay），要求
+            # preview-only 身份与就绪字段。
             if not (
                 source.get("source") == "offline_replay"
                 and source.get("mapping")
@@ -192,13 +206,63 @@ class HostReadinessGate:
                 and source.get("elbow_constraint")
                 == "published_default_zsp_backend_selected"
                 and source.get("smpl_used") is False
-                and source.get("scope") == expected_scope
+                and source.get("scope") == "mocap_keyboard_step"
                 and source.get("at_safe_home") is True
                 and source.get("error") is None
             ):
                 return HostReadiness(
-                    False, "mocap_replay_not_ready"
+                    False, "mocap_keyboard_step_not_ready"
                 )
+        elif source.get("input") == "mocap_h5_replay":
+            # H5 真机回放仅接受尚未开始、已确认 Home 的低速 wrist
+            # frame0 对齐主机。Motive marker 在连接前必须新鲜有效；
+            # Enter 必须可用且松开，避免桥刚 armed 就开始运动。
+            motive = source.get("motive_right_arm")
+            recording = source.get("recording")
+            right_summary = (
+                recording.get("hands", {}).get("right", {})
+                if isinstance(recording, dict)
+                else {}
+            )
+            speed = source.get("speed")
+            yaw_deg = source.get("yaw_deg")
+            if not (
+                source.get("source") == "offline_replay"
+                and source.get("mapping")
+                == "motive_rigid_offset_absolute_wrist_tcp_v5"
+                and source.get("control_mode")
+                == "h5_right_wrist_to_right_arm_hold_to_run"
+                and source.get("body_tracking") == "disabled"
+                and source.get("motion_trackers_required") is True
+                and source.get("elbow_constraint")
+                == "published_default_zsp_backend_selected"
+                and source.get("smpl_used") is False
+                and source.get("scope") == "mocap_replay"
+                and source.get("endpoint") == "wuji2_r_wrist"
+                and source.get("side") == "right"
+                and source.get("phase") == "armed"
+                and source.get("at_safe_home") is True
+                and source.get("deadman_available") is True
+                and source.get("deadman_pressed") is False
+                and source.get("deadman_error") is None
+                and source.get("source_complete") is False
+                and source.get("error") is None
+                and isinstance(motive, dict)
+                and motive.get("tracking_valid") is True
+                and isinstance(motive.get("resolved_id"), int)
+                and not isinstance(motive.get("resolved_id"), bool)
+                and motive.get("resolved_id") > 0
+                and isinstance(right_summary.get("valid_frames"), int)
+                and not isinstance(right_summary.get("valid_frames"), bool)
+                and right_summary.get("valid_frames") > 0
+                and isinstance(speed, (int, float))
+                and not isinstance(speed, bool)
+                and 0.0 < float(speed) <= 0.25
+                and isinstance(yaw_deg, (int, float))
+                and not isinstance(yaw_deg, bool)
+                and float(yaw_deg) == 0.0
+            ):
+                return HostReadiness(False, "mocap_h5_not_ready")
         elif not (
             source.get("source") == "live"
             and source.get("input") == "pico_controllers_only"

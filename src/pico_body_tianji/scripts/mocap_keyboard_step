@@ -4,4 +4,4 @@ from pico_body_tianji.controller_only.mocap_keyboard_step_node import main
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

@@ -21,6 +21,7 @@ assert_no_conflicting_teleop_nodes
 
 IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
 PARAMETERS="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml"
+URDF_PATH="${PROJECT_PREFIX}/share/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
 IK_BACKEND="$(
   awk '$1 == "ik_backend:" {print $2; exit}' "${PARAMETERS}"
 )"
@@ -36,6 +37,7 @@ INPUT_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/pico_controller_only_input"
 for required in \
   "${IK_NODE}" \
   "${PARAMETERS}" \
+  "${URDF_PATH}" \
   "${INPUT_NODE}"
 do
   if [[ ! -f "${required}" ]]; then
@@ -50,16 +52,19 @@ printf '%s\n' \
   '不读取 Body/Motion Tracker，不启动 RViz/MuJoCo，不连接 Marvin。' \
   'IK 输出：/pico_body_sim/{left,right}_arm/joint_commands'
 
-ik_arguments=(
-  "--ros-args"
-  "--params-file" "${PARAMETERS}"
+# C++ 节点只接受裸 key:=value 参数；yaml_params_for 直接输出该格式。
+mapfile -t ik_arguments < <(
+  yaml_params_for tianji_kinematic_sim "${PARAMETERS}" \
+    "urdf_path:=${URDF_PATH}"
 )
+for index in "${!ik_arguments[@]}"; do
+  ik_arguments[index]="${ik_arguments[index]#--param }"
+done
 setsid "${IK_NODE}" "${ik_arguments[@]}" &
 ik_pid=$!
 register_teleop_process_group "${ik_pid}" controller-only-ik-solver 5
 
-setsid python "${INPUT_NODE}" \
-  --ros-args --params-file "${PARAMETERS}" &
+setsid python "${INPUT_NODE}" --config "${PARAMETERS}" &
 input_pid=$!
 register_teleop_process_group \
   "${input_pid}" controller-only-pico-input 5

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mocap 键盘步进控制节点（preview-only / 真机验收主机输入）。
+"""mocap 键盘步进控制节点（Zenoh 通讯版，替代 ROS 2 链路）。
 
 不用 PICO、不回放 h5：键盘在动捕（Motive/y-up）坐标系里给机器人
 末端目标增量，每次按键 10mm（可配 --step-mm）：
@@ -8,35 +8,40 @@
     左 ← 动捕 +x        右 ← 动捕 -x
     '1' ← 动捕 +y       '0' ← 动捕 -y
     's' 开始回放（armed 时）/ 结束并回 Home（步进中）
+    'q' / Ctrl+C 退出（步进中先回 Home 再退出）
 
-命令经与 mocap 回放/在线 PICO 相同的映射链路（增量相对参考帧 →
-pico_to_robot → world→chest → One-Euro → 1:1 目标整形）送入
-tianji_kinematic_sim，机器人末端（双臂同步）每次按键移动 10mm。
-方向键为 raw 模式转义序列（\\x1b[A/B/C/D），由 ArrowKeyParser 解析。
+命令经与在线 PICO 相同的映射链路（增量相对参考帧 → mocap_to_robot
+（Motive 系 +X 左 / +Z 前，与 PICO 系水平轴相差 180°，不能复用
+pico_to_robot）→ world→chest → One-Euro → 1:1 目标整形）经 Zenoh 发布到
+tianji_kinematic_sim（key：/pico_body/{left,right}_arm_target_pose 与
+_elbow_direction，JSON 与 zenoh 分支 C++ 节点协议一致），机器人末端
+每次按键移动 10mm。方向键为 raw 模式转义序列（\\x1b[A/B/C/D），由
+ArrowKeyParser 解析。
 
-身份与真机验收：status 含真机 readiness 所需字段，可作为真机桥
-主机输入（host_readiness 与 common.sh 显式接受该身份），真机桥
-全部安全保护不变；流程见 docs/mocap_real_acceptance.md。
+默认只控制右臂（--side right）：左臂目标不发布，C++ 节点对无目标的
+臂直接跳过解算，左臂保持 Home。--side both 恢复双臂同步。
+
+身份与真机验收：status 含真机桥 host_readiness 所需字段（input/
+mapping/body_tracking/motion_trackers_required/elbow_constraint/
+smpl_used/scope/at_safe_home/error），liveliness 注册
+tj/live/mocap_keyboard_step（不在真机桥冲突名单内），可作为真机桥
+主机输入；流程见 docs/mocap_real_acceptance.md。
 
 用法（由 scripts/run_mocap_step.sh 启动）：
 
-    mocap_keyboard_step [--step-mm 10] [--rate 60]
+    mocap_keyboard_step [--step-mm 10] [--rate 60] [--side right]
+                        [--config <yaml>] [--param key:=value ...]
 """
 
 from __future__ import annotations
 
-import argparse
 import json
+import logging
 import sys
 import threading
 import time
 
 import numpy as np
-
-from geometry_msgs.msg import PoseStamped, Vector3Stamped
-from std_msgs.msg import String
-
-from tianji_world_output.config_loader import TianjiConfig
 
 from .controller_only_mapper import (
     ControllerOnlyTargets,
@@ -44,8 +49,22 @@ from .controller_only_mapper import (
 )
 from .controller_only_trace import _assert_replay_graph_is_safe
 from .mocap_keyboard_step import AXIS_STEPS, ArrowKeyParser, StepAccumulator
+from .raw_keyboard import raw_keyboard
 from .target_conditioner import TargetConditioningSettings
 from ..controller_frame import ControllerFrame
+from ..zenoh_util import (
+    LiveToken,
+    ZenohPub,
+    key,
+    load_node_config,
+    load_tianji_config,
+    open_session,
+    parse_cli_args,
+    parse_param_override,
+    stamp_now,
+)
+
+_LOG = logging.getLogger("mocap_keyboard_step")
 
 _REFERENCE_POSE = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
 
@@ -63,21 +82,52 @@ _AXIS_LABELS = {
     "0": "动捕 -y",
 }
 
+# 目标整形参数与 mocap 回放一致（1:1 验收/标定模式），修改时同步
+# config/mode/controller_only/controller_only_ik.yaml 的
+# mocap_keyboard_step 段。
+DEFAULT_PARAMETERS = {
+    "min_cutoff": 1.2,
+    "beta": 0.45,
+    "translation_gain": [1.0, 1.0, 1.0],
+    "rotation_gain": 1.0,
+    "workspace_relative_radii_m": [0.42, 0.38, 0.38],
+    "workspace_soft_zone_ratio": 0.90,
+    "maximum_linear_speed_m_s": 0.36,
+    "maximum_angular_speed_rad_s": 1.55,
+    "maximum_linear_acceleration_m_s2": 3.5,
+    "maximum_angular_acceleration_rad_s2": 9.0,
+    "left_default_zsp_direction": [
+        0.45638698,
+        -0.74604902,
+        -0.48489358,
+    ],
+    "right_default_zsp_direction": [
+        0.45638698,
+        0.74604902,
+        -0.48489358,
+    ],
+}
+
 
 class MocapKeyboardStepNode:
-    """非 Node 子类的步进控制驱动：由调用方创建 rclpy 节点并注入。"""
+    """非 ROS 的步进控制驱动：由调用方创建 zenoh.Session 并注入。"""
 
-    def __init__(self, node, *, step_mm: float = 10.0, rate: float = 60.0,
-                 side: str = "right"):
-        from rclpy.node import Node
-
+    def __init__(
+        self,
+        session,
+        params: dict,
+        *,
+        step_mm: float = 10.0,
+        rate: float = 60.0,
+        side: str = "right",
+    ) -> None:
         if step_mm <= 0.0:
             raise ValueError("step_mm must be positive")
         if rate <= 0.0:
             raise ValueError("rate must be positive")
         if side not in ("right", "both"):
             raise ValueError(f"side 必须是 right/both 之一，实际 {side!r}")
-        self.node: Node = node
+        self._session = session
         self._step_mm = float(step_mm)
         self._rate = rate
         self._side = side
@@ -86,107 +136,120 @@ class MocapKeyboardStepNode:
 
         conditioning_settings = TargetConditioningSettings(
             rate_hz=rate,
-            translation_gain=self.node.get_parameter(
-                "translation_gain"
-            ).value,
-            rotation_gain=float(
-                self.node.get_parameter("rotation_gain").value
-            ),
-            workspace_relative_radii_m=self.node.get_parameter(
+            translation_gain=params["translation_gain"],
+            rotation_gain=float(params["rotation_gain"]),
+            workspace_relative_radii_m=params[
                 "workspace_relative_radii_m"
-            ).value,
+            ],
             workspace_soft_zone_ratio=float(
-                self.node.get_parameter("workspace_soft_zone_ratio").value
+                params["workspace_soft_zone_ratio"]
             ),
             maximum_linear_speed_m_s=float(
-                self.node.get_parameter("maximum_linear_speed_m_s").value
+                params["maximum_linear_speed_m_s"]
             ),
             maximum_angular_speed_rad_s=float(
-                self.node.get_parameter("maximum_angular_speed_rad_s").value
+                params["maximum_angular_speed_rad_s"]
             ),
             maximum_linear_acceleration_m_s2=float(
-                self.node.get_parameter(
-                    "maximum_linear_acceleration_m_s2"
-                ).value
+                params["maximum_linear_acceleration_m_s2"]
             ),
             maximum_angular_acceleration_rad_s2=float(
-                self.node.get_parameter(
-                    "maximum_angular_acceleration_rad_s2"
-                ).value
+                params["maximum_angular_acceleration_rad_s2"]
             ),
         )
+        tianji_config = load_tianji_config()
         self._mapper = ControllerOnlyTeleopMapper(
-            TianjiConfig.load(),
+            tianji_config,
             rate=rate,
-            min_cutoff=float(self.node.get_parameter("min_cutoff").value),
-            beta=float(self.node.get_parameter("beta").value),
+            min_cutoff=float(params["min_cutoff"]),
+            beta=float(params["beta"]),
             conditioning_settings=conditioning_settings,
             default_zsp_directions={
-                side: self.node.get_parameter(
-                    f"{side}_default_zsp_direction"
-                ).value
+                side: params[f"{side}_default_zsp_direction"]
                 for side in ("left", "right")
             },
+            # Motive 系(+X 左, +Z 前)与 PICO 系(+X 右, +Z 后)水平轴
+            # 相差 180°，必须用独立的动捕同向映射，不能复用 pico_to_robot。
+            input_to_robot=tianji_config.mocap_to_robot,
         )
         self._accumulator = StepAccumulator(
             reference_pose=_REFERENCE_POSE, step_mm=step_mm
         )
         self._parser = ArrowKeyParser()
 
-        self._pose_publishers = {
-            side: self.node.create_publisher(
-                PoseStamped, f"/pico_body/{side}_arm_target_pose", 10
+        self._pose_pubs = {
+            side: ZenohPub(
+                session, key(f"/pico_body/{side}_arm_target_pose")
             )
             for side in ("left", "right")
         }
-        self._elbow_publishers = {
-            side: self.node.create_publisher(
-                Vector3Stamped,
-                f"/pico_body/{side}_arm_elbow_direction",
-                10,
+        self._elbow_pubs = {
+            side: ZenohPub(
+                session,
+                key(f"/pico_body/{side}_arm_elbow_direction"),
             )
             for side in ("left", "right")
         }
-        self._state_publisher = self.node.create_publisher(
-            String, "/pico_body/teleop_state", 10
-        )
-        self._status_publisher = self.node.create_publisher(
-            String, "/pico_body/status", 10
-        )
+        self._state_pub = ZenohPub(session, key("/pico_body/teleop_state"))
+        self._status_pub = ZenohPub(session, key("/pico_body/status"))
+        self._live = LiveToken(session, "mocap_keyboard_step")
 
         self._phase = "armed"
         self._phase_started = time.monotonic()
         self._pending_pose: np.ndarray | None = None
         self._settle_frames = 0
         self._last_conditioning: dict[str, object] = {
-            "left": None, "right": None
+            "left": None,
+            "right": None,
         }
         self._stop_event = threading.Event()
+        self._quit = False
         self._keyboard_thread = threading.Thread(
             target=self._keyboard_loop, daemon=True
         )
         self._keyboard_thread.start()
 
-        self.node.create_timer(1.0 / 60.0, self._tick)
-        self.node.create_timer(0.5, self._publish_status)
         side_label = "仅右臂" if side == "right" else "双臂同步"
-        self.node.get_logger().info(
-            f"mocap 键盘步进已就绪：每次按键 {step_mm:g} mm（动捕系），"
-            f"控制 {side_label}；按 s 开始，步进中再按 s 结束回 Home"
+        _LOG.info(
+            "mocap 键盘步进已就绪：每次按键 %g mm（动捕系），控制 %s；"
+            "按 s 开始，步进中再按 s 结束回 Home",
+            step_mm,
+            side_label,
         )
 
     # -- 键盘 -----------------------------------------------------------------
 
     def _keyboard_loop(self) -> None:
-        from .raw_keyboard import raw_keyboard
-
         raw_keyboard(self._on_key, self._stop_event)
+
+    # raw 模式终端无 echo；按键事件实时回显到 stdout。
+    _ECHO_SYMBOLS = {
+        "up": "↑",
+        "down": "↓",
+        "left": "←",
+        "right": "→",
+        "1": "1",
+        "0": "0",
+        "s": "s",
+        "q": "q",
+    }
+
+    def _echo(self, event: str) -> None:
+        try:
+            print(self._ECHO_SYMBOLS.get(event, event), end="", flush=True)
+        except OSError:
+            pass
 
     def _on_key(self, byte: str) -> None:
         event = self._parser.feed(byte)
         if event is None:
             return
+        if event in ("\x03", "q"):  # Ctrl+C / q：raw 模式无 SIGINT，自行退出
+            self._echo("q")
+            self._handle_interrupt()
+            return
         if event == "s":
+            self._echo("s")
             if self._phase == "armed":
                 self._phase = "stepping"
                 self._phase_started = time.monotonic()
@@ -199,59 +262,66 @@ class MocapKeyboardStepNode:
                     )
                 )
                 self._publish_state("teleop")
-                self.node.get_logger().info(
-                    "键盘 's'：开始步进（参考位姿已记录）"
-                )
+                _LOG.info("键盘 's'：开始步进（参考位姿已记录）")
             elif self._phase == "stepping":
                 self._phase = "returning"
                 self._phase_started = time.monotonic()
-                self.node.get_logger().info(
-                    "键盘 's'：请求结束并回 Home"
-                )
+                _LOG.info("键盘 's'：请求结束并回 Home")
             return
         if self._phase != "stepping" or event not in AXIS_STEPS:
             return
+        self._echo(event)
         pose = self._accumulator.step(event)
         # 进入 settle：_tick 在 60Hz 持续映射该位姿，让滤波/整形收敛。
         self._pending_pose = pose
         self._settle_frames = _SETTLE_FRAMES
         delta_mm = self._accumulator.delta_m() * 1000.0
-        self.node.get_logger().info(
-            f"按键 {event}（{_AXIS_LABELS[event]}）：+{self._step_mm:g} mm "
-            f"→ 累积 ({delta_mm[0]:+.1f}, {delta_mm[1]:+.1f}, "
-            f"{delta_mm[2]:+.1f}) mm"
+        _LOG.info(
+            "按键 %s（%s）：+%g mm → 累积 (%+.1f, %+.1f, %+.1f) mm",
+            event,
+            _AXIS_LABELS[event],
+            self._step_mm,
+            delta_mm[0],
+            delta_mm[1],
+            delta_mm[2],
         )
 
-    def stop(self) -> None:
+    def _handle_interrupt(self) -> None:
+        """q / Ctrl+C 退出：步进中先回 Home（安全），否则直接退出。"""
+        if self._phase == "stepping":
+            self._phase = "returning"
+            self._phase_started = time.monotonic()
+            _LOG.info("按键 q/Ctrl+C：请求结束并回 Home")
+            return
+        _LOG.info("按键 q/Ctrl+C：退出")
+        self._quit = True
+        self._stop_event.set()
+
+    def _stop(self) -> None:
         self._stop_event.set()
 
     # -- 发布 -----------------------------------------------------------------
 
     def _publish_state(self, state: str) -> None:
-        self._state_publisher.publish(String(data=state))
-        self._status_publisher.publish(
-            String(
-                data=json.dumps(
-                    {
-                        "state": state,
-                        "source": "offline_replay",
-                        "input": "mocap_keyboard_step",
-                        "scope": "mocap_keyboard_step",
-                        "mapping":
-                            "controller_relative_end_pose_conditioned_v1",
-                        "body_tracking": "disabled",
-                        "motion_trackers_required": False,
-                        "elbow_constraint":
-                            "published_default_zsp_backend_selected",
-                        "smpl_used": False,
-                        "at_safe_home": state == "idle",
-                        "step_mm": self._step_mm,
-                        "side": self._side,
-                        "error": None,
-                    },
-                    ensure_ascii=False,
-                )
-            )
+        self._state_pub.put_text(state)
+        self._status_pub.put_json(
+            {
+                "state": state,
+                "source": "offline_replay",
+                "input": "mocap_keyboard_step",
+                "scope": "mocap_keyboard_step",
+                "mapping":
+                    "controller_relative_end_pose_conditioned_v1",
+                "body_tracking": "disabled",
+                "motion_trackers_required": False,
+                "elbow_constraint":
+                    "published_default_zsp_backend_selected",
+                "smpl_used": False,
+                "at_safe_home": state == "idle",
+                "step_mm": self._step_mm,
+                "side": self._side,
+                "error": None,
+            }
         )
 
     def _frame(self, pose: np.ndarray) -> ControllerFrame:
@@ -262,53 +332,67 @@ class MocapKeyboardStepNode:
         )
         return ControllerFrame.from_poses(left_pose, pose)
 
+    def _pose_message(
+        self, pose: np.ndarray, frame_id: str, stamp: dict
+    ) -> dict:
+        return {
+            "stamp": stamp,
+            "frame_id": frame_id,
+            "position": {
+                "x": float(pose[0]),
+                "y": float(pose[1]),
+                "z": float(pose[2]),
+            },
+            "orientation": {
+                "x": float(pose[3]),
+                "y": float(pose[4]),
+                "z": float(pose[5]),
+                "w": float(pose[6]),
+            },
+        }
+
+    def _vector_message(
+        self, direction: np.ndarray, frame_id: str, stamp: dict
+    ) -> dict:
+        return {
+            "stamp": stamp,
+            "frame_id": frame_id,
+            "vector": {
+                "x": float(direction[0]),
+                "y": float(direction[1]),
+                "z": float(direction[2]),
+            },
+        }
+
     def _publish_targets(self, targets: ControllerOnlyTargets) -> None:
-        stamp = self.node.get_clock().now().to_msg()
+        stamp = stamp_now()
         for side in self._sides:
             pose = targets.left_pose if side == "left" else targets.right_pose
-            message = PoseStamped()
-            message.header.stamp = stamp
-            message.header.frame_id = f"{side}_chest"
-            (
-                message.pose.position.x,
-                message.pose.position.y,
-                message.pose.position.z,
-            ) = map(float, pose[:3])
-            (
-                message.pose.orientation.x,
-                message.pose.orientation.y,
-                message.pose.orientation.z,
-                message.pose.orientation.w,
-            ) = map(float, pose[3:7])
-            self._pose_publishers[side].publish(message)
-
+            self._pose_pubs[side].put_json(
+                self._pose_message(pose, f"{side}_chest", stamp)
+            )
             direction = (
                 targets.left_default_elbow_direction
                 if side == "left"
                 else targets.right_default_elbow_direction
             )
-            elbow = Vector3Stamped()
-            elbow.header.stamp = stamp
-            elbow.header.frame_id = f"{side}_chest"
-            (
-                elbow.vector.x,
-                elbow.vector.y,
-                elbow.vector.z,
-            ) = map(float, direction)
-            self._elbow_publishers[side].publish(elbow)
+            self._elbow_pubs[side].put_json(
+                self._vector_message(
+                    direction, f"{side}_chest", stamp
+                )
+            )
 
-    def _tick(self) -> None:
+    def _tick(self) -> bool:
+        """60Hz 映射一帧；返回 False 表示流程结束（已请求回 Home）。"""
         if self._phase == "armed":
             self._publish_state("idle")
-            return
+            return True
         if self._phase == "returning":
             self._publish_state("returning")
             if time.monotonic() - self._phase_started >= 3.0:
-                self.node.get_logger().info(
-                    "键盘步进结束并已请求回 Home"
-                )
-                raise SystemExit(0)
-            return
+                _LOG.info("键盘步进结束并已请求回 Home")
+                return False
+            return True
         self._publish_state("teleop")
         if self._pending_pose is not None:
             # settle：持续映射按键后的目标位姿，直到滤波/整形收敛。
@@ -317,9 +401,9 @@ class MocapKeyboardStepNode:
                     self._frame(self._pending_pose)
                 )
             except Exception as exc:
-                self.node.get_logger().error(f"步进映射失败：{exc}")
+                _LOG.error("步进映射失败：%s", exc)
                 self._pending_pose = None
-                return
+                return True
             self._publish_targets(targets)
             self._last_conditioning = {
                 "left": targets.left_conditioning.as_dict(),
@@ -328,6 +412,7 @@ class MocapKeyboardStepNode:
             self._settle_frames -= 1
             if self._settle_frames <= 0:
                 self._pending_pose = None
+        return True
 
     def _publish_status(self) -> None:
         delta_mm = self._accumulator.delta_m() * 1000.0
@@ -351,84 +436,105 @@ class MocapKeyboardStepNode:
             "motion_trackers_required": False,
             "error": None,
         }
-        self._status_publisher.publish(
-            String(data=json.dumps(status, ensure_ascii=False))
-        )
+        self._status_pub.put_json(status)
+
+    def run(self) -> int:
+        """主循环：rate Hz 映射 + 0.5s 状态；结束返回 0。"""
+        tick_interval = 1.0 / self._rate
+        status_interval = 0.5
+        next_tick = time.monotonic() + tick_interval
+        next_status = next_tick + status_interval
+        while True:
+            if self._quit:
+                return 0
+            now = time.monotonic()
+            if now >= next_tick:
+                if not self._tick():
+                    return 0
+                next_tick += tick_interval
+            if now >= next_status:
+                self._publish_status()
+                next_status += status_interval
+            time.sleep(
+                max(0.001, min(next_tick, next_status) - time.monotonic())
+            )
+
+    def close(self) -> None:
+        try:
+            self._stop()
+        finally:
+            try:
+                for pub in (
+                    *self._pose_pubs.values(),
+                    *self._elbow_pubs.values(),
+                    self._state_pub,
+                    self._status_pub,
+                ):
+                    pub.close()
+            finally:
+                try:
+                    self._live.close()
+                finally:
+                    self._session.close()
 
 
 def main(argv=None) -> int:
-    import rclpy
-
-    raw_argv = list(argv) if argv is not None else list(sys.argv[1:])
-    ros_args: list[str] = []
-    app_argv = raw_argv
+    args = parse_cli_args(
+        extra={
+            "--step-mm": {
+                "type": float,
+                "default": 10.0,
+                "help": "每次按键位移毫米（默认 10）",
+            },
+            "--rate": {
+                "type": float,
+                "default": 60.0,
+                "help": "映射器采样率 Hz（默认 60）",
+            },
+            "--side": {
+                "choices": ("right", "both"),
+                "default": "right",
+                "help": "控制侧（默认 right：仅右臂，左臂保持 Home；"
+                        "both：双臂同步）",
+            },
+        }
+    )
+    overrides = {}
+    for spec in args.param:
+        k, v = parse_param_override(spec)
+        overrides[k] = v
+    params = load_node_config(
+        args.config,
+        "mocap_keyboard_step",
+        DEFAULT_PARAMETERS,
+        overrides,
+    )
+    session = open_session()
+    _assert_replay_graph_is_safe(session)
+    node = MocapKeyboardStepNode(
+        session,
+        params,
+        step_mm=args.step_mm,
+        rate=args.rate,
+        side=args.side,
+    )
     try:
-        split_at = raw_argv.index("--ros-args")
-    except ValueError:
-        pass
-    else:
-        ros_args = raw_argv[split_at:]
-        app_argv = raw_argv[:split_at]
-
-    parser = argparse.ArgumentParser(
-        description="mocap 键盘步进控制（动捕系 10mm/键，s 启停）"
-    )
-    parser.add_argument("--step-mm", type=float, default=10.0,
-                        help="每次按键位移毫米（默认 10）")
-    parser.add_argument("--rate", type=float, default=60.0,
-                        help="映射器采样率 Hz（默认 60）")
-    parser.add_argument("--side", choices=("right", "both"), default="right",
-                        help="控制侧（默认 right：仅右臂，左臂保持 Home；"
-                             "both：双臂同步）")
-    args = parser.parse_args(app_argv)
-
-    rclpy.init(args=ros_args or None)
-    node = rclpy.create_node("mocap_keyboard_step")
-    node.declare_parameter("min_cutoff", 1.0)
-    node.declare_parameter("beta", 0.7)
-    node.declare_parameter("translation_gain", [1.0, 1.0, 1.0])
-    node.declare_parameter("rotation_gain", 1.0)
-    node.declare_parameter(
-        "workspace_relative_radii_m", [0.32, 0.28, 0.28]
-    )
-    node.declare_parameter("workspace_soft_zone_ratio", 0.80)
-    node.declare_parameter("maximum_linear_speed_m_s", 0.18)
-    node.declare_parameter("maximum_angular_speed_rad_s", 0.80)
-    node.declare_parameter("maximum_linear_acceleration_m_s2", 1.20)
-    node.declare_parameter(
-        "maximum_angular_acceleration_rad_s2", 4.0
-    )
-    node.declare_parameter(
-        "left_default_zsp_direction",
-        [0.45638698, -0.74604902, -0.48489358],
-    )
-    node.declare_parameter(
-        "right_default_zsp_direction",
-        [0.45638698, 0.74604902, -0.48489358],
-    )
-    driver = None
-    try:
-        _assert_replay_graph_is_safe(node)
-        driver = MocapKeyboardStepNode(
-            node, step_mm=args.step_mm, rate=args.rate, side=args.side
+        _LOG.warning(
+            "等待键盘 's' 开始步进；步进中方向键/1/0 每次移动 %g mm，"
+            "再按 's' 结束回 Home，按 'q' 退出；"
+            "该身份可配合真机桥做验收",
+            args.step_mm,
         )
-        node.get_logger().warning(
-            f"等待键盘 's' 开始步进；步进中方向键/1/0 每次移动 "
-            f"{args.step_mm:g} mm，再按 's' 结束回 Home；"
-            "该身份可配合真机桥做验收"
-        )
-        try:
-            rclpy.spin(node)
-        except SystemExit:
-            return 0
+        return node.run()
+    except KeyboardInterrupt:
+        return 0
     finally:
-        if driver is not None:
-            driver.stop()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
-    return 0
+        node.close()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     raise SystemExit(main())

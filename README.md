@@ -4,11 +4,11 @@
 
 - PICO 左右手柄和 SMPL 上肢数据读取；
 - 可切换的 C++ 双臂 IK（Pinocchio / 天机官方 `libKine`）；
-- RViz 与 MuJoCo 纯运动学仿真；
+- MuJoCo 纯运动学仿真；
 - Marvin SDK 真机关节位置遥操作；
 - 真机状态监控和安全停机。
 
-运行时不需要 Docker、不要求预装 ROS 2，也不需要现场编译。本包不包含
+运行时不需要 Docker、不要求预装任何机器人中间件，也不需要现场编译。本包不包含
 Wuji 手部资产或描述包；只保留 PICO 输入和天机坐标转换所需的最小
 白名单模块。
 
@@ -20,10 +20,11 @@ Wuji 手部资产或描述包；只保留 PICO 输入和天机坐标转换所需
 
 ## 是否可以独立控制天机
 
-可以。本仓库已经携带运行所需的 ROS 2、Pinocchio、RViz、MuJoCo、
-PICO Python/原生 SDK、Marvin Python SDK 和本项目节点。在支持的电脑
-上克隆后，不依赖 Docker、系统预装 ROS 2、官方 Wuji 仓库、FxStation
-或官方 `libKine` 即可启动完整链路：
+可以。本仓库已经携带运行所需的 Zenoh（`vendor/zenoh` 的 zenoh-c 库与
+`eclipse-zenoh` pip 绑定）、Pinocchio、MuJoCo、PICO Python/原生 SDK、
+Marvin Python SDK 和本项目节点。在支持的电脑上克隆后，不依赖 Docker、
+系统预装机器人中间件、官方 Wuji 仓库、FxStation 或官方 `libKine`
+即可启动完整链路：
 
 ```text
 PICO + SMPL → 可配置 IK → 真机安全桥 → Marvin SDK → 天机双臂
@@ -42,7 +43,7 @@ Marvin 并复用该目标。因此二者属于同一个独立项目，但真机�
 
 默认使用 `pinocchio_cpp`。工程已提供稳定的 `ArmIkSolver` 接口、速度级
 `pinocchio_qp` 和 `tianji_official` 运行时适配器，可通过 YAML 切换且无需
-改动 ROS 话题和真机安全桥。各后端配置和离线验证方法见
+改动数据链路 key 和真机安全桥。各后端配置和离线验证方法见
 [IK 后端接口与切换](docs/ik_backends.md)。
 
 ## 运行前提
@@ -67,6 +68,38 @@ source ~/.bashrc
 pixi --version
 ```
 
+## 快速开始：Motive 动捕真机运行
+
+环境就绪且 Windows 侧 Motive 动捕发布已运行（`windows_pub.sh`）时，
+两个终端即可驱动真机：
+
+```bash
+# 终端 1：Motive 定零 + 键盘步进/正面圆轨迹（主机链路，含 IK）
+pixi run sim_mocap_live
+
+# 终端 2：真机桥（确认机械臂安全、急停释放后执行）
+pixi run real_mocap_live -- --confirm-real
+```
+
+- 终端 1 先等日志出现 `刚体名映射已更新：{..., 10: 'right_arm'}` 和
+  `Motive right frame=... tracking=ok`（动捕数据已到）；
+- 终端 2 等 `真机链路已就绪：保持安全零位，主机开始遥操作后跟随`，
+  再回到终端 1 操作；
+
+| 按键 | 作用 |
+| --- | --- |
+| `s` | 冻结 `right_arm` 当前位姿为零点，开始控制 |
+| `↑/↓/←/→/1/0` | 连续累计步进（每键 10mm，动捕系），可无限次 |
+| `c` | 零位装载右臂正面圆轨迹；此时不会自行运动 |
+| 按住 `Enter` | 推进圆轨迹；松开后一个 60Hz 控制周期内暂停，再按继续 |
+| `s` | 请求回 Home；回零完成后程序不退出，可再次按 `s` 开始新一轮 |
+| `q` / Ctrl+C | 回 Home 完成后安全退出 |
+
+`real_mocap_live` 只复用 `sim_mocap_live` 的 IK 关节命令，不会启动
+第二套输入或 IK；跟踪误差、命令超时、限速斜坡与急停检测等安全保护
+全部在真机桥侧生效。完整说明见后文
+「Motive 刚体定零 + 键盘步进/正面圆轨迹（sim_mocap_live / real_mocap_live）」。
+
 ## 第一次使用：推荐顺序
 
 ### 1. 获取简化版项目并进入目录
@@ -84,7 +117,7 @@ Git 仓库只跟踪源码、脚本、配置和 Pixi 锁文件，不跟踪 `.pixi
 
 运行仿真或真机时应使用独立压缩包，其中包含经过校验的运行时和厂商
 二进制。只需要复制这一份压缩包到目标电脑，不需要同时复制源码仓库、
-Docker 镜像、ROS 工作区或外置校验文件。执行：
+Docker 镜像、构建工作区或外置校验文件。执行：
 
 ```bash
 tar -xzf pico_tianji_teleop_standalone_*.tar.gz
@@ -104,29 +137,30 @@ pixi run doctor
 pixi run test
 ```
 
-- `pixi install --locked`：安装包内锁定的 Python、NumPy、SciPy 和
-  MuJoCo 版本；
-- `pixi run doctor`：检查 ROS、Pinocchio、RViz、MuJoCo、URDF、mesh
-  和厂商 SDK 文件；
-- `pixi run test`：短暂启动纯运动学节点并检查 ROS 话题链路。
+- `pixi install --locked`：安装包内锁定的 Python、NumPy、SciPy、
+  MuJoCo 和 eclipse-zenoh 版本；
+- `pixi run doctor`：检查 Zenoh（vendored C 库、Python 绑定与本地
+  会话）、Pinocchio、MuJoCo、URDF、mesh 和厂商 SDK 文件；
+- `pixi run test`：短暂启动纯运动学节点并检查 Zenoh 数据链路。
 
 这三个步骤不会连接或驱动实体机械臂。`doctor` 会离线加载 Marvin SDK
 检查文件与 ABI，但不会建立控制器连接。
 
-普通使用者不需要在系统中安装 ROS 2。本项目从
-`runtime/ros/humble` 加载随包 ROS 运行时；前提是拿到完整项目，不能只
-复制 `src`、`pixi.toml` 和 `pixi.lock`。完整项目至少应保留
-`runtime/ros/humble`、`runtime/pico_body_tianji`、`runtime/pin`、
-`runtime/abi` 和 `vendor`。
+普通使用者不需要在系统中安装任何机器人中间件。通讯使用内置 Zenoh：
+`vendor/zenoh` 提供 zenoh-c C 库与头文件，`eclipse-zenoh` pip 包提供
+Python 绑定（由 Pixi 锁定）；前提是拿到完整项目，不能只复制 `src`、
+`pixi.toml` 和 `pixi.lock`。完整项目至少应保留
+`runtime/pico_body_tianji`、`runtime/pin`、`runtime/abi`、`vendor/python`
+和 `vendor/zenoh`。
 
 `pixi install --locked` 一次只安装 `default` 环境，不会安装或检查
 `ik-build`。直接运行 `pixi run sim` 也会自动安装缺失的默认环境，但首次
 使用仍建议显式执行上面的安装和检查命令。两套 Pixi 环境的用途如下：
 
-| Pixi 环境 | 安装命令 | 是否要求系统 ROS 2 |
+| Pixi 环境 | 安装命令 | 是否要求系统机器人中间件 |
 | --- | --- | --- |
-| 普通运行 `default` | `pixi install --locked` | 否，使用项目内置 ROS |
-| 重新编译 `ik-build` | `pixi install --locked -e ik-build` | 安装本身不要求；执行 `build-ik` 时要求系统 ROS Humble |
+| 普通运行 `default` | `pixi install --locked` | 否，使用内置 Zenoh |
+| 重新编译 `ik-build` | `pixi install --locked -e ik-build` | 安装本身不要求；执行 `build-ik` 时要求 `vendor/zenoh`（zenoh-c standalone）与 `vendor/zenoh-cpp` 已就位 |
 
 普通使用者不要执行 `pixi install --all`，也不需要执行 `build-ik`。只有修改
 C++ IK 源码并准备重新编译的开发者，才需要下一节。
@@ -138,15 +172,17 @@ C++ IK 源码并准备重新编译的开发者，才需要下一节。
 YAML 或二进制：`runtime` 是实际运行目录，其 IK 内容由 `src` 编译并通过
 `deploy-ik` 部署。
 
-重新编译要求 Ubuntu 22.04 x86_64，并在系统中准备：
+重新编译要求 Ubuntu 22.04 x86_64，并准备：
 
-- `/opt/ros/humble` 下的 ROS Humble 开发环境；
-- GCC/G++ 11、CMake 和 colcon；
-- 与工程检查脚本匹配的 ROS 开发包版本。
+- 系统 GCC/G++ 11–13（Ubuntu 22.04 为 GCC 11，Ubuntu 24.04 为 GCC 13），
+  CMake 由 pixi ik-build 环境提供；
+- 仓库根 `vendor/zenoh` 下的 zenoh-c 1.10.0 standalone 库与头文件，
+  以及 `vendor/zenoh-cpp` 的 zenoh-cpp 头文件（vendored，不入 git）；
+- `urdfdom_headers` 等构建依赖由 ik-build 环境提供。
 
-Pixi 只负责锁定 Python 和 Pinocchio 构建依赖，不会替代系统 ROS。没有
-安装系统 ROS 时，普通运行不受影响，但执行 `build-ik` 会明确报告缺少
-`/opt/ros/humble/setup.bash`。
+Pixi 负责锁定 Python、Pinocchio（pin）和 eclipse-zenoh 绑定；构建不
+依赖任何系统机器人中间件。没有准备 `vendor/zenoh` 时普通运行不受
+影响，但执行 `build-ik` 会明确报告缺少 `vendor/zenoh/lib/libzenohc.so`。
 
 运行模式的公共配置如下：
 
@@ -154,6 +190,9 @@ Pixi 只负责锁定 Python 和 Pinocchio 构建依赖，不会替代系统 ROS�
 | --- | --- | --- | --- |
 | PICO + SMPL 全身链路 | `src/pico_body_tianji/config/mode/full_body/preview.yaml` | `pixi run sim` | `pixi run real` |
 | 纯手柄链路 | `src/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml` | `pixi run sim_controller_only` | `pixi run real_controller_only` |
+| mocap 键盘步进 | `src/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml` | `pixi run sim_mocap_step` | `pixi run real_mocap_step -- --confirm-real` |
+| mocap 实时定零步进 | 同上 | `pixi run sim_mocap_live` | `pixi run real_mocap_live -- --confirm-real` |
+| mocap HDF5 右腕回放 | 同上 | `pixi run sim_mocap_h5 -- TAKE.h5` | `pixi run real_mocap_h5 -- --confirm-real` |
 
 配置先按运行模式分组；每种模式各有一个 Sim/IK 配置和一个 Real 配置：
 
@@ -173,13 +212,16 @@ YAML 中修改一行：
 
 ```yaml
 tianji_kinematic_sim:
-  ros__parameters:
-    ik_backend: pinocchio_qp  # 或 pinocchio_cpp / tianji_official
+  ik_backend: pinocchio_qp  # 或 pinocchio_cpp / tianji_official
 ```
 
-因此运行命令始终只有
-`sim`、`real`、`sim_controller_only`、`real_controller_only` 四个，
-不会把模式名与 IK 名组合成新命令。
+启动脚本通过 `--config <yaml>` 加载配置文件（C++ IK 节点直接接收
+`key:=value` 参数，Python 节点接受 `--param key:=value` 覆盖），参数名
+与 YAML 键一致；旧式 `ros__parameters` 嵌套结构仍可读取，新写法为节点
+段内直接平铺参数。
+
+运行模式和 IK 后端正交：命令选择输入/输出链路，YAML 中的
+`ik_backend` 选择求解器。不要把模式名与 IK 名组合成新命令。
 
 官方库路径和机型配置保持空字符串即可，运行时包装器会使用项目内的
 `runtime/tianji_official`。修改完成后，在项目根目录依次执行：
@@ -198,7 +240,7 @@ staging/ik/lib/pico_body_tianji/pinocchio_qp_ik_probe \
 # 把新二进制、官方 SDK 和完整 config 目录部署到 runtime
 pixi run -e ik-build deploy-ik
 
-# 检查部署后的运行环境和 ROS 数据链路
+# 检查部署后的运行环境和 Zenoh 数据链路
 pixi run doctor
 pixi run test
 ```
@@ -267,8 +309,8 @@ XRoboToolkit 默认由本机 `127.0.0.1:60061` 提供数据。若日志一直停
 启动真机。
 
 下一步运行 `pixi run sim` 后，输入正常时，启动终端会出现设备发现/
-连接信息，RViz 中的 SMPL 骨架、左右目标末端会随人体和手柄运动。
-若骨架或目标保持不动，即使服务进程仍在，也不能视为数据正在持续刷新。
+连接信息，MuJoCo 预览中的机械臂会随人体和手柄运动。若机械臂保持
+不动，即使服务进程仍在，也不能视为数据正在持续刷新。
 
 如果要先确认“不佩戴腿部 Motion Tracker 时，左右手柄是否仍能到达
 MiniPC”，关闭正在运行的 `sim`/`real`，关闭两枚 Motion Tracker，保持
@@ -278,8 +320,7 @@ PICO、左右手柄和 XRoboToolkit 服务在线，然后执行：
 pixi run pico-probe -- --duration 15
 ```
 
-检测过程中分别移动左右手柄。该命令只读取 SDK，不启动 IK、不发布 ROS
-控制目标，也不连接 Marvin。最终出现
+检测过程中分别移动左右手柄。该命令只读取 SDK，不启动 IK、不发布控制目标，也不连接 Marvin。最终出现
 `controller_link_live: true` 表示双手柄有效位姿和递增时间戳持续到达；
 `body_data_received: false`、`motion_tracker_count: 0` 是关闭腿部 Tracker
 后的预期结果，不会导致检测失败。
@@ -295,7 +336,7 @@ pixi run sim_controller_only -- --topics-only
 ```
 
 该命令只启动 `pico_controller_only_input` 和
-`tianji_kinematic_sim`，不启动 RViz/MuJoCo，也不连接 Marvin。
+`tianji_kinematic_sim`，不启动 MuJoCo 预览，也不连接 Marvin。
 看到安全初始位就绪后，松开再单击右手柄 A，然后小幅移动左右手柄。
 
 在终端 2 查看 IK 输出的左右臂 14 个关节角（弧度）：
@@ -312,7 +353,11 @@ pixi run controller-only-joints
 /pico_body_sim/model_joint_states        # 双臂 14 关节，单位为弧度
 ```
 
-要同时查看 RViz 和 MuJoCo，先关闭上述无界面任务，再执行：
+名称沿用原话题名；Zenoh key 表达式去掉前导斜杠（如
+`pico_body_sim/left_arm/joint_commands`）。位姿/关节状态类消息为 JSON
+（UTF-8），字符串/布尔类消息为裸文本。
+
+要同时查看 MuJoCo 预览，先关闭上述无界面任务，再执行：
 
 ```bash
 pixi run sim_controller_only
@@ -320,27 +365,6 @@ pixi run sim_controller_only
 
 松开再单击右手柄 A 后，小幅移动左右手柄即可观察对应机械臂。
 
-### 6. mocap 手腕轨迹回放仿真（可选）
-
-不需要 PICO/真机时，可以把 mocap-acquisition 采集的 HDF5（v4.0）里
-录制的左右手腕位姿按录制节奏回放成轨迹跟踪仿真，机器人会像在线
-PICO 遥操作一样跟踪这条轨迹：
-
-```bash
-pixi run sim_mocap -- /home/current/data/20260819/20260819_151737_102784_take003.h5
-```
-
-回放经过与在线 PICO 相同的映射链路（增量相对参考帧、One-Euro 滤波、
-工作空间/速度整形），默认 **1:1 目标整形**（`translation_gain=1.0`）：
-命令 +x 移动 50mm，目标位移即 50.0mm、solved 位移 49.9–50.0mm；
-在线 PICO 链路刻意保留 0.90 安全缩放。参考帧等效于按右手柄 A 的
-时刻；**键盘 's' 控制开始与结束**（按 s 开始回放，回放中再按 s
-结束并回 Home；`--control auto` 恢复自动流程）。支持 `--speed`
-倍速、`--yaw-deg` 朝向标定和 `--topics-only` 等模式；单侧手腕
-完全无效（如该 take 左手全 NaN）时该侧机械臂保持 Home。可用
-`pixi run mocap-step-h5 -- --output step.h5 --axis z --dir neg --mm 50`
-生成“机器人 +x 移动 50mm”的合成验收轨迹。
-详细说明见 [docs/mocap_replay.md](docs/mocap_replay.md)。
 
 ### 7. 启动真机
 
@@ -353,9 +377,9 @@ Marvin SDK 会话在运行。
 仿真主机链路和真机桥分别持有跨解压目录运行锁，因此可以同时运行，
 但各自不能重复启动。正常退出、`Ctrl+C` 或子节点异常退出时，脚本只
 停止自己管理的进程；如果主脚本曾被强制杀死，同类任务下次启动会根据
-受管 PID 和进程启动时间自动清理遗留进程。真机桥启动前还会确认 ROS
-图中恰好只有一个 PICO 输入节点和一个 IK 节点。外部旧节点
-不会被冒险误杀，而会触发拒绝启动。
+受管 PID 和进程启动时间自动清理遗留进程。真机桥启动前还会通过
+Zenoh liveliness（`tj/live/*`）确认恰好只有一个 PICO 输入节点和一个
+IK 节点。外部旧节点不会被冒险误杀，而会触发拒绝启动。
 
 #### 7.1 配置天机有线网口
 
@@ -540,33 +564,334 @@ pixi run status
 pixi run controller-only-real-diagnostic -- --duration 60
 ```
 
-在 60 秒内完成单臂、双臂同时运动和问题位置复现。诊断器只订阅 ROS
-话题，不发布控制命令；结束后会打印输入速度/加速度、椭球工作空间、IK
+在 60 秒内完成单臂、双臂同时运动和问题位置复现。诊断器只订阅 Zenoh
+key，不发布控制命令；结束后会打印输入速度/加速度、椭球工作空间、IK
 单步、奇异/回退、软关节限位、真机输出斜坡、90 Hz 漏期和逐轴跟踪误差，
 并将原始 JSONL 保存到 `diagnostics/`。传入 `--duration 0` 可一直采集到
 `Ctrl+C`。
 
-## 四个运行入口
+## 运行入口
 
 | 命令 | 作用 | 是否连接真机 |
 |---|---|---|
-| `pixi run sim` | 同时启动 RViz 和 MuJoCo | 否 |
+| `pixi run sim` | 同时启动仿真链路与 MuJoCo 预览 | 否 |
 | `pixi run real -- --confirm-real` | 复用正在运行的 sim，启动真机桥 | **是** |
-| `pixi run sim_controller_only` | 纯手柄 IK 的 RViz + MuJoCo 仿真 | 否 |
+| `pixi run sim_controller_only` | 纯手柄 IK 的 MuJoCo 仿真 | 否 |
+| `pixi run sim_mocap_step` | mocap 键盘步进控制（动捕系 10mm/键，s 启停） | 否 |
+| `pixi run sim_mocap_live` | Motive `right_arm` 定零 + 连续键盘位置步进（默认右臂 10mm/键） | 否 |
+| `pixi run sim_mocap_h5 -- TAKE.h5` | 选择一个 mocap HDF5，回放 Manus 右腕轨迹（Enter 保压） | 否 |
+| `pixi run sim_regrind_h5 -- TAKE_REGRIND.h5` | 回放 Regrind wuji2 自由根、20 关节和物体轨迹 | 否 |
+| `pixi run real_mocap_step -- --confirm-real` | 复用键盘步进仿真，启动真机桥 | **是** |
+| `pixi run real_mocap_live -- --confirm-real` | 复用 Motive 定零键盘步进仿真，启动真机桥 | **是** |
+| `pixi run real_mocap_h5 -- --confirm-real` | 复用低速 H5 + IK 主机，启动真机安全桥 | **是** |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
-| `pixi run sim_mocap -- TAKE.h5` | mocap HDF5 手腕轨迹回放为轨迹跟踪仿真 | 否 |
-| `pixi run sim_mocap_step` | 键盘步进控制（动捕系 10mm/键，s 启停） | 否 |
 
 `doctor`、`test`、`pico-probe`、`status`、`controller-only-joints` 和
 `controller-only-real-diagnostic` 是检查/观测工具，不是新的运行模式。
-`sim` 两个入口均可追加
-`-- --rviz-only`、`-- --mujoco-only` 或 `-- --topics-only`，但入口名不变。
-`sim_mocap` 默认是 preview-only 离线回放仿真，**键盘 's' 控制开始与
-结束**（替代 PICO A 键；`--control auto` 可恢复自动）；`sim_mocap_step`
-是键盘步进控制（上/下/左/右/1/0 = 动捕 ±z/∓z/±x/∓x/±y，每次 10mm，
-**默认仅右臂**，左臂保持 Home；`--side both` 双臂同步）。
-两者都可作为真机桥主机输入做确定性轨迹真机验收（见
-[docs/mocap_real_acceptance.md](docs/mocap_real_acceptance.md)）。
+需要关闭 MuJoCo 时，支持该选项的仿真入口可追加
+`-- --topics-only`；默认是 `--mujoco-only`。
+
+## mocap 键盘步进控制（sim_mocap_step）
+
+不用 PICO、不回放 h5：键盘在**动捕坐标系**（Motive，y-up）里给
+机器人末端目标增量，每次按键 10mm（`--step-mm` 可调），目标经
+Zenoh 发布（`/pico_body/{left,right}_arm_target_pose`）送入可配置
+IK，按键后 0.5s 持续映射让滤波/整形收敛到完整步长。
+
+| 按键 | 动捕系方向 | 按键 | 动捕系方向 |
+| --- | --- | --- | --- |
+| 上 ↑ | +z | 下 ↓ | -z |
+| 左 ← | +x | 右 → | -x |
+| `1` | +y | `0` | -y |
+| `s` | 开始（armed 时） | `s` | 结束回 Home（步进中） |
+| `q` / Ctrl+C | 退出（步进中先回 Home 再退出） | | |
+
+**默认只控制右臂**（左臂目标不发布，IK 对无目标的臂保持当前关节角）；
+`--side both` 恢复双臂同步。可作真机桥主机输入（身份
+`mocap_keyboard_step` 不在真机桥冲突名单内）。
+
+```bash
+pixi run sim_mocap_step                     # MuJoCo 预览 + 键盘步进
+pixi run sim_mocap_step -- --topics-only    # 无界面，仅右臂
+pixi run sim_mocap_step -- --side both      # 双臂同步
+pixi run sim_mocap_step -- --step-mm 5      # 每次 5mm
+```
+
+方向键在 raw 模式是 `\x1b[A/B/C/D` 转义序列，由 `ArrowKeyParser`
+解析；步进节点前台运行，stdin 直连终端（raw 模式读键），不经过
+launch/FIFO 转发。
+
+**按键驱动真机**（逐点验收/标定）：先运行键盘步进仿真主机，再起
+真机桥（安全桥 → Marvin 低层关节控制）：
+
+```bash
+# 终端 1：键盘步进 + IK 主机链路
+pixi run sim_mocap_step
+
+# 终端 2：真机桥（确认硬件安全后）
+pixi run real_mocap_step -- --confirm-real
+```
+
+真机桥复用 IK 解算的关节命令（与 PICO 手柄链路同协议），
+`host_readiness` 显式接受 `mocap_keyboard_step` 身份；桥只在双臂
+命令就绪且位于 Home 时进入 armed_idle，随后按 `s` 开始、方向键
+步进（默认仅右臂 10mm/键）、再按 `s` 回 Home、`q` 退出。
+
+## Regrind wuji2 关节轨迹回放（sim_regrind_h5）
+
+Regrind 文件不是 `mocap-acquisition v4` Manus wrist 数据，不能送入
+`sim_mocap_h5` 的机械臂 IK 链。它直接提供桌面中心 z-up 世界系中的
+wuji2 `r_base` 自由根、20 个关节和物体位姿；四元数为 WXYZ。回放器
+只读取 `regrind_retargeting_*`，明确不读取同文件中穿透率高的
+`wuji_retargeting_*` 对照结果。
+
+```bash
+# 手 + 锤子 + 桌面的独立 MuJoCo 回放
+pixi run sim_regrind_h5 -- /path/to/take_regrind_50hz.h5 --speed 1
+
+# 循环回放，或启动后停在 frame0
+pixi run sim_regrind_h5 -- /path/to/take_regrind_50hz.h5 --loop
+pixi run sim_regrind_h5 -- /path/to/take_regrind_50hz.h5 --paused
+
+# 校验 H5、同目录 right.urdf/锤子资产、关节限位和首末帧
+pixi run sim_regrind_h5 -- /path/to/take_regrind_50hz.h5 --validate-only
+```
+
+窗口内 `Space` 暂停/继续，`R` 从 frame0 重播。该路径不启动 Motive、
+Zenoh 或机械臂 IK，也不会连接 Marvin 控制器。为兼容误用，旧的
+`sim_mocap_h5` 入口检测到 `regrind_retargeting_joints` 时也会自动切换
+到此独立回放路径。
+
+## 可选 HDF5 右腕轨迹回放（sim_mocap_h5 / real_mocap_h5）
+
+每次运行通过位置参数选择一个 `mocap-acquisition` v4.0 HDF5。H5
+`hands/right/wrist_*` 与 RL 的末端都是人手 wrist；机器人端对应
+wuji2 **`r_wrist`**（URDF 手腕坐标系）。实时 `right_arm` 是 8mm
+marker 刚体中心的测量坐标系，不是 wrist。按 `s` 时读取 raw rigid，
+经 GL/GO 变到 marker_mocap，再由固定外参推导当前 `r_wrist` 位姿；
+随后 Enter 保压让机器人 wrist 接近 H5 **绝对** wrist frame0，稳定后
+`r` 装载后续轨迹。wrist→Tianji TCP 固定外参转换后送入 IK。节点只
+发布右臂目标，左臂保持 Home；真机模式由 `real_mocap_h5` 复用主机链。
+
+```bash
+# 选择本次要执行的轨迹
+pixi run sim_mocap_h5 -- /path/to/take.h5
+
+# 显示 frame0 的 21 个手关键点和 20 条骨段；自动使用 wuji2 组合 URDF
+pixi run sim_mocap_h5 -- /path/to/take.h5 --frame0-skeleton
+
+# 换另一个文件；无需修改配置或源码
+pixi run sim_mocap_h5 -- /path/to/another_take.h5
+
+# 只校验文件结构、有效帧和时长；不启动 IK，不运动
+pixi run sim_mocap_h5 -- /path/to/take.h5 --validate-only
+
+# 可选：无 MuJoCo、回放倍速、Motive +Y 朝向修正
+pixi run sim_mocap_h5 -- /path/to/take.h5 --topics-only
+pixi run sim_mocap_h5 -- /path/to/take.h5 --speed 0.5 --yaw-deg 10
+
+# 刚体名称不是 right_arm 时可显式指定名称或数字 id
+pixi run sim_mocap_h5 -- /path/to/take.h5 --right-rigid-id tianji_tcp
+```
+
+`--frame0-skeleton` 读取 `hands/right/keypoints_world`（MediaPipe 21
+点顺序），在 MuJoCo 里显示球形关键点与连线：白色腕点、黄色拇指、
+绿色食指、蓝色中指、紫色无名指、橙色小指。节点在 Home 且 marker
+有效时、按 `s` 前持续预览“此刻按 s”会到达的 frame0 目标；按 `s`
+采样实时 marker 后冻结骨架。随后按住 `Enter`，即可把实际 wuji2 手
+移动到固定骨架处，直接检查指尖、手心和每根手指的方向是否一致。
+骨架不经过 `right_chest` 重建，也不使用 marker/wrist 局部姿态定义
+世界轴。旋转固定为
+`R_sim_from_motive = R_sim_from_robot_world * mocap_to_robot`；
+`right_arm → marker → r_wrist` 只计算 Motive Home 原点位置，再用
+`t_sim_from_motive = p_sim_wrist_home -
+R_sim_from_motive * p_motive_wrist_home` 求平移。关键点只应用这一组
+固定世界轴 + Home 原点变换，因此骨段长度和 H5 绝对姿态保持不变。
+
+### 机械臂 Home 场景纯 H5 数据回放（sim_mocap_h5_replay）
+
+机械臂加载 wuji2 组合 URDF 并保持配置 Home 关节角，不启动 IK、不
+发布控制目标。运行时只订阅一次 Motive `right_arm` 定位动捕原点；
+世界旋转始终使用固定 `mocap_to_robot`，然后播放 H5 右手 21 点轨迹：
+
+```bash
+pixi run sim_mocap_h5_replay -- /path/to/take.h5 --loop
+```
+
+`Space` 暂停/继续，`R` 从首帧重播。无实时 Motive 时可传固定标定：
+
+```bash
+pixi run sim_mocap_h5_replay -- /path/to/take.h5 \
+  --right-arm-pose=x,y,z,qx,qy,qz,qw
+```
+
+
+首次真机测试必须先在仿真中完整确认轨迹、方向和工作空间，再用两个
+终端启动。以下示例中的刚体 ID 必须与 `mocap/hands/frame` 实际一致：
+
+```bash
+# 终端 1：低速 H5 + IK 主机；启动后先不要按 s / Enter
+pixi run sim_mocap_h5 -- \
+  /home/current/data/20260819/20260819_151737_102784_take003.h5 \
+  --topics-only --speed 0.1 --yaw-deg 0 --right-rigid-id 3
+
+# 终端 2：确认实体急停、48V、清场和刚体 ID 后启动真机桥
+pixi run real_mocap_h5 -- --confirm-real
+```
+
+真机桥连接时先以受限速度把双臂送到安全 Home。等待终端 2 明确提示
+“真机链路已就绪”（内部 `phase=armed_idle`）后，回终端 1 按 `s`：
+节点读取本次随机摆放下的 raw right_arm，应用 GL/GO 得到
+marker_mocap，推导当前 wuji2 `r_wrist` Motive 位姿。随后 Enter
+保压让机器人 wrist 移动到 H5 录制时的**绝对 wrist frame0**；稳定到达
+后完全松开 Enter，按 `r` 装载后续轨迹，再保压推进。入口只接受
+`speed <= 0.25`、`yaw-deg = 0`、IK 位于 Home、marker 新鲜有效。
+
+安全操作顺序：
+
+1. 确认 Windows `natnet-zenoh` 正在发布有效 `right_arm`，并等待
+   IK 确认 Home。
+2. 保持 Enter 松开，按 `s`：读取本次 raw rigid，经 GL/GO 与安装外参
+   推导当前 `r_wrist`；进入 `approaching`。
+3. **按住 `Enter`**，使机器人 wrist 接近 H5 绝对 frame0；松开保持。
+4. 提示稳定到达 frame0 后完全松开 Enter，按 `r` 装载后续轨迹。
+5. 再按住 Enter 从 frame0 推进后续 wrist 轨迹；松开保持。
+6. 活动阶段按 `s` 取消并回 Home；按 `q` 回 Home 后退出。
+
+位姿链：
+
+```text
+T_M_marker_home = T_M_right_arm_raw · T_raw_marker_mocap
+T_M_wrist_home  = T_M_marker_home · T_marker_wrist
+T_M_tcp_home    = T_M_wrist_home · inverse(T_tcp_wrist)
+T_M_wrist_des(t)= T_M_h5_wrist(t)                 # 绝对 Motive wrist
+T_M_tcp_des(t)  = T_M_wrist_des(t) · inverse(T_tcp_wrist)
+```
+
+Motive 世界系（+x 左、+y 上、+z 前）到天机世界系（+X 前、+Y 左、
++Z 上）使用 `mocap_to_robot=[[0,0,1],[1,0,0],[0,1,0]]`。raw
+`right_arm` rigid 还需先应用 Motive Visuals 外参：GL
+`[-3,-4,0]mm`、GO Pitch/Yaw/Roll `[2,-90,0]deg`，得到 URDF
+`marker_mocap` frame（`T_world_marker=T_world_rigid·T_rigid_marker`）。
+rigid→marker 四元数为 `[0.01234071,-0.70699909,0.01234071,0.70699909]`。
+marker→r_wrist 为 `[0.0325,0.00025,0.003]m` /
+`[0,-0.70710678,0,0.70710678]`；TCP→r_wrist 为
+`[0.00025,0.003,0.0365]m` / `[0.70710678,0.70710678,0,0]`。
+机械安装轴关系为 marker `+x→mount +z`、`+y→mount -y`、`+z→mount +x`；
+该关系为右手旋转（det=+1），且手指位于 marker +x 一侧。
+H5 Manus wrist 到 wuji2 `r_wrist` 还需后乘固定解剖轴旋转
+`[0.70710678,0,-0.70710678,0]`：Manus `+x` 指尖、`+y` 手背、
+`+z` 小拇指侧，对应 wuji2 `-z` 指尖、`-y` 手背、`+x` 拇指侧。
+marker 局部外参与世界轴转换是两件事，不得混用。
+首次修改运行文件后需重新执行 `pixi run -e ik-build deploy-ik`。
+
+**Motive 刚体定零 + 键盘步进/正面圆轨迹（sim_mocap_live / real_mocap_live）**：
+订阅 `mocap/hands/frame`，默认读取贴在机器人右臂末端的 Motive
+`right_arm` 刚体。按 `s` 时只冻结其当前位姿作为控制零点；之后不再
+把刚体实测随动送入目标，避免“机器人运动 → 刚体运动 → 目标再次增加”
+的正反馈。虚拟目标由键盘在冻结参考上累计位置，四元数保持不变：
+
+| 按键 | 动捕系增量/动作 | 按键 | 动捕系增量/动作 |
+| --- | --- | --- | --- |
+| `↑` / `↓` | `+z` / `-z` | `←` / `→` | `+x` / `-x` |
+| `1` / `0` | `+y` / `-y` | `s` | armed 时定零开始 / 控制中回 Home |
+| `c` | 零位装载右臂正面圆 | `Enter` | 按住推进 / 松开暂停 / 再按继续 |
+
+一次按 `s` 开始后，方向键/`1`/`0` 可无限次累计，每次都在当前键盘
+目标上增加 10mm；节点不会自动停止。第二次按 `s` 才请求回 Home；
+收到 IK 的 `return_complete=true` 且 `at_home=true` 后重新进入 armed，
+进程不退出，可再次按 `s` 开始新一轮。只有 `q` / Ctrl+C 才最终退出。
+回 Home 过程中按 `q` 会等待安全 Home 完成，不会立即断开。
+
+保持键盘累计位移为零时按 `c` 只会**装载**轨迹，不会自行运动。
+随后必须持续按住物理 `Enter`（主键盘 `Return` 或数字键盘
+`KP_Enter`）；只有按住期间轨迹时钟才推进：
+
+1. 按住 `Enter`：从冻结的 Motive 参考点沿 `+y` 上移 200mm；
+2. 继续按住：以 `(x=0, y=+100mm)` 为圆心、100mm 为半径，在
+   Motive `x-y` 平面从 `+z` 一侧看顺时针画圆；
+3. 前半圈回到参考零点，不停顿地继续后半圈；
+4. 整圈结束后保持在参考点上方 200mm，按 `s` 才回 Home。
+
+任意时刻松开 `Enter`，轨迹在下一个 60Hz 控制周期内暂停并持续发布
+当前位置；暂停时间不计入轨迹进度。再次按住会从同一位置继续，没有
+重置或目标跳变，可以反复“按住→暂停→继续→暂停”。这不是依赖终端
+按键自动重复的超时估计：节点通过 X11 `XQueryKeymap` 直接读取物理
+按下/松开状态。若 `DISPLAY`/libX11 不可用，`c` 会明确拒绝启动，
+不会降级成无法可靠识别松手的模式。
+
+直线和圆相位使用 minimum-jerk 曲线，段首尾速度、加速度均为零；
+默认峰值笛卡尔速度 50mm/s，需要累计按住约 31.1s（暂停会增加实际
+用时）。轨迹只允许默认 `--side right`；若已手动步进偏离零点或使用
+`--side both`，`c` 会明确拒绝，不会跳变到轨迹起点。参数位于
+`controller_only_ik.yaml` 的 `mocap_live.circle_radius_mm` 和
+`mocap_live.circle_maximum_speed_mm_s`。
+
+```bash
+pixi run sim_mocap_live                         # 默认仅右臂、10mm/键
+pixi run sim_mocap_live -- --circle-speed-mm-s 30 # 圆峰值速度改为 30mm/s
+pixi run sim_mocap_live -- --step-mm 5
+pixi run sim_mocap_live -- --topics-only
+pixi run sim_mocap_live -- --right-rigid-id right_arm
+
+# 真机（先起上面的 sim 主机，再确认硬件安全后）
+pixi run real_mocap_live -- --confirm-real
+```
+
+### 正面圆轨迹录制与坐标对齐对比
+
+录制器同时订阅三路数据：
+
+- `pico_body/right_arm_target_pose`：`right_chest` 系下的控制目标；
+- `pico_body_sim/right_arm/solved_pose`：IK 解算的右臂末端位姿；
+- `mocap/hands/frame`：Motive 系下 `right_arm` 刚体实测位姿。
+
+三路原始坐标和接收时间分别保留。对比时各自减去装载圆轨迹前的零点，
+再使用控制链同一组
+`world_to_chest(right) @ mocap_to_robot` 矩阵（Motive 系与 PICO 系
+水平轴相差 180°，动捕链路专用同向映射）把 Motive 相对位移映射
+到 `right_chest`；不会直接叠加两个原生坐标系。按接收时间线性对齐，
+同时给出直接误差和自动估计时间滞后后的误差。
+
+```bash
+# Terminal 1：先启动仿真主机；真机对比时再另起 real_mocap_live
+pixi run sim_mocap_live -- --circle-speed-mm-s 30
+
+# Terminal 2：必须在 Terminal 1 按 s、c 之前启动
+pixi run mocap_circle_compare
+
+# 然后回 Terminal 1：s 定零 → c 装载 → 持续按住 Enter；
+# 整圆结束后 Terminal 2 自动保存并退出。
+```
+
+默认输出到 `log/mocap_circle_compare/YYYYmmdd_HHMMSS/`：
+
+- `raw_target_right_chest.csv`、`raw_solved_right_chest.csv`、
+  `raw_motive_right_arm.csv`：三路原始样本；
+- `comparison_right_chest.csv`：同一时间轴、统一 `right_chest` 相对位移
+  和三维误差；
+- `summary.json`：样本数、坐标矩阵、直接 RMSE/P95/最大误差、估计滞后
+  和滞后补偿误差；
+- `trajectory_comparison.svg`：控制目标、IK 解算和 Motive 实测的轨迹
+  平面叠图及 X/Y/Z 时序图；
+- `raw_status.jsonl`：圆速度、进度、Enter 保压状态等原始 status。
+
+可用 `--output-dir PATH`、`--right-rigid-id NAME_OR_ID`、
+`--maximum-lag-seconds N` 调整录制。`--circle-speed-mm-s` 属于
+`sim_mocap_live` 主机参数；真机桥复用该主机的 IK 命令，因此真机
+对比时也由 Terminal 1 的该参数决定画圆速度。
+
+按 `s` 定零时，所选刚体必须存在、`tracking_valid=true` 且最新帧不超过
+0.5s；默认只要求 `right_arm`。终端每 0.5s 显示所选 Motive 刚体的
+`frame`、跟踪状态、帧龄、位置 `p[m]`、四元数 `q[xyzw]`、累计目标
+位移 `key_delta[mm]` 和阶段；同一数据写入 status 的 `motive_pose`。
+圆轨迹进度和保压状态写入 `circle_trajectory`，包括
+`elapsed_hold_s`、`deadman_available`、`deadman_pressed` 和
+`deadman_error`。
+刚体后续随机器人运动只用于显示和跟踪健康检查，不反馈进目标。status
+标识 `control_mode=motive_reference_keyboard_step`，真机桥拒绝旧的
+连续刚体反馈模式。默认仅发布右臂目标；`--side both` 才要求左右刚体
+同时有效。
 
 ## 控制原理
 
@@ -583,10 +908,9 @@ PICO 手柄决定末端相对位置和姿态。SMPL 不直接决定末端位置�
 实时躯干坐标系和肩—肘—腕臂角参考，帮助选择更符合人体肘平面的冗余
 关节解。
 
-RViz 显示完整 Marvin URDF/mesh、SMPL 骨架、目标末端、当前 FK 和
-肘平面参考。MuJoCo 只镜像
-`/pico_body_sim/model_joint_states`，当前不执行动力学控制，也不会向
-真机回写。
+MuJoCo 预览加载完整 Marvin URDF/mesh，镜像
+`pico_body_sim/model_joint_states`（key 去掉前导斜杠）的 14 关节角；
+当前不执行动力学控制，也不会向真机回写。
 
 ## 真机安全检查表
 
@@ -611,12 +935,12 @@ RViz 显示完整 Marvin URDF/mesh、SMPL 骨架、目标末端、当前 FK 和
 
 ## 常见问题
 
-### `pixi run doctor` 报 ROS/Pinocchio/ABI 失败
+### `pixi run doctor` 报 Zenoh/Pinocchio/ABI 失败
 
 确认系统为 Ubuntu 22.04 x86_64，并从完整解压目录运行，不要只复制
 `pixi.toml` 或 `scripts/`。若压缩包校验失败，应重新复制压缩包。
 
-### RViz 或 MuJoCo 无法打开
+### MuJoCo 无法打开
 
 本地图形桌面应执行：
 
@@ -634,9 +958,9 @@ pixi run sim -- --topics-only
 远程启动 GUI 需要正确配置 X11/Wayland 转发；`--topics-only` 本身不需要
 图形环境。
 
-### RViz 打开但没有机械臂
+### MuJoCo 打开但没有机械臂
 
-先看启动终端是否有 `robot_state_publisher` 或 mesh 加载错误，再运行：
+先看启动终端是否有 URDF/mesh 加载错误，再运行：
 
 ```bash
 pixi run doctor
@@ -652,7 +976,7 @@ pixi run doctor
 - 仿真尚未到安全初始位；
 - A 键一直处于按下状态，没有形成“松开后单击”的上升沿；
 - 真机尚未进入 `phase=armed_idle`；
-- 运行了两套控制节点，导致话题或 SDK 会话冲突。
+- 运行了两套控制节点，导致数据链路或 SDK 会话冲突。
 
 先松开 A，确认输入和状态正常，再单击一次。
 
@@ -683,6 +1007,6 @@ sim` 终端及其他 Marvin SDK 程序。正常组合是一套 `sim` 主机链�
 
 ## 文件校验与来源
 
-厂商二进制校验值保存在 `VENDOR_SHA256SUMS`，随包 ROS 运行时树校验值
+厂商二进制校验值保存在 `VENDOR_SHA256SUMS`，随包运行时树校验值
 保存在 `RUNTIME_TREE_SHA256`。厂商运行文件的来源与最小白名单说明见
 `VENDOR_RUNTIME.md`。

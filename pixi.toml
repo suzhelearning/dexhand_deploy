@@ -16,11 +16,18 @@ lark = ">=1.1,<2"
 netifaces = ">=0.11,<1"
 h5py = ">=3.10,<4"
 
+[pypi-dependencies]
+# zenoh-python：PyPI 包名 eclipse-zenoh，import 名 zenoh
+eclipse-zenoh = ">=1.10,<2"
+
 [tasks]
 doctor = "bash scripts/doctor.sh"
 test = { cmd = "bash scripts/test.sh", depends-on = ["doctor"] }
 real = { cmd = "bash scripts/run_real.sh", depends-on = ["doctor"] }
 real_controller_only = { cmd = "bash scripts/run_controller_only_real.sh", depends-on = ["doctor"] }
+real_mocap_step = { cmd = "bash scripts/run_mocap_step_real.sh", depends-on = ["doctor"] }
+real_mocap_live = { cmd = "bash scripts/run_mocap_live_real.sh", depends-on = ["doctor"] }
+real_mocap_h5 = { cmd = "bash scripts/run_mocap_h5_real.sh", depends-on = ["doctor"], description = "复用低速 H5+IK 主机链路，经安全桥驱动 Marvin 真机（必须 --confirm-real）" }
 status = { cmd = "bash scripts/status.sh", depends-on = ["doctor"] }
 pico-probe = "bash scripts/probe_pico.sh"
 pico-adb = { cmd = "bash scripts/adb_reverse.sh", description = "PICO 经 adb reverse 访问本机 XRoboToolkit 服务（60061/63901）" }
@@ -29,42 +36,30 @@ controller-only-joints = "bash scripts/watch_controller_only_joints.sh"
 controller-only-trace = "bash scripts/run_controller_only_trace.sh"
 controller-only-real-diagnostic = "bash scripts/run_controller_only_real_diagnostic.sh"
 replay-controller-only = { cmd = "bash scripts/run_controller_only_replay.sh", depends-on = ["doctor"] }
-sim_mocap = { cmd = "bash scripts/run_mocap_sim.sh --mujoco-only", description = "mocap HDF5 手腕轨迹回放为轨迹跟踪仿真（MuJoCo）" }
-mocap-step-h5 = { cmd = "bash scripts/run_mocap_step_h5.sh", description = "生成 mocap 合成台阶轨迹 HDF5（轨迹跟踪 1:1 验收）" }
-sim_mocap_step = { cmd = "bash scripts/run_mocap_step.sh --mujoco-only", description = "mocap 键盘步进控制（动捕系 10mm/键，s 启停）" }
 sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --mujoco-only", depends-on = ["doctor"] }
+sim_mocap_step = { cmd = "bash scripts/run_mocap_step.sh --mujoco-only", description = "mocap 键盘步进控制（动捕系 10mm/键，s 启停，Zenoh）" }
+sim_mocap_live = { cmd = "bash scripts/run_mocap_live.sh --mujoco-only", description = "Motive right_arm 定零 + 连续键盘位置步进 + 实时位姿显示（默认右臂 10mm/键，Zenoh）" }
+sim_mocap_h5 = { cmd = "bash scripts/run_mocap_h5_replay.sh --mujoco-only", description = "从 Motive right_arm 实测 Home 移动到 HDF5 Manus 右腕绝对轨迹的 Enter 保压回放（右臂，Zenoh）" }
+sim_regrind_h5 = { cmd = "bash scripts/run_regrind_h5_replay.sh", description = "独立回放 Regrind wuji2 自由根、20 关节和物体轨迹（桌面中心 z-up，MuJoCo）" }
+sim_mocap_h5_replay = { cmd = "bash scripts/run_mocap_h5_wrist_replay.sh", description = "机械臂+wuji2 H5 数据回放（Home 静止；right_arm 仅定位动捕原点；无 IK）" }
+mocap_circle_compare = { cmd = "bash scripts/run_mocap_circle_compare.sh", description = "同步录制右臂目标/IK 与 Motive right_arm 轨迹并生成坐标对齐对比图" }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
 
 # C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。
-# ROS Humble 开发包来自 pixi（robostack-staging），编译器使用
-# Ubuntu 24.04 系统 GCC 13；脚本会在编译前严格检查它们与
+# 编译器使用 Ubuntu 24.04 系统 GCC 13；脚本会在编译前严格检查它们与
 # runtime 的 ABI 版本。
 [feature.ik-build.dependencies]
 python = "3.12.*"
 numpy = ">=2,<3"
 packaging = ">=24,<26"
-catkin_pkg = ">=1,<2"
-empy = "3.3.*"
-setuptools = "<80"
 pyyaml = ">=6,<7"
 cmake = ">=3.22"
-colcon-common-extensions = "*"
 eigen = "*"
-yaml = "*"
-ros-humble-ament-cmake = "*"
-ros-humble-ament-cmake-python = "*"
-ros-humble-ament-index-cpp = "*"
-ros-humble-geometry-msgs = "*"
-ros-humble-rclcpp = "*"
-ros-humble-sensor-msgs = "*"
-ros-humble-std-msgs = "*"
-ros-humble-tf2-ros = "*"
-urdfdom = "*"
 urdfdom_headers = "*"
-ros-humble-visualization-msgs = "*"
 
 [feature.ik-build.pypi-dependencies]
 pin = "==4.0.0"
+eclipse-zenoh = ">=1.10,<2"
 
 [feature.ik-build.tasks]
 check-ik-build-env = "bash scripts/check_ik_build_env.sh"

@@ -24,12 +24,9 @@ pico_controller_only_input:
     left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
     right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
 
-# mocap HDF5 轨迹回放节点。默认 1:1 目标整形（translation_gain=1.0）：
-# 命令位移 → 目标位移严格 1:1，用于轨迹跟踪验收与标定
-# （如 +x 移动 50mm，目标即移动 50mm）。需要复现在线 PICO 行为时，
-# 把 translation_gain 改回 [0.90, 0.90, 0.90]（在线链路的安全缩放
-# 刻意保留 0.90，不改动）。
-mocap_h5_replay:
+# mocap 键盘步进节点：目标整形参数 1:1（translation_gain=1.0），
+# 按键位移 → 目标位移严格 1:1，用于逐点验收/标定。
+mocap_keyboard_step:
   ros__parameters:
     min_cutoff: 1.2
     beta: 0.45
@@ -44,9 +41,10 @@ mocap_h5_replay:
     left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
     right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
 
-# mocap 键盘步进节点：目标整形参数与 mocap_h5_replay 保持一致
-# （1:1 验收/标定模式），修改时同步两处。
-mocap_keyboard_step:
+# Manus HDF5 wrist 绝对轨迹回放。按 s 时由 Motive right_arm marker
+# 固定外参推导当前 wuji2 r_wrist Home；Enter 保压接近 H5 绝对
+# frame0，稳定后 r 装载后续轨迹；wrist→TCP 外参转换后只发布右臂目标。
+mocap_h5_replay:
   ros__parameters:
     min_cutoff: 1.2
     beta: 0.45
@@ -58,6 +56,47 @@ mocap_keyboard_step:
     maximum_angular_speed_rad_s: 1.55
     maximum_linear_acceleration_m_s2: 3.5
     maximum_angular_acceleration_rad_s2: 9.0
+    # Motive raw right_arm rigid frame -> marker URDF marker_mocap frame。
+    # Visuals: GL [-3,-4,0]mm；GO Pitch/Yaw/Roll [2,-90,0]deg。
+    right_rigid_to_marker_mocap_translation_m: [-0.003, -0.004, 0.0]
+    right_rigid_to_marker_mocap_quaternion_xyzw: [0.0123407149398269, -0.7069990853988243, 0.0123407149398269, 0.7069990853988243]
+    # right_arm marker 中心(G) -> wuji2 r_wrist(B)。机械安装轴关系：
+    # marker +x→mount +z、+y→mount -y、+z→mount +x。
+    right_marker_to_wrist_translation_m: [0.0325, 0.00025, 0.003]
+    right_marker_to_wrist_quaternion_xyzw: [0.0, -0.7071067811865476, 0.0, 0.7071067811865476]
+    # Tianji TCP(T) -> wuji2 r_wrist(B)，含 8mm marker 刚体。
+    right_tcp_to_wrist_translation_m: [0.00025, 0.003, 0.0365]
+    right_tcp_to_wrist_quaternion_xyzw: [0.7071067811865476, 0.7071067811865476, 0.0, 0.0]
+    # H5 Manus wrist(H) -> wuji2 r_wrist(B)：两者原点都是人手 wrist。
+    # H +x 指尖、+y 手背、+z 小拇指侧；B -z 指尖、-y 手背、+x 拇指侧。
+    right_h5_wrist_to_wuji2_wrist_translation_m: [0.0, 0.0, 0.0]
+    right_h5_wrist_to_wuji2_wrist_quaternion_xyzw: [0.7071067811865476, 0.0, -0.7071067811865476, 0.0]
+    approach_position_tolerance_m: 0.002
+    approach_orientation_tolerance_deg: 1.0
+    approach_solved_position_tolerance_m: 0.005
+    approach_solved_orientation_tolerance_deg: 2.0
+    approach_stable_seconds: 0.25
+    left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
+    right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
+
+# mocap 动捕实时位姿驱动节点：目标整形参数 1:1（translation_gain=1.0），
+# 动捕位姿增量 → 目标位移严格 1:1，用于真机逐点验收/标定。
+mocap_live:
+  ros__parameters:
+    min_cutoff: 1.2
+    beta: 0.45
+    translation_gain: [1.0, 1.0, 1.0]
+    rotation_gain: 1.0
+    workspace_relative_radii_m: [0.42, 0.38, 0.38]
+    workspace_soft_zone_ratio: 0.90
+    maximum_linear_speed_m_s: 0.36
+    maximum_angular_speed_rad_s: 1.55
+    maximum_linear_acceleration_m_s2: 3.5
+    maximum_angular_acceleration_rad_s2: 9.0
+    # c 键轨迹：Motive x-y 正面圆；上移 2r，半圈经过参考零点。
+    # minimum-jerk 保证段首尾速度/加速度为零，50mm/s 为峰值。
+    circle_radius_mm: 100.0
+    circle_maximum_speed_mm_s: 50.0
     left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
     right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
 

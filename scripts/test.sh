@@ -7,12 +7,16 @@ source "${SCRIPT_DIR}/common.sh"
 
 acquire_teleop_guard test
 preview_log=""
+input_log=""
 cleanup_preview() {
   local cleanup_failed=0
   trap - EXIT INT TERM
   teleop_cleanup_and_release || cleanup_failed=1
   if [[ -n "${preview_log}" ]]; then
     rm -f -- "${preview_log}"
+  fi
+  if [[ -n "${input_log}" ]]; then
+    rm -f -- "${input_log}"
   fi
   return "${cleanup_failed}"
 }
@@ -33,27 +37,44 @@ python -m unittest \
   tests.test_controller_only_trace \
   tests.test_controller_only_host_readiness \
   tests.test_controller_only_real_profile \
+  tests.test_mocap_circle_compare \
   tests.test_mocap_h5 \
-  tests.test_mocap_step_h5 \
-  tests.test_raw_keyboard \
-  tests.test_mocap_keyboard_step
+  tests.test_mocap_h5_replay \
+  tests.test_mocap_h5_wrist_replay \
+  tests.test_regrind_h5
 
-IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
-IK_NODE_BIN="${IK_NODE}.bin"
+# 优先用 staging 调试版；未构建时退回 runtime 部署的 .bin。
+IK_NODE="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_kinematic_sim"
+if [[ ! -x "${IK_NODE}" ]]; then
+  IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim.bin"
+fi
 if [[ ! -x "${IK_NODE}" ]]; then
   printf '错误：可配置 IK 节点未生成：%s\n' "${IK_NODE}" >&2
   exit 1
 fi
-CONTROLLER_ONLY_CONFIG="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/controller_only/controller_only_ik.yaml"
+RUNTIME_SHARE="${PROJECT_PREFIX}/share/pico_body_tianji"
+PREVIEW_URDF="${RUNTIME_SHARE}/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
+CONTROLLER_ONLY_CONFIG="${RUNTIME_SHARE}/config/mode/controller_only/controller_only_ik.yaml"
+PREVIEW_CONFIG="${RUNTIME_SHARE}/config/mode/full_body/preview.yaml"
 HANGING_WORKER="${BUNDLE_ROOT}/tests/fake_hanging_official_ik_worker.sh"
+
+# 官方 IK 后端配假挂死 worker：deadline/重启保护必须在 2 秒内触发。
 worker_timeout_log="$(mktemp)"
+mapfile -t ik_official_params < <(
+  yaml_params_for tianji_kinematic_sim \
+    "${CONTROLLER_ONLY_CONFIG}" \
+    "urdf_path:=${PREVIEW_URDF}" \
+    ik_backend:=tianji_official
+)
+if [[ "${#ik_official_params[@]}" -eq 0 ]]; then
+  printf '%s\n' '错误：无法从 controller_only_ik.yaml 生成 IK 参数。' >&2
+  exit 1
+fi
 set +e
 TIANJI_OFFICIAL_IK_WORKER="${HANGING_WORKER}" \
 TIANJI_OFFICIAL_IK_LIBRARY="${BUNDLE_ROOT}/runtime/tianji_official/kinematicsSDK/libKine.so" \
 TIANJI_OFFICIAL_IK_CONFIG="${BUNDLE_ROOT}/runtime/tianji_official/CommonConfig/ccs_m6_40.MvKDCfg" \
-  timeout 2 "${IK_NODE_BIN}" --ros-args \
-  --params-file "${CONTROLLER_ONLY_CONFIG}" \
-  -p ik_backend:=tianji_official \
+  timeout 2 "${IK_NODE}" "${ik_official_params[@]/#--param /}" \
   >"${worker_timeout_log}" 2>&1
 worker_timeout_exit=$?
 set -e
@@ -67,28 +88,39 @@ then
 fi
 rm -f -- "${worker_timeout_log}"
 
-PREVIEW_CONFIG="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/full_body/preview.yaml"
-IK_BACKEND="$(
-  awk '$1 == "ik_backend:" {print $2; exit}' "${PREVIEW_CONFIG}"
-)"
-case "${IK_BACKEND}" in
-  pinocchio_cpp|pinocchio_qp|tianji_official) ;;
-  *)
-    printf '错误：%s 中的 ik_backend=%s 无效\n' \
-      "${PREVIEW_CONFIG}" "${IK_BACKEND:-<missing>}" >&2
-    exit 2
-    ;;
-esac
-python - <<'PY'
-from ament_index_python.packages import get_package_share_directory
+# runtime 安装目录存在 + preview.yaml 的 ik_backend 可读且合法。
+if [[ ! -d "${RUNTIME_SHARE}" ]]; then
+  printf '错误：缺少 runtime 安装目录：%s\n' "${RUNTIME_SHARE}" >&2
+  exit 1
+fi
+python - "${PREVIEW_CONFIG}" <<'PY'
+import sys
 
-share = get_package_share_directory("pico_body_tianji")
-assert "/runtime/pico_body_tianji/share/pico_body_tianji" in share
-print("Ament 安装索引检查通过：", share)
+import yaml
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    data = yaml.safe_load(fh) or {}
+section = data.get("tianji_kinematic_sim", data)
+if isinstance(section, dict) and "ros__parameters" in section:
+    section = section["ros__parameters"]
+backend = section.get("ik_backend", "")
+if backend not in ("pinocchio_cpp", "pinocchio_qp", "tianji_official"):
+    raise SystemExit(f"错误：{path} 中的 ik_backend={backend!r} 无效")
+print("Runtime 安装目录检查通过：", path, "ik_backend=", backend)
 PY
 
-setsid timeout 3 "${IK_NODE}" --ros-args \
-  --params-file "${PREVIEW_CONFIG}" &
+# IK 纯运动学节点直接启动（--param key:=value），3 秒超时。
+mapfile -t ik_preview_params < <(
+  yaml_params_for tianji_kinematic_sim \
+    "${PREVIEW_CONFIG}" \
+    "urdf_path:=${PREVIEW_URDF}"
+)
+if [[ "${#ik_preview_params[@]}" -eq 0 ]]; then
+  printf '%s\n' '错误：无法从 preview.yaml 生成 IK 参数。' >&2
+  exit 1
+fi
+setsid timeout 3 "${IK_NODE}" "${ik_preview_params[@]/#--param /}" &
 ik_probe_pid=$!
 register_teleop_process_group \
   "${ik_probe_pid}" portable-test-ik-probe 5
@@ -102,42 +134,100 @@ if [[ "${ik_exit}" -ne 124 && "${ik_exit}" -ne 0 ]]; then
   exit "${ik_exit}"
 fi
 
+# 仿真链路：IK（预览参数 + urdf）与 PICO 输入节点，无 RViz / robot_state_publisher。
 preview_log="$(mktemp)"
-preview_pid=""
+input_log="$(mktemp)"
+ik_preview_pid=""
+input_preview_pid=""
 
-setsid python "${ROS_ROOT}/bin/ros2" launch \
-  pico_body_tianji preview.launch.py with_rviz:=false \
+setsid "${IK_NODE}" "${ik_preview_params[@]/#--param /}" \
   >"${preview_log}" 2>&1 &
-preview_pid=$!
-register_teleop_process_group "${preview_pid}" portable-test-preview 5
+ik_preview_pid=$!
+register_teleop_process_group "${ik_preview_pid}" portable-test-ik-preview 5
+
+mapfile -t input_preview_params < <(
+  yaml_params_for pico_controller_input "${PREVIEW_CONFIG}"
+)
+if [[ "${#input_preview_params[@]}" -eq 0 ]]; then
+  printf '%s\n' '错误：无法从 preview.yaml 生成输入节点参数。' >&2
+  exit 1
+fi
+input_preview_arguments=()
+for input_param in "${input_preview_params[@]}"; do
+  input_preview_arguments+=("--param" "${input_param}")
+done
+setsid python "${BUNDLE_ROOT}/src/pico_body_tianji/scripts/pico_controller_input" \
+  "${input_preview_arguments[@]}" >"${input_log}" 2>&1 &
+input_preview_pid=$!
+register_teleop_process_group "${input_preview_pid}" portable-test-input-preview 5
+
 sleep 3
 
-if ! kill -0 "${preview_pid}" 2>/dev/null; then
+if ! kill -0 "${ik_preview_pid}" 2>/dev/null; then
   cat "${preview_log}" >&2
   printf '%s\n' \
-    '错误：RViz/MuJoCo 共用仿真话题链路提前退出。' >&2
+    '错误：IK 纯运动学仿真链路提前退出。' >&2
+  exit 1
+fi
+if ! kill -0 "${input_preview_pid}" 2>/dev/null; then
+  cat "${input_log}" >&2
+  printf '%s\n' \
+    '错误：PICO 输入节点仿真链路提前退出。' >&2
   exit 1
 fi
 if grep -Eq \
   'process has died|Failed to load entry point|Traceback \(most recent call last\)' \
-  "${preview_log}"
+  "${preview_log}" "${input_log}"
 then
-  cat "${preview_log}" >&2
+  cat "${preview_log}" "${input_log}" >&2
   printf '%s\n' \
-    '错误：RViz/MuJoCo 共用仿真话题链路中的子进程异常退出。' >&2
+    '错误：仿真链路中的节点异常退出。' >&2
   exit 1
 fi
 
-node_list="$(
-  timeout 4 python "${ROS_ROOT}/bin/ros2" node list --no-daemon
-)"
+# 断言 IK 持续发布 model_joint_states（zenoh JSON）。
+python - <<'PY'
+import json
+import sys
+import threading
+
+import zenoh
+
+received = []
+done = threading.Event()
+
+
+def handler(sample):
+    received.append(json.loads(bytes(sample.payload)))
+    done.set()
+
+
+session = zenoh.open(zenoh.Config())
+try:
+    session.declare_subscriber("pico_body_sim/model_joint_states", handler)
+    done.wait(3.0)
+finally:
+    session.close()
+if not received:
+    print("错误：未收到 model_joint_states", file=sys.stderr)
+    raise SystemExit(1)
+message = received[0]
+names = message.get("name", [])
+positions = message.get("position", [])
+if len(names) != 14 or len(positions) != 14:
+    print(f"错误：model_joint_states 字段异常：{names=} {positions=}", file=sys.stderr)
+    raise SystemExit(1)
+print("IK model_joint_states 输出正常：", names[0], positions[0])
+PY
+
+# zenoh liveliness 断言：IK 与输入节点必须在线。
+node_list="$(read_teleop_node_list)"
 for required_node in \
-  /pico_body_sim/marvin_robot_state_publisher \
   /tianji_kinematic_sim \
   /pico_controller_input
 do
   if ! grep -Fxq "${required_node}" <<<"${node_list}"; then
-    cat "${preview_log}" >&2
+    cat "${preview_log}" "${input_log}" >&2
     printf '错误：纯仿真节点未启动：%s\n' "${required_node}" >&2
     exit 1
   fi
@@ -147,4 +237,4 @@ cleanup_preview
 trap - EXIT INT TERM
 
 printf '%s\n' \
-  '便携包 ROS + 可配置 IK + 可视化话题链路验证通过；未连接实体机械臂。'
+  '便携包 Zenoh + 可配置 IK + 仿真链路验证通过；未连接实体机械臂。'

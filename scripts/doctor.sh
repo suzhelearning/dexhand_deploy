@@ -16,10 +16,12 @@ required_files=(
   "${BUNDLE_ROOT}/vendor/python/xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so"
   "${BUNDLE_ROOT}/vendor/lib/libPXREARobotSDK.so"
   "${BUNDLE_ROOT}/vendor/python/marvin_sdk/libMarvinSDK.so"
+  "${ZENOH_LIBRARY_ROOT}/libzenohc.so"
+  "${ZENOH_C_INCLUDE_ROOT}/zenoh.h"
+  "${ZENOH_CPP_INCLUDE_ROOT}/zenoh.hxx"
   "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
   "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4_mujoco.urdf"
   "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/meshes/Link_Base.STL"
-  "${BUNDLE_ROOT}/src/pico_body_tianji/rviz/preview.rviz"
   "${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim"
   "${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim.bin"
   "${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_official_ik_probe"
@@ -28,17 +30,8 @@ required_files=(
   "${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_official_ik_worker.bin"
   "${BUNDLE_ROOT}/runtime/tianji_official/kinematicsSDK/libKine.so"
   "${BUNDLE_ROOT}/runtime/tianji_official/CommonConfig/ccs_m6_40.MvKDCfg"
-  "${PROJECT_PREFIX}/share/pico_body_tianji/launch/preview.launch.py"
-  "${PROJECT_PREFIX}/share/pico_body_tianji/rviz/preview.rviz"
-  "${ROS_ROOT}/bin/ros2"
-  "${ROS_ROOT}/lib/rviz2/rviz2"
-  "${ROS_ROOT}/lib/robot_state_publisher/robot_state_publisher"
-  "${ROS_ROOT}/lib/liburdf_xml_parser.so"
-  "${QT_PLUGIN_ROOT}/platforms/libqxcb.so"
   "${ABI_LIBRARY_ROOT}/ld-linux-x86-64.so.2"
   "${PIN_LIBRARY_ROOT}/libpinocchio_default.so"
-  "${ROS_ROOT}/lib/librmw_cyclonedds_cpp.so"
-  "${ROS_ROOT}/local/lib/python3.10/dist-packages/rclpy/__init__.py"
 )
 for file in "${required_files[@]}"; do
   if [[ ! -f "${file}" ]]; then
@@ -70,7 +63,7 @@ done
     -z "${expected_runtime_hash}" ||
     "${actual_runtime_hash}" != "${expected_runtime_hash}"
   ]]; then
-    printf '错误：ROS/Pinocchio/ABI 运行时树校验失败。\n' >&2
+    printf '错误：Zenoh/Pinocchio/ABI 运行时树校验失败。\n' >&2
     exit 1
   fi
 )
@@ -79,9 +72,7 @@ for library in \
   "${BUNDLE_ROOT}/vendor/python/xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so" \
   "${BUNDLE_ROOT}/vendor/lib/libPXREARobotSDK.so" \
   "${BUNDLE_ROOT}/vendor/python/marvin_sdk/libMarvinSDK.so" \
-  "${ROS_ROOT}/lib/rviz2/rviz2" \
-  "${ROS_ROOT}/lib/robot_state_publisher/robot_state_publisher" \
-  "${ROS_ROOT}/lib/liburdf_xml_parser.so"
+  "${ZENOH_LIBRARY_ROOT}/libzenohc.so"
 do
   if ldd "${library}" | grep -q 'not found'; then
     printf '错误：动态库存在未满足依赖：%s\n' "${library}" >&2
@@ -96,23 +87,33 @@ from pathlib import Path
 
 import mujoco
 import numpy
-import rclpy
 import scipy
 import xrobotoolkit_sdk
-from geometry_msgs.msg import PoseStamped
+import zenoh
 from marvin_sdk.fx_robot import DCSS, Marvin_Robot
 from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
 from tianji_world_output.config_loader import TianjiConfig
 
-config = TianjiConfig.load()
+# 显式传入随包配置路径，避开依赖 ament 索引的自动定位。
+config = TianjiConfig.load(
+    os.path.join(
+        os.environ["PICO_BODY_TIANJI_BUNDLE_ROOT"],
+        "vendor",
+        "python",
+        "tianji_world_output",
+        "config",
+        "tianji_robot.yaml",
+    )
+)
 assert config.init_joints["left"].shape == (7,)
 assert config.init_joints["right"].shape == (7,)
 assert DCSS is not None
 assert Marvin_Robot is not None
 marvin = Marvin_Robot()
 assert not marvin._connected
-assert PoseStamped is not None
-assert rclpy is not None
+session = zenoh.open(zenoh.Config())
+assert session is not None
+session.close()
 assert Path(xrobotoolkit_sdk.__file__).is_file()
 model_path = (
     Path(os.environ["PICO_BODY_TIANJI_BUNDLE_ROOT"])
@@ -127,6 +128,7 @@ xml, assets = portable_mujoco_urdf(model_path)
 model = mujoco.MjModel.from_xml_string(xml, assets)
 assert model.nq == 14
 print("Python/厂商 SDK 导入检查通过")
+print("zenoh 本地会话检查通过")
 print("Marvin SDK", marvin.SDK_version(), "（仅加载，未连接）")
 print(
     "numpy",
@@ -139,4 +141,4 @@ print(
 PY
 
 printf '%s\n' \
-  '环境和文件校验通过。ROS/Pinocchio/RViz/MuJoCo 已就绪；未连接设备。'
+  '环境和文件校验通过。Zenoh/Pinocchio/MuJoCo 已就绪；未连接设备。'

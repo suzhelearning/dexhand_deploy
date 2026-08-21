@@ -2,12 +2,12 @@
 set -euo pipefail
 
 BUNDLE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-ROS_ROOT="${BUNDLE_ROOT}/runtime/ros/humble"
 PROJECT_PREFIX="${BUNDLE_ROOT}/runtime/pico_body_tianji"
 ABI_LIBRARY_ROOT="${BUNDLE_ROOT}/runtime/abi/lib"
 PIN_LIBRARY_ROOT="${BUNDLE_ROOT}/runtime/pin/lib"
-GUI_LIBRARY_ROOT="${BUNDLE_ROOT}/runtime/gui/lib"
-QT_PLUGIN_ROOT="${BUNDLE_ROOT}/runtime/gui/qt/plugins"
+ZENOH_LIBRARY_ROOT="${BUNDLE_ROOT}/vendor/zenoh/lib"
+ZENOH_CPP_INCLUDE_ROOT="${BUNDLE_ROOT}/vendor/zenoh-cpp/include"
+ZENOH_C_INCLUDE_ROOT="${BUNDLE_ROOT}/vendor/zenoh/include"
 _TELEOP_RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 TELEOP_RUNTIME_DIR="${PICO_TIANJI_RUNTIME_DIR:-${_TELEOP_RUNTIME_BASE}/pico-tianji-teleop-${UID}}"
 TELEOP_GUARDS_DIR="${TELEOP_RUNTIME_DIR}/guards"
@@ -315,7 +315,7 @@ find_conflicting_teleop_nodes() {
   local mode="${1:-all}"
   awk -v mode="${mode}" '
     {
-      host_node = ($0 ~ /^\/(pico_controller_input|pico_controller_only_input|tianji_kinematic_sim|pico_body_sim\/marvin_robot_state_publisher)$/)
+      host_node = ($0 ~ /^\/(pico_controller_input|pico_controller_only_input|mocap_keyboard_step|mocap_live|mocap_h5_replay|tianji_kinematic_sim)$/)
       output_node = ($0 ~ /^\/(marvin_hardware_bridge|tianji_world_output_node|tianji_arm_node)$/)
       if ((mode != "real" && host_node) || output_node) {
         if (!seen[$0]++) {
@@ -334,8 +334,30 @@ read_teleop_node_list() {
     printf '%s\n' "${PICO_TIANJI_NODE_LIST_OVERRIDE}"
     return 0
   fi
-  timeout 4 python "${ROS_ROOT}/bin/ros2" node list \
-    --no-daemon 2>/dev/null
+  # Zenoh liveliness 查询 tj/live/*，输出带前导斜杠的节点名（兼容旧检查）。
+  python - <<'PY' 2>/dev/null
+import time
+import zenoh
+
+names = set()
+session = zenoh.open(zenoh.Config())
+try:
+    # 不用 callback + “首条回复完成”事件：liveliness GET 可能返回
+    # 多个 token，收到第一条就返回会令真机链路检查随机漏节点。
+    # 分布式发现的单次完整 GET 也可能出现瞬态缺项；连续三次取并集，
+    # 对真机链路采用保守、稳定的完整视图。
+    for attempt in range(3):
+        for reply in session.liveliness().get("tj/live/*", timeout=1.0):
+            if reply.ok:
+                name = str(reply.result.key_expr).rsplit("/", 1)[-1]
+                names.add("/" + name)
+        if attempt < 2:
+            time.sleep(0.15)
+finally:
+    session.close()
+for name in sorted(names):
+    print(name)
+PY
 }
 
 assert_no_conflicting_teleop_nodes() {
@@ -347,7 +369,7 @@ assert_no_conflicting_teleop_nodes() {
   fi
   if ! node_list="$(read_teleop_node_list)"; then
     printf '%s\n' \
-      '错误：无法检查 ROS 图中的旧控制节点，拒绝启动。' >&2
+      '错误：无法检查遥操作图中的旧控制节点（zenoh liveliness），拒绝启动。' >&2
     return 1
   fi
   conflicts="$(find_conflicting_teleop_nodes "${mode}" <<<"${node_list}")"
@@ -389,8 +411,6 @@ assert_managed_teleop_guard_alive() {
     local host_command="pixi run sim"
     if [[ "${mode}" == "controller-only-simulation" ]]; then
       host_command="pixi run sim_controller_only"
-    elif [[ "${mode}" == "mocap-replay" ]]; then
-      host_command="pixi run sim_mocap -- TAKE.h5"
     fi
     printf '%s\n' \
       "拒绝连接真机：未检测到新版受管 ${mode} 主机任务。" \
@@ -439,8 +459,8 @@ assert_single_simulation_host_chain() {
 assert_single_controller_only_simulation_host_chain() {
   local node_list=""
   local controller_only_count=0
-  local mocap_host_count=0
   local smpl_count=0
+  local mocap_host_count=0
   local ik_count=0
   if [[ -v PICO_TIANJI_NODE_LIST_OVERRIDE ]]; then
     printf '%s\n' \
@@ -457,12 +477,12 @@ assert_single_controller_only_simulation_host_chain() {
       '错误：无法检查纯手柄仿真主机链路，拒绝连接真机。' >&2
     return 1
   fi
-  mocap_host_count="$(
-    awk '$0 == "/mocap_h5_replay" || $0 == "/mocap_keyboard_step" {count++} END {print count + 0}' \
-      <<<"${node_list}"
-  )"
   controller_only_count="$(
     awk '$0 == "/pico_controller_only_input" {count++} END {print count + 0}' \
+      <<<"${node_list}"
+  )"
+  mocap_host_count="$(
+    awk '$0 == "/mocap_keyboard_step" || $0 == "/mocap_live" || $0 == "/mocap_h5_replay" {count++} END {print count + 0}' \
       <<<"${node_list}"
   )"
   smpl_count="$(
@@ -474,21 +494,26 @@ assert_single_controller_only_simulation_host_chain() {
       <<<"${node_list}"
   )"
   if ((mocap_host_count >= 1)); then
-    # mocap 主机（HDF5 回放 / 键盘步进）：确定性轨迹真机验收。
-    # 运行锁为 mocap-replay，输入身份为 /mocap_h5_replay 或
-    # /mocap_keyboard_step（host_readiness 分别显式接受）。
+    # mocap 主机（键盘步进 / 动捕实时位姿 / H5 绝对轨迹）：运行锁为
+    # mocap-replay；输入身份由 host_readiness 分别执行严格契约校验。
     assert_managed_teleop_guard_alive mocap-replay
     if ((mocap_host_count != 1 || controller_only_count != 0 ||
         smpl_count != 0 || ik_count != 1)); then
       printf '%s\n' \
-        '拒绝连接真机：mocap 主机必须恰好运行一套（回放/步进）+ IK。' \
+        '拒绝连接真机：mocap 主机必须恰好运行一套（步进/实时/H5）+ IK。' \
         "  当前计数：mocap=${mocap_host_count} 纯手柄=${controller_only_count} SMPL=${smpl_count} IK=${ik_count}" \
-        '请先运行 pixi run sim_mocap / sim_mocap_step，并关闭其他仿真任务。' >&2
+        '请先运行 sim_mocap_step / sim_mocap_live / sim_mocap_h5，并关闭其他仿真任务。' >&2
       return 1
     fi
     return 0
   fi
-  assert_managed_teleop_guard_alive controller-only-simulation
+  if ((controller_only_count == 0 && smpl_count == 0)); then
+    printf '%s\n' \
+      '拒绝连接真机：未检测到仿真主机链路。' \
+      '请先运行 sim_mocap_step / sim_mocap_live / sim_mocap_h5（mocap 主机）' \
+      '或 pixi run sim_controller_only（纯手柄主机），并关闭其他仿真任务。' >&2
+    return 1
+  fi
   if ((controller_only_count != 1 || smpl_count != 0 || ik_count != 1)); then
     printf '%s\n' \
       '拒绝连接真机：主机侧必须恰好运行一套纯手柄 + IK。' \
@@ -496,35 +521,62 @@ assert_single_controller_only_simulation_host_chain() {
       '请先运行 pixi run sim_controller_only，并关闭其他仿真任务。' >&2
     return 1
   fi
+  assert_managed_teleop_guard_alive controller-only-simulation
+}
+
+yaml_params_for() {
+  # 用法：yaml_params_for <节点名> <yaml 路径> [urdf_path:=绝对路径 ...]
+  # 输出该节点段的裸 key:=value 参数（每行一个，无 --param 前缀；
+  # C++ 节点直接使用，Python 节点由调用方包装为 --param <key:=value>）。
+  local node_name="$1"
+  local yaml_path="$2"
+  shift 2
+  python - "$node_name" "$yaml_path" "$@" <<'PY' 2>/dev/null
+import json
+import sys
+
+node_name, yaml_path = sys.argv[1], sys.argv[2]
+extra = [arg for arg in sys.argv[3:] if ":=" in arg]
+
+with open(yaml_path, encoding="utf-8") as fh:
+    import yaml
+    data = yaml.safe_load(fh) or {}
+section = data.get(node_name, data)
+if isinstance(section, dict) and "ros__parameters" in section:
+    section = section["ros__parameters"]
+for key, value in (section or {}).items():
+    if isinstance(value, bool):
+        encoded = "true" if value else "false"
+    elif isinstance(value, (list, tuple)):
+        encoded = json.dumps(list(value), separators=(",", ":"))
+    else:
+        encoded = str(value)
+    print(f"{key}:={encoded}")
+for arg in extra:
+    print(arg)
+PY
 }
 
 activate_bundle_runtime() {
-  if [[ ! -f \
-    "${ROS_ROOT}/local/lib/python3.10/dist-packages/rclpy/__init__.py" ]]
-  then
-    printf '错误：缺少随包 ROS 2 运行时：%s\n' "${ROS_ROOT}" >&2
+  if [[ ! -d "${BUNDLE_ROOT}/vendor/python" ||
+        ! -d "${ZENOH_LIBRARY_ROOT}" ]]; then
+    printf '%s\n' \
+      '错误：缺少随包运行环境（vendor/python、vendor/zenoh）。' >&2
+    return 1
+  fi
+  if ! python -c 'import zenoh' 2>/dev/null; then
+    printf '%s\n' \
+      '错误：当前 Python 环境缺少 zenoh（请用 pixi run 执行）。' >&2
     return 1
   fi
 
-  ros_library_path=""
-  if [[ -d "${ROS_ROOT}/lib/x86_64-linux-gnu" ]]; then
-    ros_library_path="${ROS_ROOT}/lib/x86_64-linux-gnu"
-  fi
-  while IFS= read -r -d '' library_dir; do
-    ros_library_path+="${ros_library_path:+:}${library_dir}"
-  done < <(find "${ROS_ROOT}" -type d -name lib -print0)
-
-  export AMENT_PREFIX_PATH="${PROJECT_PREFIX}:${ROS_ROOT}${AMENT_PREFIX_PATH:+:${AMENT_PREFIX_PATH}}"
-  export RMW_IMPLEMENTATION="rmw_cyclonedds_cpp"
   export PYTHONDONTWRITEBYTECODE=1
-  export PATH="${PROJECT_PREFIX}/lib/pico_body_tianji:${ROS_ROOT}/bin:${PATH}"
-  export PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${BUNDLE_ROOT}/vendor/python:${ROS_ROOT}/local/lib/python3.10/dist-packages:${ROS_ROOT}/lib/python3.10/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
+  export PICO_BODY_TIANJI_BUNDLE_ROOT="${BUNDLE_ROOT}"
+  export PATH="${PROJECT_PREFIX}/lib/pico_body_tianji:${PATH}"
+  export PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${BUNDLE_ROOT}/vendor/python:${PROJECT_PREFIX}/lib/python3.10/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
   conda_library_path=""
   if [[ -n "${CONDA_PREFIX:-}" ]]; then
     conda_library_path="${CONDA_PREFIX}/lib:"
   fi
-  export LD_LIBRARY_PATH="${conda_library_path}${BUNDLE_ROOT}/vendor/lib:${PROJECT_PREFIX}/lib:${GUI_LIBRARY_ROOT}:${ros_library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-  export QT_PLUGIN_PATH="${QT_PLUGIN_ROOT}${QT_PLUGIN_PATH:+:${QT_PLUGIN_PATH}}"
-  export QT_QPA_PLATFORM_PLUGIN_PATH="${QT_PLUGIN_ROOT}/platforms"
-  export QT_X11_NO_MITSHM=1
+  export LD_LIBRARY_PATH="${conda_library_path}${BUNDLE_ROOT}/vendor/lib:${ZENOH_LIBRARY_ROOT}:${PROJECT_PREFIX}/lib:${PIN_LIBRARY_ROOT}:${ABI_LIBRARY_ROOT}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 }

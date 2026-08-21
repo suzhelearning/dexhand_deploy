@@ -10,9 +10,21 @@ import statistics
 import time
 from typing import Any
 
+from ..zenoh_util import (
+    LiveToken,
+    ZenohJsonSub,
+    ZenohTextSub,
+    key,
+    load_node_config,
+    open_session,
+    parse_param_override,
+)
+
 
 SIDES = ("left", "right")
 SCHEMA = "pico_body_tianji.controller_only_real_diagnostic.v1"
+# 工具参数以 CLI 为主；--config/--param 是统一覆盖通道（缺省时回落 CLI 默认）。
+DEFAULT_PARAMETERS: dict[str, Any] = {}
 INPUT_FLAGS = (
     "workspace_soft_limited",
     "linear_speed_limited",
@@ -69,8 +81,8 @@ def _ratio(count: int, total: int) -> float:
     return count / total if total > 0 else 0.0
 
 
-def _positions(message) -> list[float] | None:
-    values = [float(value) for value in message.position]
+def _positions(message: dict[str, Any]) -> list[float] | None:
+    values = [float(value) for value in message["position"]]
     if len(values) != 7 or not all(math.isfinite(value) for value in values):
         return None
     return values
@@ -79,12 +91,10 @@ def _positions(message) -> list[float] | None:
 class RealDiagnosticCollector:
     """只读采集纯手柄 IK、真机桥和 Marvin 反馈的限制状态。"""
 
-    def __init__(self, node, output: Path, sample_rate_hz: float):
-        from sensor_msgs.msg import JointState
-        from std_msgs.msg import String
-
-        self.node = node
+    def __init__(self, session, output: Path, sample_rate_hz: float):
+        self.session = session
         self.output = output
+        self.sample_rate = sample_rate_hz
         self.output.parent.mkdir(parents=True, exist_ok=True)
         self.stream = self.output.open("x", encoding="utf-8")
         self.started = time.monotonic()
@@ -160,42 +170,36 @@ class RealDiagnosticCollector:
             + "\n"
         )
 
-        node.create_subscription(
-            String, "/pico_body/status", self._on_input_status, 10
+        ZenohTextSub(session, key("/pico_body/status"), self._on_input_status)
+        ZenohTextSub(
+            session, key("/pico_body_sim/status"), self._on_ik_status
         )
-        node.create_subscription(
-            String, "/pico_body_sim/status", self._on_ik_status, 10
+        ZenohTextSub(
+            session, key("/pico_body_real/status"), self._on_real_status
         )
-        node.create_subscription(
-            String, "/pico_body_real/status", self._on_real_status, 10
-        )
-        node.create_subscription(
-            String,
-            "/pico_body/teleop_state",
+        ZenohTextSub(
+            session,
+            key("/pico_body/teleop_state"),
             self._on_teleop_state,
-            10,
         )
         for side in SIDES:
-            node.create_subscription(
-                JointState,
-                f"/pico_body_sim/{side}_arm/joint_commands",
+            ZenohJsonSub(
+                session,
+                key(f"/pico_body_sim/{side}_arm/joint_commands"),
                 lambda message, side=side: self._on_command(side, message),
-                10,
             )
-            node.create_subscription(
-                JointState,
-                f"/{side}_arm/joint_states",
+            ZenohJsonSub(
+                session,
+                key(f"/{side}_arm/joint_states"),
                 lambda message, side=side: self._on_feedback(side, message),
-                10,
             )
-        node.create_timer(1.0 / sample_rate_hz, self._sample)
 
-    def _on_teleop_state(self, message) -> None:
+    def _on_teleop_state(self, text: str) -> None:
         self.message_counts["teleop_state"] += 1
-        self.latest["teleop_state"] = message.data
+        self.latest["teleop_state"] = text
 
-    def _on_input_status(self, message) -> None:
-        payload = _json_object(message.data)
+    def _on_input_status(self, text: str) -> None:
+        payload = _json_object(text)
         if payload is None:
             return
         self.message_counts["input_status"] += 1
@@ -217,8 +221,8 @@ class RealDiagnosticCollector:
                 if value is not None:
                     target.append(value)
 
-    def _on_ik_status(self, message) -> None:
-        payload = _json_object(message.data)
+    def _on_ik_status(self, text: str) -> None:
+        payload = _json_object(text)
         if payload is None:
             return
         self.message_counts["ik_status"] += 1
@@ -259,8 +263,8 @@ class RealDiagnosticCollector:
             old = int(previous.get(key, 0))
             total[key] += value - old if value >= old else value
 
-    def _on_real_status(self, message) -> None:
-        payload = _json_object(message.data)
+    def _on_real_status(self, text: str) -> None:
+        payload = _json_object(text)
         if payload is None:
             return
         self.message_counts["real_status"] += 1
@@ -336,6 +340,25 @@ class RealDiagnosticCollector:
         }
         self.stream.write(json.dumps(record, ensure_ascii=False) + "\n")
         self.stream.flush()
+
+    def run(self, duration: float | None) -> None:
+        """主循环：sample_rate_hz 采样落盘；duration 为 None 时直到 Ctrl+C。"""
+        interval = 1.0 / self.sample_rate
+        next_sample = time.monotonic() + interval
+        deadline = None if duration is None else self.started + duration
+        while True:
+            now = time.monotonic()
+            if now >= next_sample:
+                self._sample()
+                next_sample += interval
+            if deadline is not None and now >= deadline:
+                return
+            target = (
+                next_sample
+                if deadline is None
+                else min(next_sample, deadline)
+            )
+            time.sleep(max(0.001, target - time.monotonic()))
 
     def _side_report(self, side: str) -> dict[str, Any]:
         input_total = self.input_samples[side]
@@ -622,9 +645,20 @@ def _default_output() -> Path:
     return Path("diagnostics") / f"controller_only_real_{stamp}.jsonl"
 
 
+def _unified_args_parent() -> argparse.ArgumentParser:
+    """parse_cli_args 的统一参数（--config/--param），叠加到本工具 CLI。"""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config", default="", help="节点参数 YAML 文件")
+    parser.add_argument(
+        "--param", action="append", default=[], metavar="key:=value"
+    )
+    return parser
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="运行期间只读采集纯手柄真机跟随限制并自动诊断"
+        description="运行期间只读采集纯手柄真机跟随限制并自动诊断",
+        parents=[_unified_args_parent()],
     )
     parser.add_argument(
         "--duration",
@@ -640,31 +674,39 @@ def main(argv=None) -> int:
     if args.rate <= 0.0:
         parser.error("--rate 必须为正数")
 
-    import rclpy
+    overrides = {}
+    for spec in args.param:
+        param_key, value = parse_param_override(spec)
+        overrides[param_key] = value
+    params = load_node_config(
+        args.config,
+        "controller_only_real_diagnostic",
+        DEFAULT_PARAMETERS,
+        overrides,
+    )
 
     output = (args.output or _default_output()).resolve()
-    rclpy.init()
-    node = rclpy.create_node("controller_only_real_diagnostic")
-    collector = RealDiagnosticCollector(node, output, args.rate)
-    node.get_logger().warning(
-        "只读诊断已开始：请在采集期间复现左右手同时运动、阻尼感和空间边界；"
-        "该节点不发布控制命令。"
-    )
-    deadline = (
-        None if args.duration == 0.0 else time.monotonic() + args.duration
-    )
+    session = open_session()
+    collector = None
     try:
-        while rclpy.ok() and (
-            deadline is None or time.monotonic() < deadline
-        ):
-            rclpy.spin_once(node, timeout_sec=0.2)
+        collector = RealDiagnosticCollector(
+            session,
+            output,
+            float(params.get("rate", args.rate)),
+        )
+        print(
+            "只读诊断已开始：请在采集期间复现左右手同时运动、阻尼感和空间边界；"
+            "该节点不发布控制命令。"
+        )
+        duration = None if args.duration == 0.0 else args.duration
+        with LiveToken(session, "controller_only_real_diagnostic"):
+            collector.run(duration)
     except KeyboardInterrupt:
         pass
     finally:
-        report = collector.close()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        if collector is not None:
+            report = collector.close()
+        session.close()
     _print_report(report, output)
     return 0
 

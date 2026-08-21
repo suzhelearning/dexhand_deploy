@@ -15,6 +15,11 @@ RUNTIME_PROGRAMS=(
   controller_only_trace
   controller_only_real_diagnostic
   marvin_hardware_bridge
+  mocap_keyboard_step
+  mocap_live
+  mocap_h5_replay
+  mujoco_joint_viewer.py
+  mujoco_regrind_replay.py
 )
 BACKUP_DIR="${BUNDLE_ROOT}/staging/runtime-backup"
 SDK_SOURCE_ROOT="${TIANJI_OFFICIAL_SDK_ROOT:-/home/ice/TJ_FX_ROBOT_CONTRL_SDK}"
@@ -24,6 +29,8 @@ SDK_CONFIG="${SDK_SOURCE_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
 RUNTIME_SHARE="${BUNDLE_ROOT}/runtime/pico_body_tianji/share/pico_body_tianji"
 SOURCE_CONFIG="${BUNDLE_ROOT}/src/pico_body_tianji/config"
 RUNTIME_CONFIG="${RUNTIME_SHARE}/config"
+SOURCE_ASSETS="${BUNDLE_ROOT}/src/pico_body_tianji/assets"
+RUNTIME_ASSETS="${RUNTIME_SHARE}/assets"
 STRIP_TOOL="${IK_STRIP_TOOL:-/usr/bin/strip}"
 
 for binary in "${NEW_IK}" "${NEW_PROBE}" "${NEW_WORKER}"; do
@@ -70,11 +77,7 @@ for path in \
   "${RUNTIME_BIN}/pico_link_probe" \
   "${RUNTIME_BIN}/controller_only_trace" \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so" \
-  "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg" \
-  "${RUNTIME_SHARE}/launch/controller_only_ik.launch.py" \
-  "${RUNTIME_SHARE}/launch/controller_only_sim.launch.py" \
-  "${RUNTIME_SHARE}/launch/preview.launch.py" \
-  "${RUNTIME_SHARE}/launch/real_teleop.launch.py"
+  "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
 do
   if [[ -f "${path}" ]]; then
     cp -a -- "${path}" "${BACKUP_DIR}/$(basename "${path}")"
@@ -86,12 +89,18 @@ if [[ -d "${RUNTIME_CONFIG}" ]]; then
     "${RUNTIME_CONFIG}/" \
     "${BACKUP_DIR}/config/"
 fi
+if [[ -d "${RUNTIME_ASSETS}" ]]; then
+  mkdir -p "${BACKUP_DIR}/assets"
+  rsync -a --delete \
+    "${RUNTIME_ASSETS}/" \
+    "${BACKUP_DIR}/assets/"
+fi
 
 mkdir -p \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK" \
   "${SDK_RUNTIME_ROOT}/CommonConfig" \
   "${RUNTIME_CONFIG}" \
-  "${RUNTIME_SHARE}/launch"
+  "${RUNTIME_ASSETS}"
 # 允许 TIANJI_OFFICIAL_SDK_ROOT 指向 runtime 自身（自拷贝场景，
 # 例如 SDK 源机器不可用时）；源与目标相同则跳过。
 if [[ "$(realpath "${SDK_LIBRARY}")" != "$(realpath "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so")" ]]; then
@@ -146,17 +155,15 @@ if ! diff -qr -- "${SOURCE_CONFIG}" "${RUNTIME_CONFIG}" >/dev/null; then
   printf '%s\n' '错误：src 与 runtime 的 config 目录部署后仍不一致。' >&2
   exit 1
 fi
-for launch_file in \
-  controller_only_ik.launch.py \
-  controller_only_sim.launch.py \
-  controller_only_replay.launch.py \
-  preview.launch.py \
-  real_teleop.launch.py
-do
-  install -m 0644 \
-    "${BUNDLE_ROOT}/src/pico_body_tianji/launch/${launch_file}" \
-    "${RUNTIME_SHARE}/launch/${launch_file}"
-done
+# assets 与 config 同样是运行时契约；组合 URDF/mesh 必须随部署同步，
+# 否则 --wuji2 会静默加载旧模型。
+rsync -a --delete \
+  "${SOURCE_ASSETS}/" \
+  "${RUNTIME_ASSETS}/"
+if ! diff -qr -- "${SOURCE_ASSETS}" "${RUNTIME_ASSETS}" >/dev/null; then
+  printf '%s\n' '错误：src 与 runtime 的 assets 目录部署后仍不一致。' >&2
+  exit 1
+fi
 
 runtime_hash="$(
   cd "${BUNDLE_ROOT}"
@@ -180,4 +187,5 @@ printf '%s\n' \
   "runtime ELF 已移除 DWARF 调试信息；staging 仍保留调试版" \
   "官方 probe：${RUNTIME_BIN}/tianji_official_ik_probe" \
   "官方 SDK：${SDK_RUNTIME_ROOT}" \
-  "配置已同步：${SOURCE_CONFIG} -> ${RUNTIME_CONFIG}"
+  "配置已同步：${SOURCE_CONFIG} -> ${RUNTIME_CONFIG}" \
+  "资产已同步：${SOURCE_ASSETS} -> ${RUNTIME_ASSETS}"
