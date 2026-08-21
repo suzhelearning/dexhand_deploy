@@ -171,7 +171,7 @@ def _quat_wxyz_from_z_axis(direction: np.ndarray) -> np.ndarray:
 
 
 class FrameZeroHandSkeleton:
-    """把 right_chest 的 frame0 关键点对齐到 MuJoCo Home r_wrist。"""
+    """按 Home r_wrist 标定，把 Motive frame0 关键点变换到 MuJoCo。"""
 
     def __init__(self, session, model, topic: str):
         self._pending: dict | None = None
@@ -248,11 +248,11 @@ class FrameZeroHandSkeleton:
             return False
         self._pending = None
         try:
-            points_chest = np.asarray(
-                payload["points_right_chest"], dtype=np.float64
+            points_motive = np.asarray(
+                payload["points_motive_world"], dtype=np.float64
             )
-            home_pose_chest = np.asarray(
-                payload["home_wrist_pose_right_chest"],
+            home_pose_motive = np.asarray(
+                payload["home_wuji2_wrist_pose_motive"],
                 dtype=np.float64,
             )
             edges = tuple(
@@ -263,10 +263,10 @@ class FrameZeroHandSkeleton:
             _LOG.warning("忽略无效 frame0 骨架消息：%s", exc)
             return False
         if (
-            points_chest.shape != (21, 3)
-            or home_pose_chest.shape != (7,)
-            or not np.isfinite(points_chest).all()
-            or not np.isfinite(home_pose_chest).all()
+            points_motive.shape != (21, 3)
+            or home_pose_motive.shape != (7,)
+            or not np.isfinite(points_motive).all()
+            or not np.isfinite(home_pose_motive).all()
             or edges != HAND_KEYPOINT_EDGES
         ):
             _LOG.warning("忽略形状/拓扑不匹配的 frame0 骨架消息")
@@ -276,29 +276,29 @@ class FrameZeroHandSkeleton:
         if not frozen or self._home_wrist_pose_mj is None:
             self._home_wrist_pose_mj = self._wrist_frame_mj(data)
         home_position_mj, home_rotation_mj = self._home_wrist_pose_mj
-        quaternion_chest = home_pose_chest[3:7]
-        quaternion_norm = float(np.linalg.norm(quaternion_chest))
+        quaternion_motive = home_pose_motive[3:7]
+        quaternion_norm = float(np.linalg.norm(quaternion_motive))
         if quaternion_norm < 1.0e-9:
-            _LOG.warning("忽略 Home wrist 四元数为零的 frame0 骨架消息")
+            _LOG.warning("忽略 Motive Home wrist 四元数为零的骨架消息")
             return False
-        x, y, z, w = quaternion_chest / quaternion_norm
-        home_rotation_chest = np.array(
+        x, y, z, w = quaternion_motive / quaternion_norm
+        home_rotation_motive = np.array(
             [
                 [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
                 [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
                 [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
             ]
         )
-        rotation_mj_from_chest = (
-            home_rotation_mj @ home_rotation_chest.T
+        rotation_mj_from_motive = (
+            home_rotation_mj @ home_rotation_motive.T
         )
-        translation_mj_from_chest = (
+        translation_mj_from_motive = (
             home_position_mj
-            - rotation_mj_from_chest @ home_pose_chest[:3]
+            - rotation_mj_from_motive @ home_pose_motive[:3]
         )
         points_mj = (
-            points_chest @ rotation_mj_from_chest.T
-            + translation_mj_from_chest
+            points_motive @ rotation_mj_from_motive.T
+            + translation_mj_from_motive
         )
 
         for index, geom_id in enumerate(self._point_geom_ids):

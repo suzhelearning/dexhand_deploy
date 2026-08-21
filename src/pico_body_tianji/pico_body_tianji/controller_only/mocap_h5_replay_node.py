@@ -285,42 +285,6 @@ class MocapH5ReplayNode:
             # 相差 180°，必须用独立的动捕同向映射，不能复用 pico_to_robot。
             input_to_robot=tianji_config.mocap_to_robot,
         )
-        preview_settings = TargetConditioningSettings(
-            rate_hz=rate,
-            translation_gain=params["translation_gain"],
-            rotation_gain=float(params["rotation_gain"]),
-            workspace_relative_radii_m=params[
-                "workspace_relative_radii_m"
-            ],
-            workspace_soft_zone_ratio=float(
-                params["workspace_soft_zone_ratio"]
-            ),
-            maximum_linear_speed_m_s=1.0e6,
-            maximum_angular_speed_rad_s=1.0e6,
-            maximum_linear_acceleration_m_s2=1.0e9,
-            maximum_angular_acceleration_rad_s2=1.0e9,
-        )
-        self._preview_mapper = ControllerOnlyTeleopMapper(
-            tianji_config,
-            rate=rate,
-            min_cutoff=float(params["min_cutoff"]),
-            beta=float(params["beta"]),
-            conditioning_settings=preview_settings,
-            default_zsp_directions={
-                side: params[f"{side}_default_zsp_direction"]
-                for side in ("left", "right")
-            },
-            input_to_robot=tianji_config.mocap_to_robot,
-        )
-        self._robot_home_wrist_pose_chest = compose_pose(
-            np.concatenate(
-                (
-                    np.asarray(tianji_config.init_pos["right"]),
-                    np.asarray(tianji_config.init_quat["right"]),
-                )
-            ),
-            self._tcp_to_wrist_pose,
-        )
         self._approach_position_tolerance_m = float(
             params["approach_position_tolerance_m"]
         )
@@ -574,43 +538,12 @@ class MocapH5ReplayNode:
     def _frame_zero_skeleton_payload(
         self, wrist_home_pose: np.ndarray
     ) -> dict[str, Any]:
-        virtual_tcp_home_pose = compose_pose(
-            wrist_home_pose, self._wrist_to_tcp_pose
-        )
-        target_wrist_input = compose_pose(
+        target_wrist_motive = compose_pose(
             self._frame_zero_pose,
             self._h5_wrist_to_wuji2_wrist_pose,
         )
-        target_tcp_input = compose_pose(
-            target_wrist_input, self._wrist_to_tcp_pose
-        )
-        self._preview_mapper.initialize(
-            self._frame(virtual_tcp_home_pose)
-        )
-        target_tcp_chest = self._preview_mapper.map_frame(
-            self._frame(target_tcp_input)
-        ).right_pose
-        target_wrist_chest = compose_pose(
-            target_tcp_chest, self._tcp_to_wrist_pose
-        )
-
-        input_wrist_rotation = Rotation.from_quat(
-            target_wrist_input[3:7]
-        ).as_matrix()
-        local_keypoints = (
-            self._frame_zero_keypoints - target_wrist_input[:3]
-        ) @ input_wrist_rotation
-        target_wrist_rotation = Rotation.from_quat(
-            target_wrist_chest[3:7]
-        ).as_matrix()
-        points_chest = (
-            target_wrist_chest[:3]
-            + local_keypoints @ target_wrist_rotation.T
-        )
-        if not np.isfinite(points_chest).all():
-            raise ValueError("frame0 目标关键点含 NaN/Inf")
         return {
-            "frame_id": "right_chest",
+            "frame_id": "motive_world",
             "side": "right",
             "phase": self._phase,
             "frozen": self._phase != "armed",
@@ -621,12 +554,14 @@ class MocapH5ReplayNode:
                 "middle9-12, ring13-16, pinky17-20"
             ),
             "edges": [list(edge) for edge in HAND_KEYPOINT_EDGES],
-            "points_right_chest": points_chest.tolist(),
-            "home_wrist_pose_right_chest": (
-                self._robot_home_wrist_pose_chest.tolist()
+            "points_motive_world": self._frame_zero_keypoints.tolist(),
+            "home_wuji2_wrist_pose_motive": wrist_home_pose.tolist(),
+            "frame0_wuji2_wrist_pose_motive": (
+                target_wrist_motive.tolist()
             ),
-            "target_wrist_pose_right_chest": (
-                target_wrist_chest.tolist()
+            "transform_contract": (
+                "T_sim_from_motive = T_sim_wuji2_home * "
+                "inverse(T_motive_wuji2_home)"
             ),
         }
 

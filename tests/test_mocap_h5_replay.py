@@ -144,10 +144,6 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         node._wrist_to_tcp_pose = np.array(
             [-0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         )
-        node._robot_home_wrist_pose_chest = np.array(
-            [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]
-        )
-        node._preview_mapper = _FakeMapper(pose)
         node._right_rigid_id = "right_arm"
         node._rigid_body_names = {7: "right_arm"}
         node._latest_motive_frame = {
@@ -284,18 +280,18 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         self.assertEqual(len(node._frame_zero_skeleton_pub.json_values), 1)
         skeleton = node._frame_zero_skeleton_pub.json_values[-1]
         self.assertTrue(skeleton["frozen"])
-        self.assertEqual(len(skeleton["points_right_chest"]), 21)
+        self.assertEqual(len(skeleton["points_motive_world"]), 21)
         self.assertEqual(
             tuple(tuple(edge) for edge in skeleton["edges"]),
             HAND_KEYPOINT_EDGES,
         )
         np.testing.assert_allclose(
-            skeleton["points_right_chest"][0],
-            [0.55, 0.1, -0.2],
+            skeleton["points_motive_world"][0],
+            [0.2, 0.0, 0.0],
         )
         np.testing.assert_allclose(
-            skeleton["points_right_chest"][-1],
-            [0.65, 0.1, -0.2],
+            skeleton["points_motive_world"][-1],
+            [0.3, 0.0, 0.0],
         )
 
         # Enter 保压接近 H5 绝对 wrist frame0；虚拟 TCP=0.2-0.05。
@@ -436,7 +432,6 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         self.assertFalse(
             node._frame_zero_skeleton_pub.json_values[-1]["frozen"]
         )
-        self.assertEqual(node._preview_mapper.map_count, 1)
 
     def test_every_base_status_carries_real_readiness_fields(self) -> None:
         node = self._node()
@@ -501,7 +496,7 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
-    def test_frame_zero_keypoints_and_bones_align_to_mujoco_home(self) -> None:
+    def test_motive_frame_zero_uses_home_calibrated_world_transform(self) -> None:
         viewer = self._viewer_module()
         root = Path(__file__).resolve().parents[1]
         urdf = (
@@ -523,26 +518,43 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
             "/pico_body_sim/frame0_hand_skeleton",
         )
 
-        wrist_position, wrist_rotation = skeleton._wrist_frame_mj(data)
-        wrist_quaternion_xyzw = Rotation.from_matrix(
-            wrist_rotation
+        wrist_position_sim, wrist_rotation_sim = skeleton._wrist_frame_mj(
+            data
+        )
+        wrist_position_motive = np.array([1.0, 2.0, 3.0])
+        wrist_rotation_motive = Rotation.from_euler(
+            "xyz", [0.35, -0.2, 0.65]
+        ).as_matrix()
+        wrist_quaternion_motive = Rotation.from_matrix(
+            wrist_rotation_motive
         ).as_quat()
-        points = np.empty((21, 3), dtype=np.float64)
-        points[0] = wrist_position
+        points_motive = np.empty((21, 3), dtype=np.float64)
+        points_motive[0] = wrist_position_motive
         for finger, start in enumerate((1, 5, 9, 13, 17)):
             lateral = (finger - 2) * 0.012
             for joint in range(4):
-                points[start + joint] = wrist_position + np.array(
-                    [lateral, -0.025 * (joint + 1), 0.004 * finger]
+                points_motive[start + joint] = (
+                    wrist_position_motive
+                    + np.array(
+                        [lateral, -0.025 * (joint + 1), 0.004 * finger]
+                    )
                 )
+        rotation_sim_from_motive = (
+            wrist_rotation_sim @ wrist_rotation_motive.T
+        )
+        points_sim = (
+            (points_motive - wrist_position_motive)
+            @ rotation_sim_from_motive.T
+            + wrist_position_sim
+        )
         payload = {
             "frozen": False,
             "source_frame_index": 0,
             "edges": [list(edge) for edge in HAND_KEYPOINT_EDGES],
-            "points_right_chest": points.tolist(),
-            "home_wrist_pose_right_chest": [
-                *wrist_position.tolist(),
-                *wrist_quaternion_xyzw.tolist(),
+            "points_motive_world": points_motive.tolist(),
+            "home_wuji2_wrist_pose_motive": [
+                *wrist_position_motive.tolist(),
+                *wrist_quaternion_motive.tolist(),
             ],
         }
         skeleton._on_skeleton(payload)
@@ -553,16 +565,16 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
         self.assertEqual(len(skeleton._bone_geom_ids), 20)
         for index, geom_id in enumerate(skeleton._point_geom_ids):
             np.testing.assert_allclose(
-                data.geom_xpos[geom_id], points[index], atol=1.0e-8
+                data.geom_xpos[geom_id], points_sim[index], atol=1.0e-8
             )
             self.assertGreater(model.geom_rgba[geom_id, 3], 0.9)
 
         first_parent, first_child = HAND_KEYPOINT_EDGES[0]
         first_bone = skeleton._bone_geom_ids[0]
-        delta = points[first_child] - points[first_parent]
+        delta = points_sim[first_child] - points_sim[first_parent]
         np.testing.assert_allclose(
             data.geom_xpos[first_bone],
-            0.5 * (points[first_parent] + points[first_child]),
+            0.5 * (points_sim[first_parent] + points_sim[first_child]),
             atol=1.0e-8,
         )
         self.assertAlmostEqual(

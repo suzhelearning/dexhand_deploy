@@ -700,6 +700,13 @@ pixi run sim_mocap_h5 -- /path/to/take.h5 --right-rigid-id tianji_tcp
 有效时、按 `s` 前持续预览“此刻按 s”会到达的 frame0 目标；按 `s`
 采样实时 marker 后冻结骨架。随后按住 `Enter`，即可把实际 wuji2 手
 移动到固定骨架处，直接检查指尖、手心和每根手指的方向是否一致。
+骨架不经过 `right_chest` 重建，也不再用 wrist quaternion 二次旋转
+关键点；按 `s` 时以同一物理 `r_wrist` 标定唯一的世界变换
+`T_sim_from_motive = T_sim_wuji2_home *
+inverse(T_motive_wuji2_home)`，然后直接变换 H5 的
+`keypoints_world`。因此骨段长度保持不变，显示姿态就是 H5 的绝对
+frame0 姿态。
+
 
 首次真机测试必须先在仿真中完整确认轨迹、方向和工作空间，再用两个
 终端启动。以下示例中的刚体 ID 必须与 `mocap/hands/frame` 实际一致：
