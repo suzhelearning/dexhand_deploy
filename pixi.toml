@@ -41,6 +41,7 @@ sim_mocap_step = { cmd = "bash scripts/run_mocap_step.sh --mujoco-only", descrip
 sim_mocap_live = { cmd = "bash scripts/run_mocap_live.sh --mujoco-only", description = "Motive right_arm 定零 + 连续键盘位置步进 + 实时位姿显示（默认右臂 10mm/键，Zenoh）" }
 sim_mocap_h5 = { cmd = "bash scripts/run_mocap_h5_replay.sh --mujoco-only", description = "从 Motive right_arm 实测 Home 移动到 HDF5 Manus 右腕绝对轨迹的 Enter 保压回放（右臂，Zenoh）" }
 sim_regrind_h5 = { cmd = "bash scripts/run_regrind_h5_replay.sh", description = "独立回放 Regrind wuji2 自由根、20 关节和物体轨迹（桌面中心 z-up，MuJoCo）" }
+sim_mocap_h5_replay = { cmd = "bash scripts/run_mocap_h5_wrist_replay.sh", description = "机械臂+wuji2 场景纯 H5 手部数据回放（机械臂保持 Home，不启动 IK/Motive/Zenoh）" }
 mocap_circle_compare = { cmd = "bash scripts/run_mocap_circle_compare.sh", description = "同步录制右臂目标/IK 与 Motive right_arm 轨迹并生成坐标对齐对比图" }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
 
