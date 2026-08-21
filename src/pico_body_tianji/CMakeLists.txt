@@ -170,6 +170,7 @@ install(
     scripts/mocap_live
     scripts/mocap_h5_replay
     scripts/mujoco_joint_viewer.py
+    scripts/mujoco_regrind_replay.py
   DESTINATION lib/${PROJECT_NAME}
 )
 install(

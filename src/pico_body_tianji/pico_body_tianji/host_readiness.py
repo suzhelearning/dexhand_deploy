@@ -214,9 +214,9 @@ class HostReadinessGate:
                     False, "mocap_keyboard_step_not_ready"
                 )
         elif source.get("input") == "mocap_h5_replay":
-            # H5 真机回放仅接受尚未开始、已确认 Home 的低速绝对轨迹
-            # 主机。Motive 刚体在连接前必须新鲜有效；Enter 必须可用
-            # 且处于松开状态，避免真机桥刚 armed 就开始运动。
+            # H5 真机回放仅接受尚未开始、已确认 Home 的低速 wrist
+            # frame0 对齐主机。Motive marker 在连接前必须新鲜有效；
+            # Enter 必须可用且松开，避免桥刚 armed 就开始运动。
             motive = source.get("motive_right_arm")
             recording = source.get("recording")
             right_summary = (
@@ -229,7 +229,7 @@ class HostReadinessGate:
             if not (
                 source.get("source") == "offline_replay"
                 and source.get("mapping")
-                == "motive_absolute_h5_from_measured_home_conditioned_v1"
+                == "motive_rigid_offset_absolute_wrist_tcp_v5"
                 and source.get("control_mode")
                 == "h5_right_wrist_to_right_arm_hold_to_run"
                 and source.get("body_tracking") == "disabled"
@@ -238,6 +238,7 @@ class HostReadinessGate:
                 == "published_default_zsp_backend_selected"
                 and source.get("smpl_used") is False
                 and source.get("scope") == "mocap_replay"
+                and source.get("endpoint") == "wuji2_r_wrist"
                 and source.get("side") == "right"
                 and source.get("phase") == "armed"
                 and source.get("at_safe_home") is True

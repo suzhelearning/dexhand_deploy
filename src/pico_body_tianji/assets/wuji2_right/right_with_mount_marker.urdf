@@ -1,4 +1,8 @@
-<robot xmlns:ns0="http://drake.mit.edu" name="wujihand-right">
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="wujihand-right" xmlns:drake="http://drake.mit.edu">
+  <mujoco>
+    <compiler discardvisual="false" strippath="false" />
+  </mujoco>
   <link name="r_base" />
   <joint name="r_base_to_wrist" type="fixed">
     <parent link="r_base" />
@@ -20,6 +24,11 @@
         <color rgba="0.627450980392157 0.627450980392157 0.627450980392157 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_wrist_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <link name="r_thumb_proximal">
     <inertial>
@@ -36,6 +45,21 @@
         <color rgba="0.627450980392157 0.627450980392157 0.627450980392157 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_thumb_proximal_convex_0.obj" />
+      </geometry>
+    </collision>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_thumb_proximal_convex_1.obj" />
+      </geometry>
+    </collision>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_thumb_proximal_convex_2.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_thumb_cmc_flex" type="revolute">
     <origin xyz="0.0166602520939135 0.00812974518139747 -0.0170173790088068" rpy="-1.59876884374798 -1.07116653994079 1.93704700103865" />
@@ -59,6 +83,11 @@
         <color rgba="0.627450980392157 0.627450980392157 0.627450980392157 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_thumb_proximal_abd_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_thumb_cmc_abd" type="revolute">
     <origin xyz="0.000247879062961599 -0.000536579546410674 -0.0147535404706145" rpy="0.205291970332105 0.70050871717831 0.0252378802492596" />
@@ -82,6 +111,11 @@
         <color rgba="0.627450980392157 0.627450980392157 0.627450980392157 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_thumb_middle_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_thumb_mcp" type="revolute">
     <origin xyz="0 0 -0.032500002798739" rpy="-0.11027974085231 0.0872664625995901 0.567232006897994" />
@@ -105,6 +139,11 @@
         <color rgba="0.627450980392157 0.627450980392157 0.627450980392157 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_thumb_distal_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_thumb_ip" type="revolute">
     <origin xyz="-4.99999999923513E-05 0.00385197213324594 -0.0347873872356727" rpy="0.110279740852306 0 0" />
@@ -128,6 +167,11 @@
         <color rgba="0.627450980392157 0.627450980392157 0.627450980392157 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_thumb_tip_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_thumb_tip_fixed" type="fixed">
     <origin xyz="0 -0.000557448922432543 -0.0276972900827579" rpy="0 0 0" />
@@ -149,6 +193,21 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_index_finger_proximal_convex_0.obj" />
+      </geometry>
+    </collision>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_index_finger_proximal_convex_1.obj" />
+      </geometry>
+    </collision>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_index_finger_proximal_convex_2.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_index_finger_mcp_flex" type="revolute">
     <origin xyz="0.0203528654190901 -0.00336011581054318 -0.070679437897893" rpy="-0.01045839529445 -0.104348822398209 0.100075675935804" />
@@ -172,6 +231,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_index_finger_proximal_abd_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_index_finger_mcp_abd" type="revolute">
     <origin xyz="0 -0.0015851418713986 -0.0144630452761802" rpy="-0.0265261580297666 0 0" />
@@ -195,6 +259,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_index_finger_middle_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_index_finger_pip" type="revolute">
     <origin xyz="0 0 -0.0376000000000001" rpy="0 0 0" />
@@ -218,6 +287,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_index_finger_distal_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_index_finger_dip" type="revolute">
     <origin xyz="0 0 -0.0295000000000005" rpy="0 0 0" />
@@ -241,6 +315,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_index_finger_tip_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_index_finger_tip_fixed" type="fixed">
     <origin xyz="0 -0.00167219746761747 -0.025" rpy="0 0 0" />
@@ -262,6 +341,21 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_middle_finger_proximal_convex_0.obj" />
+      </geometry>
+    </collision>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_middle_finger_proximal_convex_1.obj" />
+      </geometry>
+    </collision>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_middle_finger_proximal_convex_2.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_middle_finger_mcp_flex" type="revolute">
     <origin xyz="-0.00147348225616674 -0.00833993676457262 -0.0739026139528614" rpy="-0.0344328490772506 0.0438522369960471 -0.000721508035749565" />
@@ -285,6 +379,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_middle_finger_proximal_abd_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_middle_finger_mcp_abd" type="revolute">
     <origin xyz="0 -0.00120098018725689 -0.0145000000001074" rpy="0 0 0" />
@@ -308,6 +407,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_middle_finger_middle_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_middle_finger_pip" type="revolute">
     <origin xyz="0 0 -0.0376000000000002" rpy="0 0 0" />
@@ -331,6 +435,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_middle_finger_distal_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_middle_finger_dip" type="revolute">
     <origin xyz="0 0 -0.0295000000000004" rpy="0.0344012194700258 0 0" />
@@ -354,6 +463,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_middle_finger_tip_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_middle_finger_tip_fixed" type="fixed">
     <origin xyz="0 -0.00253106895306443 -0.0249276941237159" rpy="-0.0344012194700258 0 0" />
@@ -375,6 +489,21 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_ring_finger_proximal_convex_0.obj" />
+      </geometry>
+    </collision>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_ring_finger_proximal_convex_1.obj" />
+      </geometry>
+    </collision>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_ring_finger_proximal_convex_2.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_ring_finger_mcp_flex" type="revolute">
     <origin xyz="-0.021878890103642 -0.0056255988899957 -0.0647140852094928" rpy="-0.0194350140122241 0.17433767952625 -0.0687489294023846" />
@@ -398,6 +527,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_ring_finger_proximal_abd_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_ring_finger_mcp_abd" type="revolute">
     <origin xyz="0 -0.00120098018725689 -0.0145000000001074" rpy="0 0 0" />
@@ -421,6 +555,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_ring_finger_middle_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_ring_finger_pip" type="revolute">
     <origin xyz="0 0 -0.0376000000000001" rpy="0 0 0" />
@@ -444,6 +583,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_ring_finger_distal_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_ring_finger_dip" type="revolute">
     <origin xyz="0 0 -0.0295000000000005" rpy="0 0 0" />
@@ -467,6 +611,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_ring_finger_tip_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_ring_finger_tip_fixed" type="fixed">
     <origin xyz="0 -0.00167219746761748 -0.025" rpy="0 0 0" />
@@ -488,6 +637,21 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_pinky_proximal_convex_0.obj" />
+      </geometry>
+    </collision>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_pinky_proximal_convex_1.obj" />
+      </geometry>
+    </collision>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_pinky_proximal_convex_2.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_pinky_mcp_flex" type="revolute">
     <origin xyz="-0.039145 -0.00076138 -0.054041" rpy="-0.035083 0.2813 -0.13736" />
@@ -511,6 +675,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_pinky_proximal_abd_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_pinky_mcp_abd" type="revolute">
     <origin xyz="0 -0.001201 -0.0145" rpy="0 0 3.6273E-05" />
@@ -534,6 +703,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_pinky_middle_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_pinky_pip" type="revolute">
     <origin xyz="0.0001 0 -0.0336" rpy="0 0 -3.6273E-05" />
@@ -557,6 +731,11 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_pinky_distal_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_pinky_dip" type="revolute">
     <origin xyz="0 0 -0.0275" rpy="0 0 0" />
@@ -580,301 +759,390 @@
         <color rgba="1 1 1 1" />
       </material>
     </visual>
+    <collision>
+      <geometry>
+        <mesh filename="collision/r_pinky_tip_convex_0.obj" />
+      </geometry>
+    </collision>
   </link>
   <joint name="r_pinky_tip_fixed" type="fixed">
     <origin xyz="0 -0.00167219746761752 -0.025" rpy="0 0 0" />
     <parent link="r_pinky_distal" />
     <child link="r_pinky_tip" />
   </joint>
-  <ns0:collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_middle">
-    <ns0:member link="r_thumb_proximal" />
-    <ns0:member link="r_thumb_middle" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_middle" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_distal">
-    <ns0:member link="r_thumb_proximal" />
-    <ns0:member link="r_thumb_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_tip">
-    <ns0:member link="r_thumb_proximal" />
-    <ns0:member link="r_thumb_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_middle">
-    <ns0:member link="r_thumb_proximal_abd" />
-    <ns0:member link="r_thumb_middle" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_middle" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_distal">
-    <ns0:member link="r_thumb_proximal_abd" />
-    <ns0:member link="r_thumb_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_tip">
-    <ns0:member link="r_thumb_proximal_abd" />
-    <ns0:member link="r_thumb_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_thumb_middle__r_thumb_distal">
-    <ns0:member link="r_thumb_middle" />
-    <ns0:member link="r_thumb_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_thumb_middle__r_thumb_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_thumb_middle__r_thumb_tip">
-    <ns0:member link="r_thumb_middle" />
-    <ns0:member link="r_thumb_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_thumb_middle__r_thumb_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_thumb_distal__r_thumb_tip">
-    <ns0:member link="r_thumb_distal" />
-    <ns0:member link="r_thumb_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_thumb_distal__r_thumb_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_wrist__r_thumb_proximal">
-    <ns0:member link="r_wrist" />
-    <ns0:member link="r_thumb_proximal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_wrist__r_thumb_proximal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_wrist__r_thumb_proximal_abd">
-    <ns0:member link="r_wrist" />
-    <ns0:member link="r_thumb_proximal_abd" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_wrist__r_thumb_proximal_abd" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_middle">
-    <ns0:member link="r_index_finger_proximal" />
-    <ns0:member link="r_index_finger_middle" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_middle" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_distal">
-    <ns0:member link="r_index_finger_proximal" />
-    <ns0:member link="r_index_finger_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_tip">
-    <ns0:member link="r_index_finger_proximal" />
-    <ns0:member link="r_index_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_middle">
-    <ns0:member link="r_index_finger_proximal_abd" />
-    <ns0:member link="r_index_finger_middle" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_middle" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_distal">
-    <ns0:member link="r_index_finger_proximal_abd" />
-    <ns0:member link="r_index_finger_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_tip">
-    <ns0:member link="r_index_finger_proximal_abd" />
-    <ns0:member link="r_index_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_index_finger_middle__r_index_finger_distal">
-    <ns0:member link="r_index_finger_middle" />
-    <ns0:member link="r_index_finger_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_index_finger_middle__r_index_finger_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_index_finger_middle__r_index_finger_tip">
-    <ns0:member link="r_index_finger_middle" />
-    <ns0:member link="r_index_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_index_finger_middle__r_index_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_index_finger_distal__r_index_finger_tip">
-    <ns0:member link="r_index_finger_distal" />
-    <ns0:member link="r_index_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_index_finger_distal__r_index_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_wrist__r_index_finger_proximal">
-    <ns0:member link="r_wrist" />
-    <ns0:member link="r_index_finger_proximal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_wrist__r_index_finger_proximal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_wrist__r_index_finger_proximal_abd">
-    <ns0:member link="r_wrist" />
-    <ns0:member link="r_index_finger_proximal_abd" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_wrist__r_index_finger_proximal_abd" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_middle">
-    <ns0:member link="r_middle_finger_proximal" />
-    <ns0:member link="r_middle_finger_middle" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_middle" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_distal">
-    <ns0:member link="r_middle_finger_proximal" />
-    <ns0:member link="r_middle_finger_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_tip">
-    <ns0:member link="r_middle_finger_proximal" />
-    <ns0:member link="r_middle_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_middle">
-    <ns0:member link="r_middle_finger_proximal_abd" />
-    <ns0:member link="r_middle_finger_middle" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_middle" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_distal">
-    <ns0:member link="r_middle_finger_proximal_abd" />
-    <ns0:member link="r_middle_finger_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_tip">
-    <ns0:member link="r_middle_finger_proximal_abd" />
-    <ns0:member link="r_middle_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_middle_finger_middle__r_middle_finger_distal">
-    <ns0:member link="r_middle_finger_middle" />
-    <ns0:member link="r_middle_finger_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_middle_finger_middle__r_middle_finger_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_middle_finger_middle__r_middle_finger_tip">
-    <ns0:member link="r_middle_finger_middle" />
-    <ns0:member link="r_middle_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_middle_finger_middle__r_middle_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_middle_finger_distal__r_middle_finger_tip">
-    <ns0:member link="r_middle_finger_distal" />
-    <ns0:member link="r_middle_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_middle_finger_distal__r_middle_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_wrist__r_middle_finger_proximal">
-    <ns0:member link="r_wrist" />
-    <ns0:member link="r_middle_finger_proximal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_wrist__r_middle_finger_proximal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_wrist__r_middle_finger_proximal_abd">
-    <ns0:member link="r_wrist" />
-    <ns0:member link="r_middle_finger_proximal_abd" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_wrist__r_middle_finger_proximal_abd" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_middle">
-    <ns0:member link="r_ring_finger_proximal" />
-    <ns0:member link="r_ring_finger_middle" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_middle" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_distal">
-    <ns0:member link="r_ring_finger_proximal" />
-    <ns0:member link="r_ring_finger_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_tip">
-    <ns0:member link="r_ring_finger_proximal" />
-    <ns0:member link="r_ring_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_middle">
-    <ns0:member link="r_ring_finger_proximal_abd" />
-    <ns0:member link="r_ring_finger_middle" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_middle" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_distal">
-    <ns0:member link="r_ring_finger_proximal_abd" />
-    <ns0:member link="r_ring_finger_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_tip">
-    <ns0:member link="r_ring_finger_proximal_abd" />
-    <ns0:member link="r_ring_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_ring_finger_middle__r_ring_finger_distal">
-    <ns0:member link="r_ring_finger_middle" />
-    <ns0:member link="r_ring_finger_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_ring_finger_middle__r_ring_finger_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_ring_finger_middle__r_ring_finger_tip">
-    <ns0:member link="r_ring_finger_middle" />
-    <ns0:member link="r_ring_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_ring_finger_middle__r_ring_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_ring_finger_distal__r_ring_finger_tip">
-    <ns0:member link="r_ring_finger_distal" />
-    <ns0:member link="r_ring_finger_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_ring_finger_distal__r_ring_finger_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_wrist__r_ring_finger_proximal">
-    <ns0:member link="r_wrist" />
-    <ns0:member link="r_ring_finger_proximal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_wrist__r_ring_finger_proximal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_wrist__r_ring_finger_proximal_abd">
-    <ns0:member link="r_wrist" />
-    <ns0:member link="r_ring_finger_proximal_abd" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_wrist__r_ring_finger_proximal_abd" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_middle">
-    <ns0:member link="r_pinky_proximal" />
-    <ns0:member link="r_pinky_middle" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_middle" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_distal">
-    <ns0:member link="r_pinky_proximal" />
-    <ns0:member link="r_pinky_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_tip">
-    <ns0:member link="r_pinky_proximal" />
-    <ns0:member link="r_pinky_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_middle">
-    <ns0:member link="r_pinky_proximal_abd" />
-    <ns0:member link="r_pinky_middle" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_middle" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_distal">
-    <ns0:member link="r_pinky_proximal_abd" />
-    <ns0:member link="r_pinky_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_tip">
-    <ns0:member link="r_pinky_proximal_abd" />
-    <ns0:member link="r_pinky_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_pinky_middle__r_pinky_distal">
-    <ns0:member link="r_pinky_middle" />
-    <ns0:member link="r_pinky_distal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_pinky_middle__r_pinky_distal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_pinky_middle__r_pinky_tip">
-    <ns0:member link="r_pinky_middle" />
-    <ns0:member link="r_pinky_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_pinky_middle__r_pinky_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_pinky_distal__r_pinky_tip">
-    <ns0:member link="r_pinky_distal" />
-    <ns0:member link="r_pinky_tip" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_pinky_distal__r_pinky_tip" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_wrist__r_pinky_proximal">
-    <ns0:member link="r_wrist" />
-    <ns0:member link="r_pinky_proximal" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_wrist__r_pinky_proximal" />
-  </ns0:collision_filter_group>
-  <ns0:collision_filter_group name="nocollide__r_wrist__r_pinky_proximal_abd">
-    <ns0:member link="r_wrist" />
-    <ns0:member link="r_pinky_proximal_abd" />
-    <ns0:ignored_collision_filter_group name="nocollide__r_wrist__r_pinky_proximal_abd" />
-  </ns0:collision_filter_group>
+<!-- BEGIN self-collision filters (generated) -->
+  <!-- Generated by datasets/write_urdf_collision_filters.py from
+       regrind.retargeting.wujihand2_collision.  Do not edit by hand;
+       edit that module and re-run.  The rule matches WujiLab v2.0's
+       runtime filtering (wuji_hand2_common.py, mobile_wrist_env.py):
+       every within-finger pair except proximal x proximal_abd, plus
+       the palm against each finger's two most proximal links. -->
+  <drake:collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_middle">
+    <!-- within_finger -->
+    <drake:member link="r_thumb_proximal"/>
+    <drake:member link="r_thumb_middle"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_middle"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_distal">
+    <!-- within_finger -->
+    <drake:member link="r_thumb_proximal"/>
+    <drake:member link="r_thumb_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_tip">
+    <!-- within_finger -->
+    <drake:member link="r_thumb_proximal"/>
+    <drake:member link="r_thumb_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_thumb_proximal__r_thumb_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_middle">
+    <!-- within_finger -->
+    <drake:member link="r_thumb_proximal_abd"/>
+    <drake:member link="r_thumb_middle"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_middle"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_distal">
+    <!-- within_finger -->
+    <drake:member link="r_thumb_proximal_abd"/>
+    <drake:member link="r_thumb_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_tip">
+    <!-- within_finger -->
+    <drake:member link="r_thumb_proximal_abd"/>
+    <drake:member link="r_thumb_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_thumb_proximal_abd__r_thumb_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_thumb_middle__r_thumb_distal">
+    <!-- within_finger -->
+    <drake:member link="r_thumb_middle"/>
+    <drake:member link="r_thumb_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_thumb_middle__r_thumb_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_thumb_middle__r_thumb_tip">
+    <!-- within_finger -->
+    <drake:member link="r_thumb_middle"/>
+    <drake:member link="r_thumb_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_thumb_middle__r_thumb_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_thumb_distal__r_thumb_tip">
+    <!-- within_finger -->
+    <drake:member link="r_thumb_distal"/>
+    <drake:member link="r_thumb_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_thumb_distal__r_thumb_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_wrist__r_thumb_proximal">
+    <!-- palm_vs_knuckle -->
+    <drake:member link="r_wrist"/>
+    <drake:member link="r_thumb_proximal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_wrist__r_thumb_proximal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_wrist__r_thumb_proximal_abd">
+    <!-- palm_vs_knuckle -->
+    <drake:member link="r_wrist"/>
+    <drake:member link="r_thumb_proximal_abd"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_wrist__r_thumb_proximal_abd"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_middle">
+    <!-- within_finger -->
+    <drake:member link="r_index_finger_proximal"/>
+    <drake:member link="r_index_finger_middle"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_middle"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_distal">
+    <!-- within_finger -->
+    <drake:member link="r_index_finger_proximal"/>
+    <drake:member link="r_index_finger_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_index_finger_proximal"/>
+    <drake:member link="r_index_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_index_finger_proximal__r_index_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_middle">
+    <!-- within_finger -->
+    <drake:member link="r_index_finger_proximal_abd"/>
+    <drake:member link="r_index_finger_middle"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_middle"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_distal">
+    <!-- within_finger -->
+    <drake:member link="r_index_finger_proximal_abd"/>
+    <drake:member link="r_index_finger_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_index_finger_proximal_abd"/>
+    <drake:member link="r_index_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_index_finger_proximal_abd__r_index_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_index_finger_middle__r_index_finger_distal">
+    <!-- within_finger -->
+    <drake:member link="r_index_finger_middle"/>
+    <drake:member link="r_index_finger_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_index_finger_middle__r_index_finger_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_index_finger_middle__r_index_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_index_finger_middle"/>
+    <drake:member link="r_index_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_index_finger_middle__r_index_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_index_finger_distal__r_index_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_index_finger_distal"/>
+    <drake:member link="r_index_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_index_finger_distal__r_index_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_wrist__r_index_finger_proximal">
+    <!-- palm_vs_knuckle -->
+    <drake:member link="r_wrist"/>
+    <drake:member link="r_index_finger_proximal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_wrist__r_index_finger_proximal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_wrist__r_index_finger_proximal_abd">
+    <!-- palm_vs_knuckle -->
+    <drake:member link="r_wrist"/>
+    <drake:member link="r_index_finger_proximal_abd"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_wrist__r_index_finger_proximal_abd"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_middle">
+    <!-- within_finger -->
+    <drake:member link="r_middle_finger_proximal"/>
+    <drake:member link="r_middle_finger_middle"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_middle"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_distal">
+    <!-- within_finger -->
+    <drake:member link="r_middle_finger_proximal"/>
+    <drake:member link="r_middle_finger_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_middle_finger_proximal"/>
+    <drake:member link="r_middle_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal__r_middle_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_middle">
+    <!-- within_finger -->
+    <drake:member link="r_middle_finger_proximal_abd"/>
+    <drake:member link="r_middle_finger_middle"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_middle"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_distal">
+    <!-- within_finger -->
+    <drake:member link="r_middle_finger_proximal_abd"/>
+    <drake:member link="r_middle_finger_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_middle_finger_proximal_abd"/>
+    <drake:member link="r_middle_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_middle_finger_proximal_abd__r_middle_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_middle_finger_middle__r_middle_finger_distal">
+    <!-- within_finger -->
+    <drake:member link="r_middle_finger_middle"/>
+    <drake:member link="r_middle_finger_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_middle_finger_middle__r_middle_finger_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_middle_finger_middle__r_middle_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_middle_finger_middle"/>
+    <drake:member link="r_middle_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_middle_finger_middle__r_middle_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_middle_finger_distal__r_middle_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_middle_finger_distal"/>
+    <drake:member link="r_middle_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_middle_finger_distal__r_middle_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_wrist__r_middle_finger_proximal">
+    <!-- palm_vs_knuckle -->
+    <drake:member link="r_wrist"/>
+    <drake:member link="r_middle_finger_proximal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_wrist__r_middle_finger_proximal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_wrist__r_middle_finger_proximal_abd">
+    <!-- palm_vs_knuckle -->
+    <drake:member link="r_wrist"/>
+    <drake:member link="r_middle_finger_proximal_abd"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_wrist__r_middle_finger_proximal_abd"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_middle">
+    <!-- within_finger -->
+    <drake:member link="r_ring_finger_proximal"/>
+    <drake:member link="r_ring_finger_middle"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_middle"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_distal">
+    <!-- within_finger -->
+    <drake:member link="r_ring_finger_proximal"/>
+    <drake:member link="r_ring_finger_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_ring_finger_proximal"/>
+    <drake:member link="r_ring_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal__r_ring_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_middle">
+    <!-- within_finger -->
+    <drake:member link="r_ring_finger_proximal_abd"/>
+    <drake:member link="r_ring_finger_middle"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_middle"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_distal">
+    <!-- within_finger -->
+    <drake:member link="r_ring_finger_proximal_abd"/>
+    <drake:member link="r_ring_finger_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_ring_finger_proximal_abd"/>
+    <drake:member link="r_ring_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_ring_finger_proximal_abd__r_ring_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_ring_finger_middle__r_ring_finger_distal">
+    <!-- within_finger -->
+    <drake:member link="r_ring_finger_middle"/>
+    <drake:member link="r_ring_finger_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_ring_finger_middle__r_ring_finger_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_ring_finger_middle__r_ring_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_ring_finger_middle"/>
+    <drake:member link="r_ring_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_ring_finger_middle__r_ring_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_ring_finger_distal__r_ring_finger_tip">
+    <!-- within_finger -->
+    <drake:member link="r_ring_finger_distal"/>
+    <drake:member link="r_ring_finger_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_ring_finger_distal__r_ring_finger_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_wrist__r_ring_finger_proximal">
+    <!-- palm_vs_knuckle -->
+    <drake:member link="r_wrist"/>
+    <drake:member link="r_ring_finger_proximal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_wrist__r_ring_finger_proximal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_wrist__r_ring_finger_proximal_abd">
+    <!-- palm_vs_knuckle -->
+    <drake:member link="r_wrist"/>
+    <drake:member link="r_ring_finger_proximal_abd"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_wrist__r_ring_finger_proximal_abd"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_middle">
+    <!-- within_finger -->
+    <drake:member link="r_pinky_proximal"/>
+    <drake:member link="r_pinky_middle"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_middle"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_distal">
+    <!-- within_finger -->
+    <drake:member link="r_pinky_proximal"/>
+    <drake:member link="r_pinky_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_tip">
+    <!-- within_finger -->
+    <drake:member link="r_pinky_proximal"/>
+    <drake:member link="r_pinky_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_pinky_proximal__r_pinky_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_middle">
+    <!-- within_finger -->
+    <drake:member link="r_pinky_proximal_abd"/>
+    <drake:member link="r_pinky_middle"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_middle"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_distal">
+    <!-- within_finger -->
+    <drake:member link="r_pinky_proximal_abd"/>
+    <drake:member link="r_pinky_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_tip">
+    <!-- within_finger -->
+    <drake:member link="r_pinky_proximal_abd"/>
+    <drake:member link="r_pinky_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_pinky_proximal_abd__r_pinky_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_pinky_middle__r_pinky_distal">
+    <!-- within_finger -->
+    <drake:member link="r_pinky_middle"/>
+    <drake:member link="r_pinky_distal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_pinky_middle__r_pinky_distal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_pinky_middle__r_pinky_tip">
+    <!-- within_finger -->
+    <drake:member link="r_pinky_middle"/>
+    <drake:member link="r_pinky_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_pinky_middle__r_pinky_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_pinky_distal__r_pinky_tip">
+    <!-- within_finger -->
+    <drake:member link="r_pinky_distal"/>
+    <drake:member link="r_pinky_tip"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_pinky_distal__r_pinky_tip"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_wrist__r_pinky_proximal">
+    <!-- palm_vs_knuckle -->
+    <drake:member link="r_wrist"/>
+    <drake:member link="r_pinky_proximal"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_wrist__r_pinky_proximal"/>
+  </drake:collision_filter_group>
+  <drake:collision_filter_group name="nocollide__r_wrist__r_pinky_proximal_abd">
+    <!-- palm_vs_knuckle -->
+    <drake:member link="r_wrist"/>
+    <drake:member link="r_pinky_proximal_abd"/>
+    <drake:ignored_collision_filter_group name="nocollide__r_wrist__r_pinky_proximal_abd"/>
+  </drake:collision_filter_group>
+<!-- END self-collision filters -->
+
+  <!-- Arm-side mount point, added for real-robot calibration.  Massless, no
+       collision: a frame marker, not a part, so kinematics and dynamics are
+       untouched - - every existing link holds its pose to 0.0.
+
+       Position is the centre of the flange mating face, the 59.4 x 59.4 mm
+       square that bolts to the arm.  Taken from the vendor's own beta1 package,
+       hand2/hand2_beta1/body/urdf/right_with_mount.urdf, whose root IS r_mount
+       and which welds it to the wrist with xyz="0.003 0.00025 -0.0285" rpy="0".
+       Inverted and expressed against r_base here.  The vendor mesh puts that
+       face centre within 3 um of this point; the mount body extends 41.8 mm
+       toward the hand from it and weighs 69 g.
+
+       Axes are r_base's, deliberately.  The vendor's own r_mount frame is
+       aligned with r_wrist instead, which is r_base turned 180 degrees about x
+       - - so this marker is NOT a copy of that frame, it is that point expressed
+       with no rotation at all.  Calibration works in r_base, and a marker that
+       quietly carried a half turn would be read as r_base's axes and be wrong
+       in a way nothing checks.
+
+       beta1 and our v2026.6.12 differ: 14 of 25 joints moved, and the wrist part
+       itself shifted about 1.9 mm in x.  Registering the two wrist meshes and
+       carrying the offset across lands at (-2.85, +0.26, -28.46) mm, so ignoring
+       the version gap costs 0.15 mm.  The vendor value is used here.
+  -->
   <joint name="r_base_to_mount" type="fixed">
     <parent link="r_base" />
     <child link="r_mount_frame" />
-    <origin xyz="-0.003 0.00025 -0.0285" rpy="3.141592653589793 0 0" />
+    <origin xyz="-0.003 0.00025 -0.0285" rpy="0 0 0" />
   </joint>
   <link name="r_mount_frame">
     <visual name="MOUNT_POINT">
       <origin xyz="0 0 0" rpy="0 0 0" />
-      <geometry>
-        <sphere radius="0.004" />
-      </geometry>
-      <material name="mount_point">
-        <color rgba="1.0 0.0 1.0 1.0" />
-      </material>
+      <geometry><sphere radius="0.004" /></geometry>
+      <material name="mount_point"><color rgba="1.0 0.0 1.0 1.0" /></material>
     </visual>
   </link>
 </robot>

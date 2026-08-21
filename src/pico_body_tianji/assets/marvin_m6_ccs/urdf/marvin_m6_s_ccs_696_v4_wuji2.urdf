@@ -589,10 +589,72 @@
     <child link="TCP_Link_R" />
     <axis xyz="0 0 0" />
   </joint>
-  <joint name="JointWuji2_R" type="fixed">
-    <origin xyz="0 0 0" rpy="3.14159265359 0 1.57079632679" />
+  <joint name="JointMarker_R" type="fixed">
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 -1.5707963267948966 0" />
     <parent link="TCP_Link_R" />
+    <child link="marker_tianji" />
+  </joint>
+  <joint name="JointWuji2_R" type="fixed">
+    <origin xyz="0 0 0" rpy="3.141592653589793 -1.5707963267948966 0" />
+    <parent link="marker_wuji2" />
     <child link="r_mount_frame" />
+  </joint>
+  <link name="marker_mocap">
+    <inertial>
+      <origin xyz="-2.12863929093497E-07 0.00124443190416646 0.00226906870235771" rpy="0 0 0" />
+      <mass value="0.0167124616872421" />
+      <inertia ixx="1.71023387500903E-05" ixy="-1.11405188669191E-11" ixz="-1.16988732093527E-11" iyy="8.92159156719571E-06" iyz="5.34437648077156E-07" izz="8.32668495865682E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://pico_body_tianji/assets/marvin_m6_ccs/meshes/marker_mocap.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 0.25 0.05 1" />
+      </material>
+    </visual>
+    <visual name="marker_mocap_axis_0">
+      <origin xyz="0.035 0 0" rpy="0 1.5707963267948966 0" />
+      <geometry>
+        <cylinder length="0.07" radius="0.004" />
+      </geometry>
+      <material>
+        <color rgba="1 0 0 1" />
+      </material>
+    </visual>
+    <visual name="marker_mocap_axis_1">
+      <origin xyz="0 0.035 0" rpy="1.5707963267948966 0 0" />
+      <geometry>
+        <cylinder length="0.07" radius="0.004" />
+      </geometry>
+      <material>
+        <color rgba="0 1 0 1" />
+      </material>
+    </visual>
+    <visual name="marker_mocap_axis_2">
+      <origin xyz="0 0 0.035" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="0.07" radius="0.004" />
+      </geometry>
+      <material>
+        <color rgba="0 0 1 1" />
+      </material>
+    </visual>
+  </link>
+  <link name="marker_wuji2">
+    </link>
+  <joint name="marker_wuji2" type="fixed">
+    <origin xyz="0.004 0 0" rpy="0 0 0" />
+    <parent link="marker_mocap" />
+    <child link="marker_wuji2" />
+  </joint>
+  <link name="marker_tianji">
+    </link>
+  <joint name="marker_tianji_to_mocap" type="fixed">
+    <origin xyz="0.004 0 0" rpy="0 0 0" />
+    <parent link="marker_tianji" />
+    <child link="marker_mocap" />
   </joint>
   <link name="r_base" />
   <joint name="r_base_to_wrist" type="fixed">
@@ -613,6 +675,33 @@
       </geometry>
       <material name="">
         <color rgba="0.627450980392157 0.627450980392157 0.627450980392157 1" />
+      </material>
+    </visual>
+    <visual name="r_wrist_axis_0">
+      <origin xyz="0.045 0 0" rpy="0 1.5707963267948966 0" />
+      <geometry>
+        <cylinder length="0.09" radius="0.005" />
+      </geometry>
+      <material>
+        <color rgba="1 1 0 1" />
+      </material>
+    </visual>
+    <visual name="r_wrist_axis_1">
+      <origin xyz="0 0.045 0" rpy="1.5707963267948966 0 0" />
+      <geometry>
+        <cylinder length="0.09" radius="0.005" />
+      </geometry>
+      <material>
+        <color rgba="1 0 1 1" />
+      </material>
+    </visual>
+    <visual name="r_wrist_axis_2">
+      <origin xyz="0 0 0.045" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="0.09" radius="0.005" />
+      </geometry>
+      <material>
+        <color rgba="0 1 1 1" />
       </material>
     </visual>
   </link>
@@ -1466,36 +1555,9 @@
         <color rgba="1.0 0.0 1.0 1.0" />
       </material>
     </visual>
-    <visual name="r_mount_frame_axis_0">
-      <origin xyz="0.045 0 0" rpy="0 1.5707963267948966 0" />
-      <geometry>
-        <cylinder length="0.09" radius="0.005" />
-      </geometry>
-      <material>
-        <color rgba="1 1 0 1" />
-      </material>
-    </visual>
-    <visual name="r_mount_frame_axis_1">
-      <origin xyz="0 0.045 0" rpy="1.5707963267948966 0 0" />
-      <geometry>
-        <cylinder length="0.09" radius="0.005" />
-      </geometry>
-      <material>
-        <color rgba="1 0 1 1" />
-      </material>
-    </visual>
-    <visual name="r_mount_frame_axis_2">
-      <origin xyz="0 0 0.045" rpy="0 0 0" />
-      <geometry>
-        <cylinder length="0.09" radius="0.005" />
-      </geometry>
-      <material>
-        <color rgba="0 1 1 1" />
-      </material>
-    </visual>
   </link>
   <joint name="r_mount_frame_to_base" type="fixed">
-    <origin xyz="0.003 0.00025 -0.0285" rpy="3.141592653589793 0 0" />
+    <origin xyz="0.003 -0.00025 0.0285" rpy="0 0 0" />
     <parent link="r_mount_frame" />
     <child link="r_base" />
   </joint>

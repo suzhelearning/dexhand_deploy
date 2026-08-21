@@ -44,7 +44,7 @@ usage() {
       --right-rigid-id ID
 
 真机桥只接受 speed <= 0.25、yaw=0、phase=armed、IK/Home 安全、
-Motive right_arm 有效、Enter 已松开的 H5 主机状态。
+Motive right_arm marker 有效、Enter 松开的绝对 wrist 回放主机。
 EOF
 }
 
@@ -115,14 +115,14 @@ assert_no_conflicting_teleop_nodes real
 assert_single_controller_only_simulation_host_chain
 
 printf '%s\n' \
-  '即将启动 H5 右腕绝对轨迹真机链路：' \
-  '  复用 sim_mocap_h5 的 H5 + IK 主机链路' \
+  '即将启动 H5 Manus wrist 绝对轨迹真机链路：' \
+  '  复用 sim_mocap_h5 的 marker→wrist 接近 + IK 主机链路' \
   '  安全桥 → Marvin 低层关节控制' \
   "  速度比例=${VELOCITY_RATIO}% 加速度比例=${ACCELERATION_RATIO}%" \
   '请确认双臂 48V、电气急停、控制模式、轨迹空间及 right_arm ID。' \
   '关闭 FxStation、官方天机控制节点及其他 Marvin SDK 会话。' \
   '等待提示“真机链路已就绪”（phase=armed_idle）；此前不得按 s 或 Enter。' \
-  '就绪后按 s 捕获 Home，再按住 Enter 移动到 H5 第 0 帧。'
+  '就绪后按 s 读取 marker；Enter 保压到 frame0，松开后按 r，再保压回放。'
 
 BRIDGE_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/marvin_hardware_bridge"
 REAL_CONFIG="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/controller_only/controller_only_real.yaml"

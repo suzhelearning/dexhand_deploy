@@ -10,7 +10,10 @@ import numpy as np
 from pico_body_tianji.controller_only.mocap_h5 import (
     HandPoseTrajectory,
     MocapRecording,
+    align_pose_to_reference,
     apply_yaw_world,
+    compose_pose,
+    invert_pose,
     load_mocap_h5,
     synthetic_reference_pose,
 )
@@ -50,6 +53,9 @@ def _write_v4_h5(
                     (frames, 4), np.nan, dtype=np.float32
                 )
                 valid = np.zeros(frames, dtype=np.uint8)
+                keypoints = np.full(
+                    (frames, 21, 3), np.nan, dtype=np.float32
+                )
             else:
                 # 简单直线运动：x 从 0.1 到 0.3，姿态恒为 Identity。
                 position = np.column_stack(
@@ -64,15 +70,15 @@ def _write_v4_h5(
                     (frames, 1),
                 )
                 valid = np.ones(frames, dtype=np.uint8)
+                offsets = np.zeros((21, 3), dtype=np.float32)
+                offsets[:, 0] = np.arange(21, dtype=np.float32) * 0.001
+                keypoints = position[:, None, :] + offsets[None, :, :]
             group.create_dataset("wrist_position", data=position)
             group.create_dataset(
                 "wrist_quaternion_xyzw", data=quaternion
             )
             group.create_dataset("valid", data=valid)
-            group.create_dataset(
-                "keypoints_world",
-                data=np.zeros((frames, 21, 3), dtype=np.float32),
-            )
+            group.create_dataset("keypoints_world", data=keypoints)
         if with_external_link:
             f["objects"] = h5py.ExternalLink("outside.h5", "/")
 
@@ -90,6 +96,14 @@ class MocapH5LoaderTest(unittest.TestCase):
             self.assertAlmostEqual(recording.duration_s, 1.0, places=2)
             for side in ("left", "right"):
                 self.assertEqual(recording.hands[side].wrist.shape, (61, 7))
+                self.assertEqual(
+                    recording.hands[side].keypoints_world.shape,
+                    (61, 21, 3),
+                )
+                np.testing.assert_allclose(
+                    recording.hands[side].keypoints_world[:, 0],
+                    recording.hands[side].wrist[:, :3],
+                )
                 self.assertTrue(recording.hands[side].valid.all())
                 self.assertEqual(
                     recording.first_valid_index(side), 0
@@ -203,6 +217,69 @@ class MocapH5LoaderTest(unittest.TestCase):
             _write_v4_h5(path, right_nan=True)
             with self.assertRaisesRegex(ValueError, "right 手腕没有有效位姿"):
                 HandPoseTrajectory(load_mocap_h5(path))
+
+
+
+class PoseTransformTest(unittest.TestCase):
+    def test_compose_and_inverse_are_identity(self) -> None:
+        pose = np.array(
+            [1.0, -2.0, 0.5, 0.0, 0.0, np.sin(np.pi / 8), np.cos(np.pi / 8)]
+        )
+        identity = compose_pose(pose, invert_pose(pose))
+        np.testing.assert_allclose(identity[:3], np.zeros(3), atol=1e-9)
+        np.testing.assert_allclose(
+            np.abs(identity[3:]), [0.0, 0.0, 0.0, 1.0], atol=1e-9
+        )
+
+    def test_wrist_frame_zero_alignment_preserves_relative_trajectory(
+        self,
+    ) -> None:
+        source_ref = np.array(
+            [1.0, 2.0, 3.0, 0.0, 0.0, np.sin(np.pi / 4), np.cos(np.pi / 4)]
+        )
+        target_ref = np.array(
+            [-0.5, 0.25, 1.2, np.sin(np.pi / 8), 0.0, 0.0, np.cos(np.pi / 8)]
+        )
+        source_delta = np.array(
+            [0.1, -0.2, 0.3, 0.0, np.sin(np.pi / 12), 0.0, np.cos(np.pi / 12)]
+        )
+        sample = compose_pose(source_ref, source_delta)
+
+        aligned_zero = align_pose_to_reference(
+            source_ref, source_ref, target_ref
+        )
+        aligned_sample = align_pose_to_reference(
+            sample, source_ref, target_ref
+        )
+
+        np.testing.assert_allclose(
+            aligned_zero, target_ref, atol=1e-9
+        )
+        relative = compose_pose(
+            invert_pose(target_ref), aligned_sample
+        )
+        np.testing.assert_allclose(relative, source_delta, atol=1e-9)
+
+    def test_wrist_to_tcp_round_trip_preserves_endpoint(self) -> None:
+        marker = np.array(
+            [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]
+        )
+        marker_to_wrist = np.array(
+            [0.0325, 0.00025, 0.003, 0.0, -np.sqrt(0.5), 0.0, np.sqrt(0.5)]
+        )
+        tcp_to_wrist = np.array(
+            [0.00025, 0.003, 0.0365, np.sqrt(0.5), np.sqrt(0.5), 0.0, 0.0]
+        )
+        wrist = compose_pose(marker, marker_to_wrist)
+        virtual_tcp = compose_pose(wrist, invert_pose(tcp_to_wrist))
+
+        reconstructed_wrist = compose_pose(
+            virtual_tcp, tcp_to_wrist
+        )
+
+        np.testing.assert_allclose(
+            reconstructed_wrist, wrist, atol=1e-9
+        )
 
 
 if __name__ == "__main__":

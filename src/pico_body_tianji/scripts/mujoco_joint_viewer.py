@@ -4,12 +4,15 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
+import re
 import time
 
 import mujoco
 import mujoco.viewer
+import numpy as np
 import zenoh
 
+from pico_body_tianji.controller_only.mocap_h5 import HAND_KEYPOINT_EDGES
 from pico_body_tianji.joint_state_model import urdf_joint_names
 from pico_body_tianji.mujoco_joint_state import apply_joint_positions
 from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
@@ -87,6 +90,251 @@ def _qpos_addresses(model) -> dict[str, int]:
     return addresses
 
 
+_POINT_COLORS = np.asarray(
+    [
+        [1.0, 1.0, 1.0, 0.95],
+        *([[1.0, 0.78, 0.16, 0.95]] * 4),
+        *([[0.18, 0.82, 0.45, 0.95]] * 4),
+        *([[0.18, 0.62, 1.0, 0.95]] * 4),
+        *([[0.72, 0.42, 1.0, 0.95]] * 4),
+        *([[1.0, 0.38, 0.18, 0.95]] * 4),
+    ],
+    dtype=np.float32,
+)
+
+
+def _add_frame_zero_skeleton(xml: str) -> str:
+    """向 viewer URDF 追加可动态更新的 21 点/20 骨段目标骨架。"""
+    root_match = re.search(r"<link name=\"([^\"]+)\"", xml)
+    if root_match is None:
+        raise ValueError("URDF 缺少根 link，无法追加 frame0 骨架")
+    if not xml.rstrip().endswith("</robot>"):
+        raise ValueError("URDF 缺少 </robot> 结尾，无法追加 frame0 骨架")
+    root_link = root_match.group(1)
+    visuals = []
+    for index in range(21):
+        color = _POINT_COLORS[index]
+        visuals.append(
+            f"""
+    <visual name="frame0_kp_{index:02d}">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry><sphere radius="0.007" /></geometry>
+      <material name="frame0_kp_mat_{index:02d}">
+        <color rgba="{color[0]} {color[1]} {color[2]} 0.001" />
+      </material>
+    </visual>"""
+        )
+    for index, (parent, child) in enumerate(HAND_KEYPOINT_EDGES):
+        color = _POINT_COLORS[child]
+        visuals.append(
+            f"""
+    <visual name="frame0_bone_{index:02d}">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry><cylinder radius="0.0035" length="0.001" /></geometry>
+      <material name="frame0_bone_mat_{index:02d}">
+        <color rgba="{color[0]} {color[1]} {color[2]} 0.001" />
+      </material>
+    </visual>"""
+        )
+    fragment = f"""
+  <link name="frame0_hand_skeleton">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.001" />
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6" />
+    </inertial>
+{''.join(visuals)}
+  </link>
+  <joint name="frame0_hand_skeleton_joint" type="floating">
+    <parent link="{root_link}" />
+    <child link="frame0_hand_skeleton" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+</robot>"""
+    return xml.rstrip()[: -len("</robot>")] + fragment
+
+
+def _quat_wxyz_from_z_axis(direction: np.ndarray) -> np.ndarray:
+    """返回把局部 +Z 旋到 direction 的 MuJoCo wxyz 四元数。"""
+    vector = np.asarray(direction, dtype=np.float64)
+    norm = float(np.linalg.norm(vector))
+    if not np.isfinite(norm) or norm < 1.0e-9:
+        raise ValueError("骨段长度必须为正有限值")
+    vector /= norm
+    dot = float(np.clip(vector[2], -1.0, 1.0))
+    if dot < -1.0 + 1.0e-9:
+        return np.array([0.0, 1.0, 0.0, 0.0])
+    w = np.sqrt(0.5 * (1.0 + dot))
+    return np.array(
+        [w, -vector[1] / (2.0 * w), vector[0] / (2.0 * w), 0.0]
+    )
+
+
+class FrameZeroHandSkeleton:
+    """把 right_chest 的 frame0 关键点对齐到 MuJoCo Home r_wrist。"""
+
+    def __init__(self, session, model, topic: str):
+        self._pending: dict | None = None
+        self._received_once = False
+        self._home_wrist_pose_mj: tuple[np.ndarray, np.ndarray] | None = None
+        self._wrist_axis_x_geom_id = self._required_geom(
+            model, "r_wrist_axis_0"
+        )
+        self._wrist_axis_z_geom_id = self._required_geom(
+            model, "r_wrist_axis_2"
+        )
+        self._point_geom_ids = [
+            self._required_geom(model, f"frame0_kp_{index:02d}")
+            for index in range(21)
+        ]
+        self._bone_geom_ids = [
+            self._required_geom(model, f"frame0_bone_{index:02d}")
+            for index in range(len(HAND_KEYPOINT_EDGES))
+        ]
+        for geom_id in self._point_geom_ids + self._bone_geom_ids:
+            model.geom_sameframe[geom_id] = 0
+            model.geom_rgba[geom_id, 3] = 0.0
+        self._sub = ZenohJsonSub(
+            session, key(topic), self._on_skeleton
+        )
+        _LOG.info("等待 frame0 手部关键点骨架：%s", topic)
+
+    @staticmethod
+    def _required_geom(model, name: str) -> int:
+        geom_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_GEOM, name
+        )
+        if geom_id < 0:
+            raise RuntimeError(f"MuJoCo 模型缺少 frame0 骨架 geom：{name}")
+        return geom_id
+
+    def _wrist_frame_mj(
+        self, data
+    ) -> tuple[np.ndarray, np.ndarray]:
+        axis_x_matrix = data.geom_xmat[
+            self._wrist_axis_x_geom_id
+        ].reshape(3, 3)
+        axis_z_matrix = data.geom_xmat[
+            self._wrist_axis_z_geom_id
+        ].reshape(3, 3)
+        axis_x = axis_x_matrix[:, 2].copy()
+        axis_z = axis_z_matrix[:, 2].copy()
+        axis_x /= np.linalg.norm(axis_x)
+        axis_z /= np.linalg.norm(axis_z)
+        axis_y = np.cross(axis_z, axis_x)
+        axis_y /= np.linalg.norm(axis_y)
+        axis_z = np.cross(axis_x, axis_y)
+        rotation = np.column_stack((axis_x, axis_y, axis_z))
+        origin_x = (
+            data.geom_xpos[self._wrist_axis_x_geom_id]
+            - 0.045 * axis_x
+        )
+        origin_z = (
+            data.geom_xpos[self._wrist_axis_z_geom_id]
+            - 0.045 * axis_z
+        )
+        return 0.5 * (origin_x + origin_z), rotation
+
+    @property
+    def received_once(self) -> bool:
+        return self._received_once
+
+    def _on_skeleton(self, msg: dict) -> None:
+        self._pending = msg
+
+    def apply_latest(self, model, data) -> bool:
+        payload = self._pending
+        if payload is None:
+            return False
+        self._pending = None
+        try:
+            points_chest = np.asarray(
+                payload["points_right_chest"], dtype=np.float64
+            )
+            home_pose_chest = np.asarray(
+                payload["home_wrist_pose_right_chest"],
+                dtype=np.float64,
+            )
+            edges = tuple(
+                tuple(int(value) for value in edge)
+                for edge in payload["edges"]
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            _LOG.warning("忽略无效 frame0 骨架消息：%s", exc)
+            return False
+        if (
+            points_chest.shape != (21, 3)
+            or home_pose_chest.shape != (7,)
+            or not np.isfinite(points_chest).all()
+            or not np.isfinite(home_pose_chest).all()
+            or edges != HAND_KEYPOINT_EDGES
+        ):
+            _LOG.warning("忽略形状/拓扑不匹配的 frame0 骨架消息")
+            return False
+
+        frozen = bool(payload.get("frozen", False))
+        if not frozen or self._home_wrist_pose_mj is None:
+            self._home_wrist_pose_mj = self._wrist_frame_mj(data)
+        home_position_mj, home_rotation_mj = self._home_wrist_pose_mj
+        quaternion_chest = home_pose_chest[3:7]
+        quaternion_norm = float(np.linalg.norm(quaternion_chest))
+        if quaternion_norm < 1.0e-9:
+            _LOG.warning("忽略 Home wrist 四元数为零的 frame0 骨架消息")
+            return False
+        x, y, z, w = quaternion_chest / quaternion_norm
+        home_rotation_chest = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+            ]
+        )
+        rotation_mj_from_chest = (
+            home_rotation_mj @ home_rotation_chest.T
+        )
+        translation_mj_from_chest = (
+            home_position_mj
+            - rotation_mj_from_chest @ home_pose_chest[:3]
+        )
+        points_mj = (
+            points_chest @ rotation_mj_from_chest.T
+            + translation_mj_from_chest
+        )
+
+        for index, geom_id in enumerate(self._point_geom_ids):
+            model.geom_pos[geom_id] = points_mj[index]
+            model.geom_rgba[geom_id] = _POINT_COLORS[index]
+        for index, ((parent, child), geom_id) in enumerate(
+            zip(HAND_KEYPOINT_EDGES, self._bone_geom_ids)
+        ):
+            start = points_mj[parent]
+            end = points_mj[child]
+            delta = end - start
+            length = float(np.linalg.norm(delta))
+            if length < 1.0e-6:
+                model.geom_rgba[geom_id, 3] = 0.0
+                continue
+            model.geom_pos[geom_id] = 0.5 * (start + end)
+            model.geom_quat[geom_id] = _quat_wxyz_from_z_axis(delta)
+            model.geom_size[geom_id, 1] = 0.5 * length
+            color = _POINT_COLORS[child].copy()
+            color[3] = 0.78
+            model.geom_rgba[geom_id] = color
+        if not self._received_once:
+            self._received_once = True
+            _LOG.info(
+                "已显示 H5 frame%d 的 21 点/20 骨段目标骨架",
+                int(payload.get("source_frame_index", 0)),
+            )
+        return True
+
+    def close(self) -> None:
+        try:
+            self._sub.close()
+        except Exception:
+            pass
+
+
 def _parse_args():
     return parse_cli_args(
         extra={
@@ -99,6 +347,10 @@ def _parse_args():
                 "default": "/pico_body_sim/model_joint_states",
                 "help": "JointState JSON 输入话题",
             },
+            "--frame0-skeleton-topic": {
+                "default": "",
+                "help": "frame0 手部 21 点/20 骨段目标话题；空值禁用",
+            },
         }
     )
 
@@ -106,12 +358,21 @@ def _parse_args():
 def main() -> None:
     args = _parse_args()
     xml, assets = portable_mujoco_urdf(args.urdf)
+    if args.frame0_skeleton_topic:
+        xml = _add_frame_zero_skeleton(xml)
     model = mujoco.MjModel.from_xml_string(xml, assets)
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
 
     session = open_session()
     mirror = MujocoJointMirror(session, model, args.topic)
+    skeleton = (
+        FrameZeroHandSkeleton(
+            session, model, args.frame0_skeleton_topic
+        )
+        if args.frame0_skeleton_topic
+        else None
+    )
     started = time.monotonic()
     warned = False
     try:
@@ -124,6 +385,12 @@ def main() -> None:
             while viewer.is_running():
                 with viewer.lock():
                     if mirror.apply_latest(data):
+                        mujoco.mj_forward(model, data)
+                    if (
+                        skeleton is not None
+                        and mirror.received_once
+                        and skeleton.apply_latest(model, data)
+                    ):
                         mujoco.mj_forward(model, data)
                 viewer.sync()
                 if (
@@ -138,6 +405,8 @@ def main() -> None:
         pass
     finally:
         mirror.close()
+        if skeleton is not None:
+            skeleton.close()
 
 
 if __name__ == "__main__":

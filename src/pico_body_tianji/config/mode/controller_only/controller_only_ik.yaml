@@ -41,9 +41,9 @@ mocap_keyboard_step:
     left_default_zsp_direction: [0.45638698, -0.74604902, -0.48489358]
     right_default_zsp_direction: [0.45638698, 0.74604902, -0.48489358]
 
-# 可选 mocap-acquisition HDF5 的 Manus 右手腕绝对轨迹回放。按 s
-# 捕获实时 Motive right_arm Home 作为 IK 增量起点，第一阶段移动到
-# H5 绝对第 0 帧；只发布右臂目标。s/r 两阶段都必须 Enter 保压。
+# Manus HDF5 wrist 绝对轨迹回放。按 s 时由 Motive right_arm marker
+# 固定外参推导当前 wuji2 r_wrist Home；Enter 保压接近 H5 绝对
+# frame0，稳定后 r 装载后续轨迹；wrist→TCP 外参转换后只发布右臂目标。
 mocap_h5_replay:
   ros__parameters:
     min_cutoff: 1.2
@@ -56,6 +56,21 @@ mocap_h5_replay:
     maximum_angular_speed_rad_s: 1.55
     maximum_linear_acceleration_m_s2: 3.5
     maximum_angular_acceleration_rad_s2: 9.0
+    # Motive raw right_arm rigid frame -> marker URDF marker_mocap frame。
+    # Visuals: GL [-3,-4,0]mm；GO Pitch/Yaw/Roll [2,-90,0]deg。
+    right_rigid_to_marker_mocap_translation_m: [-0.003, -0.004, 0.0]
+    right_rigid_to_marker_mocap_quaternion_xyzw: [0.0123407149398269, -0.7069990853988243, 0.0123407149398269, 0.7069990853988243]
+    # right_arm marker 中心(G) -> wuji2 r_wrist(B)。机械安装轴关系：
+    # marker +x→mount +z、+y→mount -y、+z→mount +x。
+    right_marker_to_wrist_translation_m: [0.0325, 0.00025, 0.003]
+    right_marker_to_wrist_quaternion_xyzw: [0.0, -0.7071067811865476, 0.0, 0.7071067811865476]
+    # Tianji TCP(T) -> wuji2 r_wrist(B)，含 8mm marker 刚体。
+    right_tcp_to_wrist_translation_m: [0.00025, 0.003, 0.0365]
+    right_tcp_to_wrist_quaternion_xyzw: [0.7071067811865476, 0.7071067811865476, 0.0, 0.0]
+    # H5 Manus wrist(H) -> wuji2 r_wrist(B)：两者原点都是人手 wrist。
+    # H +x 指尖、+y 手背、+z 小拇指侧；B -z 指尖、-y 手背、+x 拇指侧。
+    right_h5_wrist_to_wuji2_wrist_translation_m: [0.0, 0.0, 0.0]
+    right_h5_wrist_to_wuji2_wrist_quaternion_xyzw: [0.7071067811865476, 0.0, -0.7071067811865476, 0.0]
     approach_position_tolerance_m: 0.002
     approach_orientation_tolerance_deg: 1.0
     approach_solved_position_tolerance_m: 0.005
