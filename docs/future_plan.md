@@ -53,24 +53,26 @@ T_M_marker·T_marker_rbase`，再用 `T_rbase_home·inverse(T_h5_0)`
 
 **已实现并验证**（`sim_mocap_h5` / `real_mocap_h5`）：
 
-- 绝对 wrist frame0 接近：s 每次读取实时 raw rigid，经 GL/GO 和安装
-  外参推导当前 `r_base` wrist；Enter 保压接近 H5 绝对 frame0；
-  稳定后 r 装载后续轨迹，再由 Enter 保压推进；
+- 绝对 wrist→r_base frame0 接近：s 读取实时 raw rigid，经 GL/GO、
+  marker→r_wrist 和固定 `r_wrist→r_base=Rx(π)` 推导 Home；Enter
+  保压接近，稳定后 r 装载后续轨迹；
 - raw `right_arm` rigid→URDF `marker_mocap` 使用 Motive Visuals：
   GL `[-3,-4,0]mm`、GO Pitch/Yaw/Roll `[2,-90,0]deg`；
-- marker_mocap→r_wrist：`[0.0325,0.00025,0.003]m` /
-  `[0,-0.70710678,0,0.70710678]`；
-- TCP→r_wrist：`[0.00025,0.003,0.0365]m` /
-  `[0.70710678,0.70710678,0,0]`；
+- 机械中间外参 marker_mocap→r_wrist：
+  `[0.0325,0.00025,0.003]m` / `[0,-0.70710678,0,0.70710678]`；
+- URDF `r_base→r_wrist`：同原点 `Rx(π)`；回放语义端点固定为
+  `r_base`，所有外参均由上述中间外参乘其逆派生；
+- 派生 TCP→r_base：`[0.00025,0.003,0.0365]m` /
+  `[0,0,0.70710678,0.70710678]`（整体取负等价）；
+- 派生 H5 Manus wrist→wuji2 r_base：`[0,0,0]m`，
+  旋转 `[[0,0,-1],[0,-1,0],[-1,0,0]]`（data→base，det=+1）；
+  对应 Manus→r_wrist 四元数 `[0,0.70710678,0,0.70710678]`（绕 y +90°）；
+  base `+x=-data z`、`+y=-data y`、`+z=-data x`；
 - 机械安装轴关系：marker `+x→mount +z`、`+y→mount -y`、
   `+z→mount +x`（右手旋转，det=+1）；
-- H5 Manus wrist→wuji2 `r_wrist`：
-  `[0,0,0]m` / `[0.70710678,0,-0.70710678,0]`；Manus
-  `+x/+y/+z` 分别为指尖/手背/小拇指侧，wuji2
-  `-z/-y/+x` 分别为指尖/手背/拇指侧；
 - `mocap_to_robot` 独立同向世界轴映射；
 - 组合 URDF 物理链为 TCP→marker(tianji/center/wuji2 三 frame)
-  →wuji2 `r_mount_frame`→`r_base` wrist，并自带双坐标轴；
+  →wuji2 `r_mount_frame`→`r_base`→`r_wrist`→fingers；
 - `real_mocap_h5` 严格 readiness，marker 名称日志去重。
 
 **验证证据**：

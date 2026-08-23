@@ -664,14 +664,13 @@ Zenoh 或机械臂 IK，也不会连接 Marvin 控制器。为兼容误用，旧
 
 ## 可选 HDF5 右腕轨迹回放（sim_mocap_h5 / real_mocap_h5）
 
-每次运行通过位置参数选择一个 `mocap-acquisition` v4.0 HDF5。H5
-`hands/right/wrist_*` 与 RL 的末端都是人手 wrist；机器人端对应
-wuji2 **`r_wrist`**（URDF 手腕坐标系）。实时 `right_arm` 是 8mm
-marker 刚体中心的测量坐标系，不是 wrist。按 `s` 时读取 raw rigid，
-经 GL/GO 变到 marker_mocap，再由固定外参推导当前 `r_wrist` 位姿；
-随后 Enter 保压让机器人 wrist 接近 H5 **绝对** wrist frame0，稳定后
-`r` 装载后续轨迹。wrist→Tianji TCP 固定外参转换后送入 IK。节点只
-发布右臂目标，左臂保持 Home；真机模式由 `real_mocap_h5` 复用主机链。
+每次运行通过位置参数选择一个 `mocap-acquisition` v4.0 HDF5。输入端
+是 Manus wrist；机器人端语义对应 wuji2 **`r_base`**，不是
+`r_wrist`。URDF 固定关节 `r_base→r_wrist` 为同原点 `Rx(π)`，回放
+显式乘其逆得到 `r_base`。按 `s` 时 raw `right_arm` 经 GL/GO 到
+marker_mocap，再由 marker→r_wrist→r_base 外参推导 Home；H5 wrist
+也经 Manus→r_wrist→r_base 转换。随后 `r_base→Tianji TCP` 固定外参
+送入 IK。节点只发布右臂目标，左臂保持 Home。
 
 ```bash
 # 选择本次要执行的轨迹
@@ -742,21 +741,19 @@ pixi run real_mocap_h5 -- --confirm-real
 真机桥连接时先以受限速度把双臂送到安全 Home。等待终端 2 明确提示
 “真机链路已就绪”（内部 `phase=armed_idle`）后，回终端 1 按 `s`：
 节点读取本次随机摆放下的 raw right_arm，应用 GL/GO 得到
-marker_mocap，推导当前 wuji2 `r_wrist` Motive 位姿。随后 Enter
-保压让机器人 wrist 移动到 H5 录制时的**绝对 wrist frame0**；稳定到达
-后完全松开 Enter，按 `r` 装载后续轨迹，再保压推进。入口只接受
-`speed <= 0.25`、`yaw-deg = 0`、IK 位于 Home、marker 新鲜有效。
+marker_mocap，再经固定 `r_wrist→r_base=Rx(π)` 推导 wuji2 `r_base`
+Motive 位姿。Enter 保压让机器人 `r_base` 接近 H5 wrist 转换后的
+绝对 frame0；稳定到达后完全松开 Enter，按 `r` 装载后续轨迹，再
+保压推进。入口只接受 `speed <= 0.25`、`yaw-deg = 0`、IK 位于 Home、
+marker 新鲜有效。
 
-安全操作顺序：
+操作顺序：
 
-1. 确认 Windows `natnet-zenoh` 正在发布有效 `right_arm`，并等待
-   IK 确认 Home。
-2. 保持 Enter 松开，按 `s`：读取本次 raw rigid，经 GL/GO 与安装外参
-   推导当前 `r_wrist`；进入 `approaching`。
-3. **按住 `Enter`**，使机器人 wrist 接近 H5 绝对 frame0；松开保持。
-4. 提示稳定到达 frame0 后完全松开 Enter，按 `r` 装载后续轨迹。
-5. 再按住 Enter 从 frame0 推进后续 wrist 轨迹；松开保持。
-6. 活动阶段按 `s` 取消并回 Home；按 `q` 回 Home 后退出。
+1. 启动终端 1，保持 Enter 松开；确认 H5 摘要与 marker 名称/ID 正确；
+2. 保持 Enter 松开，按 `s`：读取 raw rigid，推导当前 `r_base`；
+3. **按住 `Enter`**，使机器人 `r_base` 接近 H5 wrist→r_base frame0；
+4. 稳定后松开 Enter，按 `r` 装载后续轨迹；
+5. 再按住 Enter 推进；活动阶段按 `s` 回 Home，`q` 回 Home 后退出。
 
 位姿链：
 
@@ -779,9 +776,11 @@ marker→r_wrist 为 `[0.0325,0.00025,0.003]m` /
 `[0.00025,0.003,0.0365]m` / `[0.70710678,0.70710678,0,0]`。
 机械安装轴关系为 marker `+x→mount +z`、`+y→mount -y`、`+z→mount +x`；
 该关系为右手旋转（det=+1），且手指位于 marker +x 一侧。
-H5 Manus wrist 到 wuji2 `r_wrist` 还需后乘固定解剖轴旋转
-`[0.70710678,0,-0.70710678,0]`：Manus `+x` 指尖、`+y` 手背、
-`+z` 小拇指侧，对应 wuji2 `-z` 指尖、`-y` 手背、`+x` 拇指侧。
+H5 Manus wrist 先映射到 wuji2 `r_wrist`，再显式乘 URDF 固定逆变换
+`r_wrist→r_base=Rx(π)`。最终 Manus→`r_base` 旋转为
+`[[0,0,-1],[0,-1,0],[-1,0,0]]`（data→base，det=+1）：base
+`+x=-data z`、`+y=-data y`、`+z=-data x`。对应的
+`Manus→r_wrist` 四元数为 `[0,0.70710678,0,0.70710678]`（绕 y +90°）。
 marker 局部外参与世界轴转换是两件事，不得混用。
 首次修改运行文件后需重新执行 `pixi run -e ik-build deploy-ik`。
 

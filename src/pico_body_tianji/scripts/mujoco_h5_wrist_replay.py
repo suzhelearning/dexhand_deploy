@@ -38,6 +38,7 @@ from tianji_world_output.config_loader import get_config
 from mujoco_joint_viewer import (
     _POINT_COLORS,
     _add_frame_zero_skeleton,
+    _draw_axis,
     _frame_from_axis_geoms,
     _quat_wxyz_from_z_axis,
     _sim_from_motive_rotation,
@@ -270,11 +271,43 @@ def main(argv: list[str] | None = None) -> int:
                           f"frame0_bone_{index:02d}")
         for index in range(len(HAND_KEYPOINT_EDGES))
     ]
-    for geom_id in point_geom_ids + bone_geom_ids:
+    manus_axis_ids = [
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
+                          f"ax_manus_{index}")
+        for index in range(3)
+    ]
+    base_axis_ids = [
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
+                          f"ax_r_base_{index}")
+        for index in range(3)
+    ]
+    base_axis_fk_ids = [
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
+                          f"r_base_axis_{index}")
+        for index in range(3)
+    ]
+    for geom_id in (
+        point_geom_ids + bone_geom_ids + manus_axis_ids + base_axis_ids
+    ):
         if geom_id < 0:
-            raise RuntimeError(f"MuJoCo 模型缺少 frame0 骨架 geom：{geom_id}")
+            raise RuntimeError(
+                f"MuJoCo 模型缺少 frame0 骨架 geom：{geom_id}"
+            )
         model.geom_sameframe[geom_id] = 0
         model.geom_rgba[geom_id, 3] = 0.0
+    # 隐藏 URDF 自带的 TCP/marker/r_wrist/r_base 轴，只保留两套轴。
+    for prefix in (
+        "TCP_Link_R_axis_",
+        "marker_mocap_axis_",
+        "r_wrist_axis_",
+        "r_base_axis_",
+    ):
+        for index in range(3):
+            geom_id = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_GEOM, f"{prefix}{index}"
+            )
+            if geom_id >= 0:
+                model.geom_rgba[geom_id, 3] = 0.0
 
     wrist_axis_x = mujoco.mj_name2id(
         model, mujoco.mjtObj.mjOBJ_GEOM, "r_wrist_axis_0"
@@ -405,10 +438,73 @@ def main(argv: list[str] | None = None) -> int:
         _LOG.info("H5 与组合 URDF 校验通过")
         return 0
 
+    def apply_frame_axes(frame_index: int, points_mj: np.ndarray) -> None:
+        wrist_origin = points_mj[0]
+        quat = hand.wrist[frame_index, 3:7].copy()
+        if not np.isfinite(quat).all():
+            return
+        quat_norm = float(np.linalg.norm(quat))
+        if quat_norm < 1.0e-9:
+            return
+        quat /= quat_norm
+        x, y, z, w = quat
+        R_manus_motive = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+            ]
+        )
+        R_manus_sim = rotation_sim_from_motive @ R_manus_motive
+        _draw_axis(
+            model, manus_axis_ids[0], wrist_origin,
+            R_manus_sim[:, 0], 0.16, np.array([1.0, 0.0, 0.0, 0.95]),
+        )
+        _draw_axis(
+            model, manus_axis_ids[1], wrist_origin,
+            R_manus_sim[:, 1], 0.16, np.array([0.0, 1.0, 0.0, 0.95]),
+        )
+        _draw_axis(
+            model, manus_axis_ids[2], wrist_origin,
+            R_manus_sim[:, 2], 0.16, np.array([0.0, 0.0, 1.0, 0.95]),
+        )
+        # r_base 轴：组合 URDF 自带 r_base_axis_* 的 FK geom。
+        base_origin_fk = np.zeros(3)
+        base_axes_fk = np.zeros((3, 3))
+        for axis_index, fk_id in enumerate(base_axis_fk_ids):
+            unit = data.geom_xmat[fk_id].reshape(3, 3)[:, 2].copy()
+            unit /= np.linalg.norm(unit) + 1.0e-12
+            base_origin_fk += (
+                data.geom_xpos[fk_id] - (0.045 * unit)
+            )
+            base_axes_fk[:, axis_index] = unit
+        base_origin_fk /= 3.0
+        base_x = base_axes_fk[:, 0].copy()
+        base_x /= np.linalg.norm(base_x) + 1.0e-12
+        base_y_candidate = base_axes_fk[:, 1]
+        base_y = base_y_candidate - np.dot(base_y_candidate, base_x) * base_x
+        base_y /= np.linalg.norm(base_y) + 1.0e-12
+        base_z = np.cross(base_x, base_y)
+        base_z /= np.linalg.norm(base_z) + 1.0e-12
+        _draw_axis(
+            model, base_axis_ids[0], base_origin_fk,
+            base_x, 0.12, np.array([1.0, 0.0, 0.0, 0.95]),
+        )
+        _draw_axis(
+            model, base_axis_ids[1], base_origin_fk,
+            base_y, 0.12, np.array([0.0, 1.0, 0.0, 0.95]),
+        )
+        _draw_axis(
+            model, base_axis_ids[2], base_origin_fk,
+            base_z, 0.12, np.array([0.0, 0.0, 1.0, 0.95]),
+        )
+
     if args.headless:
         for frame_index in range(start_index, end_index + 1):
+            frame_points = pose_at(frame_index)
             _update_skeleton(model, data, point_geom_ids, bone_geom_ids,
-                             pose_at(frame_index))
+                             frame_points)
+            apply_frame_axes(frame_index, frame_points)
             mujoco.mj_forward(model, data)
         _LOG.info("无窗口回放完成：%d 帧", end_index - start_index + 1)
         return 0
@@ -484,10 +580,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if frame_index != last_frame:
                     with viewer.lock():
+                        frame_points = pose_at(frame_index)
                         _update_skeleton(
                             model, data, point_geom_ids, bone_geom_ids,
-                            pose_at(frame_index),
+                            frame_points,
                         )
+                        apply_frame_axes(frame_index, frame_points)
                         mujoco.mj_forward(model, data)
                     last_frame = frame_index
                 if time.monotonic() - last_log_at >= 2.0:
