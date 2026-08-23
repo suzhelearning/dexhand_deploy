@@ -11,15 +11,12 @@ NEW_WORKER="${STAGING_BIN}/tianji_official_ik_worker"
 RUNTIME_PROGRAMS=(
   pico_controller_input
   pico_controller_only_input
-  pico_link_probe
-  controller_only_trace
   controller_only_real_diagnostic
   marvin_hardware_bridge
   mocap_keyboard_step
   mocap_live
   mocap_h5_replay
   mujoco_joint_viewer.py
-  mujoco_regrind_replay.py
 )
 BACKUP_DIR="${BUNDLE_ROOT}/staging/runtime-backup"
 SDK_SOURCE_ROOT="${TIANJI_OFFICIAL_SDK_ROOT:-/home/ice/TJ_FX_ROBOT_CONTRL_SDK}"
@@ -74,8 +71,6 @@ for path in \
   "${RUNTIME_BIN}/tianji_official_ik_worker" \
   "${RUNTIME_BIN}/tianji_official_ik_worker.bin" \
   "${RUNTIME_BIN}/pico_controller_only_input" \
-  "${RUNTIME_BIN}/pico_link_probe" \
-  "${RUNTIME_BIN}/controller_only_trace" \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so" \
   "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
 do

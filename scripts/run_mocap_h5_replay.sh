@@ -157,34 +157,6 @@ if [[ ! -f "${H5_PATH}" ]]; then
 fi
 
 activate_bundle_runtime
-# Regrind HDF5 已经是 wuji2 r_base 自由根 + 20 关节 + 物体轨迹，
-# 不能进入 Manus wrist→机械臂 IK 链。保留旧入口的自动识别，避免用户
-# 因文件扩展名同为 .h5 而误用。
-if python -c \
-  'import h5py, sys; f=h5py.File(sys.argv[1], "r"); raise SystemExit(0 if "regrind_retargeting_joints" in f else 1)' \
-  "${H5_PATH}"
-then
-  if [[ "${WITH_MUJOCO}" != true && "${VALIDATE_ONLY}" != true ]]; then
-    printf '%s\n' '错误：Regrind 是独立 MuJoCo 回放，不支持 --topics-only。' >&2
-    exit 2
-  fi
-  if ! python -c \
-    'import sys; raise SystemExit(0 if abs(float(sys.argv[1])) < 1e-12 else 1)' \
-    "${YAW_DEG}"
-  then
-    printf '%s\n' \
-      '错误：Regrind 已是桌面中心 z-up/x-forward 坐标，不接受 --yaw-deg。' >&2
-    exit 2
-  fi
-  regrind_arguments=("${H5_PATH}" --speed "${SPEED}")
-  if [[ "${VALIDATE_ONLY}" == true ]]; then
-    regrind_arguments+=(--validate-only)
-  fi
-  printf '%s\n' \
-    '检测到 regrind_retargeting_*：切换到独立 wuji2+物体回放；' \
-    '不启动 Motive/Zenoh/IK，--wuji2/--right-rigid-id 对该格式不适用。'
-  exec "${SCRIPT_DIR}/run_regrind_h5_replay.sh" "${regrind_arguments[@]}"
-fi
 
 node_arguments=(
   "${H5_PATH}"

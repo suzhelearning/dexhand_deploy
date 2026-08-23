@@ -29,9 +29,6 @@ real_mocap_step = { cmd = "bash scripts/run_mocap_step_real.sh", depends-on = ["
 real_mocap_live = { cmd = "bash scripts/run_mocap_live_real.sh", depends-on = ["doctor"] }
 real_mocap_h5 = { cmd = "bash scripts/run_mocap_h5_real.sh", depends-on = ["doctor"], description = "复用低速 H5+IK 主机链路，经安全桥驱动 Marvin 真机（必须 --confirm-real）" }
 status = { cmd = "bash scripts/status.sh", depends-on = ["doctor"] }
-pico-probe = "bash scripts/probe_pico.sh"
-pico-adb = { cmd = "bash scripts/adb_reverse.sh", description = "PICO 经 adb reverse 访问本机 XRoboToolkit 服务（60061/63901）" }
-pico-adb-down = { cmd = "bash scripts/adb_reverse.sh down", description = "移除 adb reverse 规则" }
 controller-only-joints = "bash scripts/watch_controller_only_joints.sh"
 controller-only-trace = "bash scripts/run_controller_only_trace.sh"
 controller-only-real-diagnostic = "bash scripts/run_controller_only_real_diagnostic.sh"
@@ -40,9 +37,7 @@ sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --mujoco-
 sim_mocap_step = { cmd = "bash scripts/run_mocap_step.sh --mujoco-only", description = "mocap 键盘步进控制（动捕系 10mm/键，s 启停，Zenoh）" }
 sim_mocap_live = { cmd = "bash scripts/run_mocap_live.sh --mujoco-only", description = "Motive right_arm 定零 + 连续键盘位置步进 + 实时位姿显示（默认右臂 10mm/键，Zenoh）" }
 sim_mocap_h5 = { cmd = "bash scripts/run_mocap_h5_replay.sh --mujoco-only", description = "从 Motive right_arm 实测 Home 移动到 HDF5 Manus 右腕绝对轨迹的 Enter 保压回放（右臂，Zenoh）" }
-sim_regrind_h5 = { cmd = "bash scripts/run_regrind_h5_replay.sh", description = "独立回放 Regrind wuji2 自由根、20 关节和物体轨迹（桌面中心 z-up，MuJoCo）" }
 sim_mocap_h5_replay = { cmd = "bash scripts/run_mocap_h5_wrist_replay.sh", description = "机械臂+wuji2 H5 数据回放（Home 静止；right_arm 仅定位动捕原点；无 IK）" }
-mocap_circle_compare = { cmd = "bash scripts/run_mocap_circle_compare.sh", description = "同步录制右臂目标/IK 与 Motive right_arm 轨迹并生成坐标对齐对比图" }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
 
 # C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。

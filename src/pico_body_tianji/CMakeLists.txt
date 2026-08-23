@@ -162,15 +162,12 @@ install(
   PROGRAMS
     scripts/pico_controller_input
     scripts/pico_controller_only_input
-    scripts/pico_link_probe
-    scripts/controller_only_trace
     scripts/controller_only_real_diagnostic
     scripts/marvin_hardware_bridge
     scripts/mocap_keyboard_step
     scripts/mocap_live
     scripts/mocap_h5_replay
     scripts/mujoco_joint_viewer.py
-    scripts/mujoco_regrind_replay.py
   DESTINATION lib/${PROJECT_NAME}
 )
 install(
