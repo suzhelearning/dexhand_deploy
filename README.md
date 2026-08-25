@@ -81,14 +81,14 @@ pixi run sim_mocap_live
 pixi run real_mocap_live -- --confirm-real
 ```
 
-- 终端 1 先等日志出现 `刚体名映射已更新：{..., 10: 'right_arm'}` 和
+- 终端 1 先等日志出现 `刚体名映射已更新：{..., 3: 'tianji_wrist'}` 和
   `Motive right frame=... tracking=ok`（动捕数据已到）；
 - 终端 2 等 `真机链路已就绪：保持安全零位，主机开始遥操作后跟随`，
   再回到终端 1 操作；
 
 | 按键 | 作用 |
 | --- | --- |
-| `s` | 冻结 `right_arm` 当前位姿为零点，开始控制 |
+| `s` | 冻结 `tianji_wrist` 当前位姿为零点，开始控制 |
 | `↑/↓/←/→/1/0` | 连续累计步进（每键 10mm，动捕系），可无限次 |
 | `c` | 零位装载右臂正面圆轨迹；此时不会自行运动 |
 | 按住 `Enter` | 推进圆轨迹；松开后一个 60Hz 控制周期内暂停，再按继续 |
@@ -578,9 +578,8 @@ key，不发布控制命令；结束后会打印输入速度/加速度、椭球�
 | `pixi run real -- --confirm-real` | 复用正在运行的 sim，启动真机桥 | **是** |
 | `pixi run sim_controller_only` | 纯手柄 IK 的 MuJoCo 仿真 | 否 |
 | `pixi run sim_mocap_step` | mocap 键盘步进控制（动捕系 10mm/键，s 启停） | 否 |
-| `pixi run sim_mocap_live` | Motive `right_arm` 定零 + 连续键盘位置步进（默认右臂 10mm/键） | 否 |
+| `pixi run sim_mocap_live` | Motive `tianji_wrist` 定零 + 连续键盘位置步进（默认右臂 10mm/键） | 否 |
 | `pixi run sim_mocap_h5 -- TAKE.h5` | 选择一个 mocap HDF5，回放 Manus 右腕轨迹（Enter 保压） | 否 |
-| `pixi run sim_regrind_h5 -- TAKE_REGRIND.h5` | 回放 Regrind wuji2 自由根、20 关节和物体轨迹 | 否 |
 | `pixi run real_mocap_step -- --confirm-real` | 复用键盘步进仿真，启动真机桥 | **是** |
 | `pixi run real_mocap_live -- --confirm-real` | 复用 Motive 定零键盘步进仿真，启动真机桥 | **是** |
 | `pixi run real_mocap_h5 -- --confirm-real` | 复用低速 H5 + IK 主机，启动真机安全桥 | **是** |
@@ -593,7 +592,7 @@ key，不发布控制命令；结束后会打印输入速度/加速度、椭球�
 
 ## mocap 键盘步进控制（sim_mocap_step）
 
-不用 PICO、不回放 h5：键盘在**动捕坐标系**（Motive，y-up）里给
+不用 PICO、不回放 h5：键盘在**动捕坐标系**（Motive，z-up）里给
 机器人末端目标增量，每次按键 10mm（`--step-mm` 可调），目标经
 Zenoh 发布（`/pico_body/{left,right}_arm_target_pose`）送入可配置
 IK，按键后 0.5s 持续映射让滤波/整形收敛到完整步长。
@@ -637,40 +636,15 @@ pixi run real_mocap_step -- --confirm-real
 命令就绪且位于 Home 时进入 armed_idle，随后按 `s` 开始、方向键
 步进（默认仅右臂 10mm/键）、再按 `s` 回 Home、`q` 退出。
 
-## Regrind wuji2 关节轨迹回放（sim_regrind_h5）
-
-Regrind 文件不是 `mocap-acquisition v4` Manus wrist 数据，不能送入
-`sim_mocap_h5` 的机械臂 IK 链。它直接提供桌面中心 z-up 世界系中的
-wuji2 `r_base` 自由根、20 个关节和物体位姿；四元数为 WXYZ。回放器
-只读取 `regrind_retargeting_*`，明确不读取同文件中穿透率高的
-`wuji_retargeting_*` 对照结果。
-
-```bash
-# 手 + 锤子 + 桌面的独立 MuJoCo 回放
-pixi run sim_regrind_h5 -- /path/to/take_regrind_50hz.h5 --speed 1
-
-# 循环回放，或启动后停在 frame0
-pixi run sim_regrind_h5 -- /path/to/take_regrind_50hz.h5 --loop
-pixi run sim_regrind_h5 -- /path/to/take_regrind_50hz.h5 --paused
-
-# 校验 H5、同目录 right.urdf/锤子资产、关节限位和首末帧
-pixi run sim_regrind_h5 -- /path/to/take_regrind_50hz.h5 --validate-only
-```
-
-窗口内 `Space` 暂停/继续，`R` 从 frame0 重播。该路径不启动 Motive、
-Zenoh 或机械臂 IK，也不会连接 Marvin 控制器。为兼容误用，旧的
-`sim_mocap_h5` 入口检测到 `regrind_retargeting_joints` 时也会自动切换
-到此独立回放路径。
-
 ## 可选 HDF5 右腕轨迹回放（sim_mocap_h5 / real_mocap_h5）
 
 每次运行通过位置参数选择一个 `mocap-acquisition` v4.0 HDF5。输入端
-是 Manus wrist；机器人端语义对应 wuji2 **`r_base`**，不是
-`r_wrist`。URDF 固定关节 `r_base→r_wrist` 为同原点 `Rx(π)`，回放
-显式乘其逆得到 `r_base`。按 `s` 时 raw `right_arm` 经 GL/GO 到
-marker_mocap，再由 marker→r_wrist→r_base 外参推导 Home；H5 wrist
-也经 Manus→r_wrist→r_base 转换。随后 `r_base→Tianji TCP` 固定外参
-送入 IK。节点只发布右臂目标，左臂保持 Home。
+是 Manus wrist；机器人端直接对应 wuji hand2 beta1 厂商 URDF 的
+**`r_wrist`**。按 `s` 时 raw `tianji_wrist` 经 GL/GO 到
+`marker_mocap`，再经机械安装链定位 `r_mount` 和 `r_wrist` Home；
+H5 Manus wrist 通过固定轴映射直接转换到 `r_wrist`。随后
+`r_wrist→Tianji TCP` 固定外参送入 IK。节点只发布右臂目标，左臂
+保持 Home。
 
 ```bash
 # 选择本次要执行的轨迹
@@ -685,11 +659,11 @@ pixi run sim_mocap_h5 -- /path/to/another_take.h5
 # 只校验文件结构、有效帧和时长；不启动 IK，不运动
 pixi run sim_mocap_h5 -- /path/to/take.h5 --validate-only
 
-# 可选：无 MuJoCo、回放倍速、Motive +Y 朝向修正
+# 可选：无 MuJoCo、回放倍速、Motive +Z 朝向修正
 pixi run sim_mocap_h5 -- /path/to/take.h5 --topics-only
 pixi run sim_mocap_h5 -- /path/to/take.h5 --speed 0.5 --yaw-deg 10
 
-# 刚体名称不是 right_arm 时可显式指定名称或数字 id
+# 刚体名称不是 tianji_wrist 时可显式指定名称或数字 id
 pixi run sim_mocap_h5 -- /path/to/take.h5 --right-rigid-id tianji_tcp
 ```
 
@@ -702,15 +676,15 @@ pixi run sim_mocap_h5 -- /path/to/take.h5 --right-rigid-id tianji_tcp
 骨架不经过 `right_chest` 重建，也不使用 marker/wrist 局部姿态定义
 世界轴。旋转固定为
 `R_sim_from_motive = R_sim_from_robot_world * mocap_to_robot`；
-`right_arm → marker → r_wrist` 只计算 Motive Home 原点位置，再用
-`t_sim_from_motive = p_sim_wrist_home -
+`tianji_wrist → marker → r_mount → r_wrist` 计算 Motive Home 原点
+位置，再用 `t_sim_from_motive = p_sim_wrist_home -
 R_sim_from_motive * p_motive_wrist_home` 求平移。关键点只应用这一组
 固定世界轴 + Home 原点变换，因此骨段长度和 H5 绝对姿态保持不变。
 
 ### 机械臂 Home 场景纯 H5 数据回放（sim_mocap_h5_replay）
 
 机械臂加载 wuji2 组合 URDF 并保持配置 Home 关节角，不启动 IK、不
-发布控制目标。运行时只订阅一次 Motive `right_arm` 定位动捕原点；
+发布控制目标。运行时只订阅一次 Motive `tianji_wrist` 定位动捕原点；
 世界旋转始终使用固定 `mocap_to_robot`，然后播放 H5 右手 21 点轨迹：
 
 ```bash
@@ -740,48 +714,51 @@ pixi run real_mocap_h5 -- --confirm-real
 
 真机桥连接时先以受限速度把双臂送到安全 Home。等待终端 2 明确提示
 “真机链路已就绪”（内部 `phase=armed_idle`）后，回终端 1 按 `s`：
-节点读取本次随机摆放下的 raw right_arm，应用 GL/GO 得到
-marker_mocap，再经固定 `r_wrist→r_base=Rx(π)` 推导 wuji2 `r_base`
-Motive 位姿。Enter 保压让机器人 `r_base` 接近 H5 wrist 转换后的
-绝对 frame0；稳定到达后完全松开 Enter，按 `r` 装载后续轨迹，再
-保压推进。入口只接受 `speed <= 0.25`、`yaw-deg = 0`、IK 位于 Home、
-marker 新鲜有效。
+节点读取本次随机摆放下的 raw tianji_wrist，应用 GL/GO 得到
+marker_mocap，再经固定安装链推导 wuji2 `r_mount` 与 `r_wrist`
+Motive 位姿。Enter 保压让机器人 `r_wrist` 接近 H5 Manus wrist
+转换后的绝对 frame0；稳定到达后完全松开 Enter，按 `r` 装载后续
+轨迹，再保压推进。入口只接受 `speed <= 0.25`、`yaw-deg = 0`、
+IK 位于 Home、marker 新鲜有效。
 
 操作顺序：
 
 1. 启动终端 1，保持 Enter 松开；确认 H5 摘要与 marker 名称/ID 正确；
-2. 保持 Enter 松开，按 `s`：读取 raw rigid，推导当前 `r_base`；
-3. **按住 `Enter`**，使机器人 `r_base` 接近 H5 wrist→r_base frame0；
+2. 保持 Enter 松开，按 `s`：读取 raw rigid，推导当前 `r_mount/r_wrist`；
+3. **按住 `Enter`**，使机器人 `r_wrist` 接近 H5 wrist→r_wrist frame0；
 4. 稳定后松开 Enter，按 `r` 装载后续轨迹；
 5. 再按住 Enter 推进；活动阶段按 `s` 回 Home，`q` 回 Home 后退出。
 
 位姿链：
 
 ```text
-T_M_marker_home = T_M_right_arm_raw · T_raw_marker_mocap
-T_M_wrist_home  = T_M_marker_home · T_marker_wrist
+T_M_marker_home = T_M_tianji_wrist_raw · T_raw_marker_mocap
+T_M_mount_home  = T_M_marker_home · T_marker_mount
+T_M_wrist_home  = T_M_mount_home · T_mount_wrist
 T_M_tcp_home    = T_M_wrist_home · inverse(T_tcp_wrist)
-T_M_wrist_des(t)= T_M_h5_wrist(t)                 # 绝对 Motive wrist
+T_M_wrist_des(t)= T_M_h5_wrist(t) · T_manus_wrist
 T_M_tcp_des(t)  = T_M_wrist_des(t) · inverse(T_tcp_wrist)
 ```
 
-Motive 世界系（+x 左、+y 上、+z 前）到天机世界系（+X 前、+Y 左、
-+Z 上）使用 `mocap_to_robot=[[0,0,1],[1,0,0],[0,1,0]]`。raw
-`right_arm` rigid 还需先应用 Motive Visuals 外参：GL
-`[-3,-4,0]mm`、GO Pitch/Yaw/Roll `[2,-90,0]deg`，得到 URDF
-`marker_mocap` frame（`T_world_marker=T_world_rigid·T_rigid_marker`）。
-rigid→marker 四元数为 `[0.01234071,-0.70699909,0.01234071,0.70699909]`。
-marker→r_wrist 为 `[0.0325,0.00025,0.003]m` /
-`[0,-0.70710678,0,0.70710678]`；TCP→r_wrist 为
-`[0.00025,0.003,0.0365]m` / `[0.70710678,0.70710678,0,0]`。
-机械安装轴关系为 marker `+x→mount +z`、`+y→mount -y`、`+z→mount +x`；
-该关系为右手旋转（det=+1），且手指位于 marker +x 一侧。
-H5 Manus wrist 先映射到 wuji2 `r_wrist`，再显式乘 URDF 固定逆变换
-`r_wrist→r_base=Rx(π)`。最终 Manus→`r_base` 旋转为
-`[[0,0,-1],[0,-1,0],[-1,0,0]]`（data→base，det=+1）：base
-`+x=-data z`、`+y=-data y`、`+z=-data x`。对应的
-`Manus→r_wrist` 四元数为 `[0,0.70710678,0,0.70710678]`（绕 y +90°）。
-marker 局部外参与世界轴转换是两件事，不得混用。
+Motive 世界系与机器人世界系现在统一为 +X 前、+Y 左、+Z 上，
+`mocap_to_robot` 为单位矩阵。raw `tianji_wrist` rigid 先应用 Motive
+Visuals 外参：GL `[1,-4,2]mm`、GO Pitch/Yaw/Roll `[-1,10,0]deg`，
+得到 URDF `marker_mocap` frame
+（`T_world_marker=T_world_rigid·T_rigid_marker`）；rigid→marker
+四元数为 `[-0.00869333,0.08715242,0.00076057,0.99615677]`。
+
+`marker_mocap→r_mount` 为 `[0.004,0,0]m` / 
+`[0,-0.70710678,0,0.70710678]`。厂商 beta1 固定关节
+`r_mount→r_wrist` 为 `[0.003,0.00025016,-0.0285]m` /
+`[0,0,0.0000081995,0.99999999997]`。TCP→r_mount 为
+`[0,0,0.008]m` / `[0.70710678,0.70710678,0,0]`；所有 wrist 外参均
+由这条物理链派生。
+
+H5 Manus wrist 直接映射到 wuji2 `r_wrist`。旋转为
+`[[0,0,-1],[0,-1,0],[-1,0,0]]`（Manus→r_wrist，det=+1）：
+Manus `+x/+y/+z` 分别对应 r_wrist `-z/-y/-x`；四元数为
+`[0.70710678,0,-0.70710678,0]`。marker 局部外参与世界轴转换是
+两件事，不得混用。
 首次修改运行文件后需重新执行 `pixi run -e ik-build deploy-ik`。
 
 **Motive 刚体定零 + 键盘步进/正面圆轨迹（sim_mocap_live / real_mocap_live）**：
@@ -839,49 +816,10 @@ pixi run real_mocap_live -- --confirm-real
 
 ### 正面圆轨迹录制与坐标对齐对比
 
-录制器同时订阅三路数据：
-
-- `pico_body/right_arm_target_pose`：`right_chest` 系下的控制目标；
-- `pico_body_sim/right_arm/solved_pose`：IK 解算的右臂末端位姿；
-- `mocap/hands/frame`：Motive 系下 `right_arm` 刚体实测位姿。
-
-三路原始坐标和接收时间分别保留。对比时各自减去装载圆轨迹前的零点，
-再使用控制链同一组
-`world_to_chest(right) @ mocap_to_robot` 矩阵（Motive 系与 PICO 系
-水平轴相差 180°，动捕链路专用同向映射）把 Motive 相对位移映射
-到 `right_chest`；不会直接叠加两个原生坐标系。按接收时间线性对齐，
-同时给出直接误差和自动估计时间滞后后的误差。
-
-```bash
-# Terminal 1：先启动仿真主机；真机对比时再另起 real_mocap_live
-pixi run sim_mocap_live -- --circle-speed-mm-s 30
-
-# Terminal 2：必须在 Terminal 1 按 s、c 之前启动
-pixi run mocap_circle_compare
-
-# 然后回 Terminal 1：s 定零 → c 装载 → 持续按住 Enter；
-# 整圆结束后 Terminal 2 自动保存并退出。
-```
-
-默认输出到 `log/mocap_circle_compare/YYYYmmdd_HHMMSS/`：
-
-- `raw_target_right_chest.csv`、`raw_solved_right_chest.csv`、
-  `raw_motive_right_arm.csv`：三路原始样本；
-- `comparison_right_chest.csv`：同一时间轴、统一 `right_chest` 相对位移
-  和三维误差；
-- `summary.json`：样本数、坐标矩阵、直接 RMSE/P95/最大误差、估计滞后
-  和滞后补偿误差；
-- `trajectory_comparison.svg`：控制目标、IK 解算和 Motive 实测的轨迹
-  平面叠图及 X/Y/Z 时序图；
-- `raw_status.jsonl`：圆速度、进度、Enter 保压状态等原始 status。
-
-可用 `--output-dir PATH`、`--right-rigid-id NAME_OR_ID`、
-`--maximum-lag-seconds N` 调整录制。`--circle-speed-mm-s` 属于
-`sim_mocap_live` 主机参数；真机桥复用该主机的 IK 命令，因此真机
-对比时也由 Terminal 1 的该参数决定画圆速度。
+录制器同时订阅三路数据（已废弃，代码已移除）：
 
 按 `s` 定零时，所选刚体必须存在、`tracking_valid=true` 且最新帧不超过
-0.5s；默认只要求 `right_arm`。终端每 0.5s 显示所选 Motive 刚体的
+0.5s；默认只要求 `tianji_wrist`。终端每 0.5s 显示所选 Motive 刚体的
 `frame`、跟踪状态、帧龄、位置 `p[m]`、四元数 `q[xyzw]`、累计目标
 位移 `key_delta[mm]` 和阶段；同一数据写入 status 的 `motive_pose`。
 圆轨迹进度和保压状态写入 `circle_trajectory`，包括

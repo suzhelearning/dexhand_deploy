@@ -56,18 +56,18 @@ mocap_h5_replay:
     maximum_angular_speed_rad_s: 1.55
     maximum_linear_acceleration_m_s2: 3.5
     maximum_angular_acceleration_rad_s2: 9.0
-    # Motive raw right_arm rigid frame -> marker URDF marker_mocap frame。
-    # Visuals: GL [-3,-4,0]mm；GO Pitch/Yaw/Roll [2,-90,0]deg。
-    right_rigid_to_marker_mocap_translation_m: [-0.003, -0.004, 0.0]
-    right_rigid_to_marker_mocap_quaternion_xyzw: [0.0123407149398269, -0.7069990853988243, 0.0123407149398269, 0.7069990853988243]
-    # right_arm marker 中心(G) -> wuji2 r_wrist(B)。机械安装轴关系：
-    # marker +x→mount +z、+y→mount -y、+z→mount +x。
-    right_marker_to_wrist_translation_m: [0.0325, 0.00025, 0.003]
-    right_marker_to_wrist_quaternion_xyzw: [0.0, -0.7071067811865476, 0.0, 0.7071067811865476]
-    # Tianji TCP(T) -> wuji2 r_wrist(B)，含 8mm marker 刚体。
-    right_tcp_to_wrist_translation_m: [0.00025, 0.003, 0.0365]
-    right_tcp_to_wrist_quaternion_xyzw: [0.7071067811865476, 0.7071067811865476, 0.0, 0.0]
-    # H5 Manus wrist(H) -> wuji2 r_wrist(B)：两者原点都是人手 wrist。
+    # Motive raw tianji_wrist rigid frame -> marker URDF marker_mocap frame。
+    # Visuals: GL [1,-4,2]mm；GO Pitch/Yaw/Roll [-1,10,0]deg。
+    right_rigid_to_marker_mocap_translation_m: [0.001, -0.004, 0.002]
+    right_rigid_to_marker_mocap_quaternion_xyzw: [-0.0086933284, 0.0871524241, 0.0007605677, 0.9961567661]
+    # marker_mocap(G) -> beta1 r_mount(M)：marker 中心到手侧面 4mm，
+    # marker_wuji2 与 r_mount 的安装旋转为 Ry(-90°)。
+    right_marker_to_mount_translation_m: [0.004, 0.0, 0.0]
+    right_marker_to_mount_quaternion_xyzw: [0.0, -0.7071067811865476, 0.0, 0.7071067811865476]
+    # Tianji TCP(T) -> beta1 r_mount(M)，含 8mm marker 刚体。
+    right_tcp_to_mount_translation_m: [0.0, 0.0, 0.008]
+    right_tcp_to_mount_quaternion_xyzw: [0.7071067811865476, 0.7071067811865476, 0.0, 0.0]
+    # H5 Manus wrist(H) -> wuji2 r_wrist(B)：两者原点都是 wrist。
     # H +x 指尖、+y 手背、+z 小拇指侧；B -z 指尖、-y 手背、+x 拇指侧。
     right_h5_wrist_to_wuji2_wrist_translation_m: [0.0, 0.0, 0.0]
     right_h5_wrist_to_wuji2_wrist_quaternion_xyzw: [0.7071067811865476, 0.0, -0.7071067811865476, 0.0]

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """mocap 键盘步进控制节点（Zenoh 通讯版，替代 ROS 2 链路）。
 
-不用 PICO、不回放 h5：键盘在动捕（Motive/y-up）坐标系里给机器人
-末端目标增量，每次按键 10mm（可配 --step-mm）：
+不用 PICO、不回放 h5：键盘在动捕（Motive/x-forward-z-up）坐标系里给
+机器人末端目标增量，每次按键 10mm（可配 --step-mm）：
 
     上 ← 动捕 +z        下 ← 动捕 -z
-    左 ← 动捕 +x        右 ← 动捕 -x
-    '1' ← 动捕 +y       '0' ← 动捕 -y
+    左 ← 动捕 +y        右 ← 动捕 -y
+    '1' ← 动捕 +x       '0' ← 动捕 -x
     's' 开始回放（armed 时）/ 结束并回 Home（步进中）
     'q' / Ctrl+C 退出（步进中先回 Home 再退出）
 
 命令经与在线 PICO 相同的映射链路（增量相对参考帧 → mocap_to_robot
-（Motive 系 +X 左 / +Z 前，与 PICO 系水平轴相差 180°，不能复用
-pico_to_robot）→ world→chest → One-Euro → 1:1 目标整形）经 Zenoh 发布到
+（Motive 系 +X 前 / +Y 左 / +Z 上，与机器人 world 系同向，单位阵）
+→ world→chest → One-Euro → 1:1 目标整形）经 Zenoh 发布到
 tianji_kinematic_sim（key：/pico_body/{left,right}_arm_target_pose 与
 _elbow_direction，JSON 与 zenoh 分支 C++ 节点协议一致），机器人末端
 每次按键移动 10mm。方向键为 raw 模式转义序列（\\x1b[A/B/C/D），由

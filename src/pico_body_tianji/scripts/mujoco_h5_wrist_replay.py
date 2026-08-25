@@ -2,12 +2,12 @@
 """机械臂+wuji2 场景的 H5 数据回放（不启动 IK、不控制机械臂）。
 
 加载组合 URDF 并摆到 sim_mocap_h5 的 Home 关节角；订阅 Motive
-``right_arm`` 只用于定位动捕原点，世界轴固定使用
-``Motive→Robot world→MuJoCo``。H5 右手 21 点世界坐标据此映射到
-MuJoCo，并按时间轴播放；机械臂关节保持 Home 不变。
+``tianji_wrist`` 只用于经 marker 安装链定位 ``r_mount/r_wrist``，
+世界轴固定使用 ``Motive→Robot world→MuJoCo``。H5 右手 21 点世界
+坐标据此映射到 MuJoCo，并按时间轴播放；机械臂关节保持 Home 不变。
 
 与 ``sim_mocap_h5`` 的区别：本脚本不驱动 IK、不发布目标话题，只读取
-一次实时 right_arm 原点标定并可视化 H5 数据。
+一次实时 tianji_wrist 原点标定并可视化 H5 数据。
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from pico_body_tianji.controller_only.mocap_h5 import (
 )
 from pico_body_tianji.controller_only.mocap_h5_replay_node import (
     DEFAULT_PARAMETERS,
+    _WUJI2_MOUNT_TO_WRIST_POSE,
 )
 from pico_body_tianji.joint_state_model import urdf_joint_names
 from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
@@ -95,9 +96,9 @@ def _configured_pose(prefix: str) -> np.ndarray:
 
 
 def _read_right_arm_pose(spec: str | None) -> np.ndarray:
-    """获取 right_arm 刚体在 Motive 系位姿（x,y,z,qx,qy,qz,qw）。
+    """获取 tianji_wrist 刚体的 Motive 位姿（x,y,z,qx,qy,qz,qw）。
 
-    给定 spec 时直接解析；否则订阅 mocap/hands/frame 取 id=3（right_arm）。
+    给定 spec 时直接解析；否则订阅 mocap/hands/frame 取当前 id=3。
     """
     if spec:
         values = np.asarray(
@@ -136,7 +137,7 @@ def _read_right_arm_pose(spec: str | None) -> np.ndarray:
     subscriber = session.declare_subscriber(
         "mocap/hands/frame", on_frame
     )
-    _LOG.info("等待 Motive right_arm 位姿（订阅 mocap/hands/frame）...")
+    _LOG.info("等待 Motive tianji_wrist 位姿（订阅 mocap/hands/frame）...")
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         if "pose" in holder:
@@ -147,7 +148,7 @@ def _read_right_arm_pose(spec: str | None) -> np.ndarray:
     subscriber.undeclare()
     session.close()
     raise TimeoutError(
-        "未在 5s 内收到 right_arm 位姿；请用 --right-arm-pose 指定，"
+        "未在 5s 内收到 tianji_wrist 位姿；请用 --right-arm-pose 指定，"
         "或确认 Motive windows_pub.sh 在运行"
     )
 
@@ -156,7 +157,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "机械臂+wuji2 场景 H5 手部数据回放；机械臂保持 Home，"
-            "只移动手部骨架；不启动 IK，只读 right_arm 定位原点"
+            "只移动手部骨架；不启动 IK，只读 tianji_wrist 定位原点"
         )
     )
     parser.add_argument("h5", type=Path)
@@ -178,15 +179,16 @@ def _parser() -> argparse.ArgumentParser:
         "--yaw-deg",
         type=float,
         default=0.0,
-        help="绕 Motive +Y 旋转整条手部轨迹",
+        help="绕 Motive 竖直轴(+Z)旋转整条手部轨迹",
     )
     parser.add_argument(
         "--right-arm-pose",
         type=str,
         default=None,
         help=(
-            "right_arm 刚体在 Motive 系的位姿 'x,y,z,qx,qy,qz,qw'；"
-            "用于定位动捕原点。缺省时自动订阅 mocap/hands/frame 读 right_arm。"
+            "tianji_wrist 刚体在 Motive 系的位姿 "
+            "'x,y,z,qx,qy,qz,qw'；用于定位动捕原点。缺省时自动订阅 "
+            "mocap/hands/frame 读取当前 id=3。"
         ),
     )
     return parser
@@ -276,18 +278,18 @@ def main(argv: list[str] | None = None) -> int:
                           f"ax_manus_{index}")
         for index in range(3)
     ]
-    base_axis_ids = [
+    wrist_axis_ids = [
         mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
-                          f"ax_r_base_{index}")
+                          f"ax_r_wrist_{index}")
         for index in range(3)
     ]
-    base_axis_fk_ids = [
+    wrist_axis_fk_ids = [
         mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
-                          f"r_base_axis_{index}")
+                          f"r_wrist_axis_{index}")
         for index in range(3)
     ]
     for geom_id in (
-        point_geom_ids + bone_geom_ids + manus_axis_ids + base_axis_ids
+        point_geom_ids + bone_geom_ids + manus_axis_ids + wrist_axis_ids
     ):
         if geom_id < 0:
             raise RuntimeError(
@@ -295,12 +297,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         model.geom_sameframe[geom_id] = 0
         model.geom_rgba[geom_id, 3] = 0.0
-    # 隐藏 URDF 自带的 TCP/marker/r_wrist/r_base 轴，只保留两套轴。
+    # 隐藏 URDF 自带的 TCP/marker/r_wrist 轴，只保留两套动态轴。
     for prefix in (
         "TCP_Link_R_axis_",
         "marker_mocap_axis_",
         "r_wrist_axis_",
-        "r_base_axis_",
     ):
         for index in range(3):
             geom_id = mujoco.mj_name2id(
@@ -351,21 +352,25 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # 固定世界轴：Motive→Robot world→MuJoCo。
-    # right_arm marker 的局部姿态不参与该旋转。
+    # tianji_wrist marker 的局部姿态不参与该旋转。
     rotation_sim_from_motive = _sim_from_motive_rotation(
         home_tcp_rotation_mj, tianji_config
     )
 
-    # right_arm 仅定位动捕原点：其姿态只用于把局部 marker/wrist 平移
-    # 偏置旋转到 Motive 世界，再用对应的 MuJoCo Home r_wrist 求平移。
+    # tianji_wrist 仅定位动捕原点：其姿态把 GL/GO、marker→r_mount
+    # 和厂商 r_mount→r_wrist 平移旋转到 Motive 世界。
     rigid_pose = _read_right_arm_pose(args.right_arm_pose)
     marker_home_motive = compose_pose(
         rigid_pose,
         _configured_pose("right_rigid_to_marker_mocap"),
     )
-    wrist_home_motive = compose_pose(
+    mount_home_motive = compose_pose(
         marker_home_motive,
-        _configured_pose("right_marker_to_wrist"),
+        _configured_pose("right_marker_to_mount"),
+    )
+    wrist_home_motive = compose_pose(
+        mount_home_motive,
+        _WUJI2_MOUNT_TO_WRIST_POSE,
     )
     translation_sim_from_motive = (
         home_position_mj
@@ -373,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     _LOG.info(
         "坐标标定：Motive +X→Sim %s，+Y→Sim %s，+Z→Sim %s；"
-        "原点平移=%s；right_arm 姿态仅用于局部偏置",
+        "原点平移=%s；tianji_wrist 姿态仅用于局部偏置",
         np.round(rotation_sim_from_motive[:, 0], 4).tolist(),
         np.round(rotation_sim_from_motive[:, 1], 4).tolist(),
         np.round(rotation_sim_from_motive[:, 2], 4).tolist(),
@@ -419,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _LOG.info(
         "H5 数据回放：%s；右手有效=%d/%d；首帧=%d 末帧=%d；时长=%.3fs；"
-        "speed=%g；机械臂保持 Home；只读 right_arm 原点，不启动 IK",
+        "speed=%g；机械臂保持 Home；只读 tianji_wrist 原点，不启动 IK",
         recording.path,
         int(hand.valid.sum()),
         recording.frame_count,
@@ -468,35 +473,38 @@ def main(argv: list[str] | None = None) -> int:
             model, manus_axis_ids[2], wrist_origin,
             R_manus_sim[:, 2], 0.16, np.array([0.0, 0.0, 1.0, 0.95]),
         )
-        # r_base 轴：组合 URDF 自带 r_base_axis_* 的 FK geom。
-        base_origin_fk = np.zeros(3)
-        base_axes_fk = np.zeros((3, 3))
-        for axis_index, fk_id in enumerate(base_axis_fk_ids):
+        # r_wrist 轴：组合 URDF 自带 r_wrist_axis_* 的 FK geom。
+        wrist_origin_fk = np.zeros(3)
+        wrist_axes_fk = np.zeros((3, 3))
+        for axis_index, fk_id in enumerate(wrist_axis_fk_ids):
             unit = data.geom_xmat[fk_id].reshape(3, 3)[:, 2].copy()
             unit /= np.linalg.norm(unit) + 1.0e-12
-            base_origin_fk += (
+            wrist_origin_fk += (
                 data.geom_xpos[fk_id] - (0.045 * unit)
             )
-            base_axes_fk[:, axis_index] = unit
-        base_origin_fk /= 3.0
-        base_x = base_axes_fk[:, 0].copy()
-        base_x /= np.linalg.norm(base_x) + 1.0e-12
-        base_y_candidate = base_axes_fk[:, 1]
-        base_y = base_y_candidate - np.dot(base_y_candidate, base_x) * base_x
-        base_y /= np.linalg.norm(base_y) + 1.0e-12
-        base_z = np.cross(base_x, base_y)
-        base_z /= np.linalg.norm(base_z) + 1.0e-12
+            wrist_axes_fk[:, axis_index] = unit
+        wrist_origin_fk /= 3.0
+        wrist_x = wrist_axes_fk[:, 0].copy()
+        wrist_x /= np.linalg.norm(wrist_x) + 1.0e-12
+        wrist_y_candidate = wrist_axes_fk[:, 1]
+        wrist_y = (
+            wrist_y_candidate
+            - np.dot(wrist_y_candidate, wrist_x) * wrist_x
+        )
+        wrist_y /= np.linalg.norm(wrist_y) + 1.0e-12
+        wrist_z = np.cross(wrist_x, wrist_y)
+        wrist_z /= np.linalg.norm(wrist_z) + 1.0e-12
         _draw_axis(
-            model, base_axis_ids[0], base_origin_fk,
-            base_x, 0.12, np.array([1.0, 0.0, 0.0, 0.95]),
+            model, wrist_axis_ids[0], wrist_origin_fk,
+            wrist_x, 0.12, np.array([1.0, 0.0, 0.0, 0.95]),
         )
         _draw_axis(
-            model, base_axis_ids[1], base_origin_fk,
-            base_y, 0.12, np.array([0.0, 1.0, 0.0, 0.95]),
+            model, wrist_axis_ids[1], wrist_origin_fk,
+            wrist_y, 0.12, np.array([0.0, 1.0, 0.0, 0.95]),
         )
         _draw_axis(
-            model, base_axis_ids[2], base_origin_fk,
-            base_z, 0.12, np.array([0.0, 0.0, 1.0, 0.95]),
+            model, wrist_axis_ids[2], wrist_origin_fk,
+            wrist_z, 0.12, np.array([0.0, 0.0, 1.0, 0.95]),
         )
 
     if args.headless:

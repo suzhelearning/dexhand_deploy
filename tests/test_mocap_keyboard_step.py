@@ -75,7 +75,7 @@ class StepAccumulatorTest(unittest.TestCase):
         pose = accumulator.step("up")
         np.testing.assert_allclose(pose[:3], [0.0, 0.0, 0.02])
         pose = accumulator.step("left")
-        np.testing.assert_allclose(pose[:3], [0.01, 0.0, 0.02])
+        np.testing.assert_allclose(pose[:3], [0.0, 0.01, 0.02])
 
     def test_all_axis_mappings(self) -> None:
         accumulator = StepAccumulator(
@@ -84,10 +84,10 @@ class StepAccumulatorTest(unittest.TestCase):
         expected = {
             "up": [0, 0, 1],
             "down": [0, 0, -1],
-            "left": [1, 0, 0],
-            "right": [-1, 0, 0],
-            "1": [0, 1, 0],
-            "0": [0, -1, 0],
+            "left": [0, 1, 0],
+            "right": [0, -1, 0],
+            "1": [1, 0, 0],
+            "0": [-1, 0, 0],
         }
         self.assertEqual(set(AXIS_STEPS), set(expected))
         for event, direction in expected.items():
@@ -119,7 +119,7 @@ class StepAccumulatorTest(unittest.TestCase):
             reference_pose=_REFERENCE_POSE, step_mm=25.0
         )
         pose = accumulator.step("1")
-        np.testing.assert_allclose(pose[:3], [0.0, 0.025, 0.0])
+        np.testing.assert_allclose(pose[:3], [0.025, 0.0, 0.0])
 
 
 class MotiveFrontCircleTrajectoryTest(unittest.TestCase):
@@ -271,8 +271,8 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
         node._side_pose = lambda frame, side: frame[side].copy()
         node._active_sides = ("right",)
         node._rigid_ids = {
-            "left": "left_wrist",
-            "right": "right_arm",
+            "left": "left_back",
+            "right": "tianji_wrist",
         }
         node._step_mm = 10.0
         node._command_lock = threading.Lock()
@@ -450,7 +450,7 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
         self.assertIsNone(node._circle_clock)
         np.testing.assert_allclose(
             node._accumulators["right"].delta_m(),
-            [0.0, 0.01, 0.0],
+            [0.01, 0.0, 0.0],
         )
 
 
@@ -467,8 +467,8 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
         node._side_pose = lambda frame, side: frame[side].copy()
         node._active_sides = ("right",)
         node._rigid_ids = {
-            "left": "left_wrist",
-            "right": "right_arm",
+            "left": "left_back",
+            "right": "tianji_wrist",
         }
         node._step_mm = 10.0
         node._command_lock = threading.Lock()
@@ -720,20 +720,21 @@ class MocapToRobotMatrixTest(unittest.TestCase):
         self.assertEqual(matrix.shape, (3, 3))
         np.testing.assert_allclose(matrix @ matrix.T, np.eye(3), atol=1.0e-9)
         self.assertAlmostEqual(np.linalg.det(matrix), 1.0)
-        # 操作者左(+X) -> 机器人左(+Y)；前(+Z) -> 机器人前(+X)；上 -> 上。
+        # x-forward / z-up：操作者前(+X) -> 机器人前(+X)；
+        # 左(+Y) -> 左(+Y)；上(+Z) -> 上(+Z)。单位为阵。
         np.testing.assert_allclose(
-            matrix @ np.array([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]
+            matrix @ np.array([1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]
         )
         np.testing.assert_allclose(
-            matrix @ np.array([0.0, 0.0, 1.0]), [1.0, 0.0, 0.0]
+            matrix @ np.array([0.0, 1.0, 0.0]), [0.0, 1.0, 0.0]
         )
         np.testing.assert_allclose(
-            matrix @ np.array([0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]
+            matrix @ np.array([0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]
         )
 
     def test_mocap_matrix_differs_from_pico_matrix(self) -> None:
         config = TianjiConfig.load()
-        # PICO +X 右 -> 机器人 -Y(右)；与动捕同向映射方向相反。
+        # PICO +X 右 -> 机器人 -Y(右)；与动捕单位阵不同。
         self.assertFalse(
             np.allclose(config.mocap_to_robot, config.pico_to_robot)
         )

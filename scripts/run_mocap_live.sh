@@ -14,7 +14,7 @@ fi
 
 # Motive 刚体定零 + 键盘步进/正面圆轨迹仿真（Zenoh，无 ROS）。
 #
-# 's' 冻结 right_arm 当前位姿为零点；方向键/1/0 手动累计。零位
+# 's' 冻结 tianji_wrist 当前位姿为零点；方向键/1/0 手动累计。零位
 # 按 'c' 只装载圆轨迹；物理 Enter 按住期间才推进，松开即暂停，
 # 再按从暂停点继续。轨迹上移 200mm 后画 r=100mm 正面圆。's' 回
 # Home，'q' 安全退出。节点前台运行，并通过 X11 检测 Enter 松开。
@@ -26,15 +26,15 @@ fi
 # 用法：
 #   pixi run sim_mocap_live
 #   pixi run sim_mocap_live -- --topics-only
-#   pixi run sim_mocap_live -- --right-rigid-id right_arm --step-mm 10
+#   pixi run sim_mocap_live -- --right-rigid-id tianji_wrist --step-mm 10
 #   pixi run sim_mocap_live -- --circle-speed-mm-s 30
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common.sh"
 
 WITH_MUJOCO=true
-LEFT_RIGID_ID="left_wrist"
-RIGHT_RIGID_ID="right_arm"
+LEFT_RIGID_ID="left_back"
+RIGHT_RIGID_ID="tianji_wrist"
 CONNECT_ENDPOINT=""
 SIDE=right
 STEP_MM=10.0
@@ -51,8 +51,8 @@ usage() {
 模式：
   --mujoco-only         同时启动 IK、MuJoCo 预览与动捕实时驱动（默认）
   --topics-only         只启动 IK 与动捕实时驱动（无界面）
-  --left-rigid-id SPEC   左臂 Motive 刚体：数字 id 或刚体名（默认 left_wrist）
-  --right-rigid-id SPEC  右臂 Motive 刚体：数字 id 或刚体名（默认 right_arm）
+  --left-rigid-id SPEC   左臂 Motive 刚体：数字 id 或刚体名（默认 left_back）
+  --right-rigid-id SPEC  右臂 Motive 刚体：数字 id 或刚体名（默认 tianji_wrist）
   --connect-endpoint EP zenohd Router 端点（默认空=本机 scouting；
                          仅当 scouting 不可达时才需显式连 router）
   --side SIDE            控制侧：right（仅右臂，默认）/ both（双臂同步）

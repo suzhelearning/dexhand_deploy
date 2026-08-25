@@ -144,8 +144,8 @@ def _add_frame_zero_skeleton(xml: str) -> str:
     # 彩色坐标系轴（长为全长的圆柱，中心在中点，由世界坐标定位）。
     #  两套轴统一用 RGB：+X=红、+Y=绿、+Z=蓝。
     #  Manus wrist：+X=指尖、+Y=手背、+Z=小拇指侧。
-    #  wuji2 r_base：+X/+Y/+Z 为该 link 本地轴。
-    for axis_name in ("manus", "r_base"):
+    #  wuji2 r_wrist：+X/+Y/+Z 为厂商 URDF link 本地轴。
+    for axis_name in ("manus", "r_wrist"):
         for axis_index in range(3):
             rgba = (
                 ("1 0 0 0.95", "0 1 0 0.95", "0 0 1 0.95")[axis_index]
@@ -263,7 +263,7 @@ def _sim_from_motive_rotation(
 
 
 class FrameZeroHandSkeleton:
-    """固定世界轴映射 frame0；right_arm/wrist Home 只定位原点。"""
+    """固定世界轴映射 frame0；Motive r_mount 与 r_wrist Home 定位模型。"""
 
     def __init__(self, session, model, topic: str):
         self._pending: dict | None = None
@@ -294,29 +294,28 @@ class FrameZeroHandSkeleton:
             self._required_geom(model, f"ax_manus_{index}")
             for index in range(3)
         ]
-        self._base_axis_ids = [
-            self._required_geom(model, f"ax_r_base_{index}")
+        self._wrist_axis_ids = [
+            self._required_geom(model, f"ax_r_wrist_{index}")
             for index in range(3)
         ]
-        self._base_axis_fk_ids = [
-            self._required_geom(model, f"r_base_axis_{index}")
+        self._wrist_axis_fk_ids = [
+            self._required_geom(model, f"r_wrist_axis_{index}")
             for index in range(3)
         ]
         for geom_id in (
             self._point_geom_ids
             + self._bone_geom_ids
             + self._manus_axis_ids
-            + self._base_axis_ids
+            + self._wrist_axis_ids
         ):
             model.geom_sameframe[geom_id] = 0
             model.geom_rgba[geom_id, 3] = 0.0
-        # 隐藏 URDF 自带的 TCP/marker/r_wrist/r_base 坐标轴（只保留
-        # 上面两套动态轴）；geom 仍保留用于 FK 位姿读取。
+        # 隐藏 URDF 自带的 TCP/marker/r_wrist 坐标轴（只保留上面两套
+        # 动态轴）；geom 仍保留用于 FK 位姿读取。
         for prefix in (
             "TCP_Link_R_axis_",
             "marker_mocap_axis_",
             "r_wrist_axis_",
-            "r_base_axis_",
         ):
             for index in range(3):
                 geom_id = mujoco.mj_name2id(
@@ -357,7 +356,7 @@ class FrameZeroHandSkeleton:
                 payload["points_motive_world"], dtype=np.float64
             )
             home_pose_motive = np.asarray(
-                payload["home_wuji2_base_pose_motive"],
+                payload["home_wuji2_wrist_pose_motive"],
                 dtype=np.float64,
             )
             frame0_manus_quat = np.asarray(
@@ -490,40 +489,40 @@ class FrameZeroHandSkeleton:
             model, self._manus_axis_ids[2], wrist_origin,
             pinky_axis, 0.16, np.array([0.0, 0.0, 1.0, 0.95]),
         )
-        # wuji2 r_base 轴：从组合 URDF 自带 r_base_axis_* 的 FK 位姿
+        # wuji2 r_wrist 轴：从组合 URDF 自带 r_wrist_axis_* 的 FK 位姿
         # 实时读取——每个 geom 的 col2 是该轴世界方向，轴中点减去半长
-        # 得到 r_base 原点，随机械臂 FK 运动。
-        base_origin_fk = np.zeros(3)
-        base_axes_fk = np.zeros((3, 3))
-        for axis_index, fk_id in enumerate(self._base_axis_fk_ids):
+        # 得到 r_wrist 原点，随机械臂 FK 运动。
+        wrist_origin_fk = np.zeros(3)
+        wrist_axes_fk = np.zeros((3, 3))
+        for axis_index, fk_id in enumerate(self._wrist_axis_fk_ids):
             unit = data.geom_xmat[fk_id].reshape(3, 3)[:, 2].copy()
             unit /= np.linalg.norm(unit) + 1.0e-12
-            origin = (
-                data.geom_xpos[fk_id]
-                - (0.045 * unit)
-            )
-            base_origin_fk += origin
-            base_axes_fk[:, axis_index] = unit
-        base_origin_fk /= 3.0
+            origin = data.geom_xpos[fk_id] - (0.045 * unit)
+            wrist_origin_fk += origin
+            wrist_axes_fk[:, axis_index] = unit
+        wrist_origin_fk /= 3.0
         # 正交化（URDF 轴 geom 可能未严格正交），以 X 为主方向。
-        base_x = base_axes_fk[:, 0].copy()
-        base_x /= np.linalg.norm(base_x) + 1.0e-12
-        base_y_candidate = base_axes_fk[:, 1]
-        base_y = base_y_candidate - np.dot(base_y_candidate, base_x) * base_x
-        base_y /= np.linalg.norm(base_y) + 1.0e-12
-        base_z = np.cross(base_x, base_y)
-        base_z /= np.linalg.norm(base_z) + 1.0e-12
+        wrist_x = wrist_axes_fk[:, 0].copy()
+        wrist_x /= np.linalg.norm(wrist_x) + 1.0e-12
+        wrist_y_candidate = wrist_axes_fk[:, 1]
+        wrist_y = (
+            wrist_y_candidate
+            - np.dot(wrist_y_candidate, wrist_x) * wrist_x
+        )
+        wrist_y /= np.linalg.norm(wrist_y) + 1.0e-12
+        wrist_z = np.cross(wrist_x, wrist_y)
+        wrist_z /= np.linalg.norm(wrist_z) + 1.0e-12
         self._draw_axis(
-            model, self._base_axis_ids[0], base_origin_fk,
-            base_x, 0.12, np.array([1.0, 0.0, 0.0, 0.95]),
+            model, self._wrist_axis_ids[0], wrist_origin_fk,
+            wrist_x, 0.12, np.array([1.0, 0.0, 0.0, 0.95]),
         )
         self._draw_axis(
-            model, self._base_axis_ids[1], base_origin_fk,
-            base_y, 0.12, np.array([0.0, 1.0, 0.0, 0.95]),
+            model, self._wrist_axis_ids[1], wrist_origin_fk,
+            wrist_y, 0.12, np.array([0.0, 1.0, 0.0, 0.95]),
         )
         self._draw_axis(
-            model, self._base_axis_ids[2], base_origin_fk,
-            base_z, 0.12, np.array([0.0, 0.0, 1.0, 0.95]),
+            model, self._wrist_axis_ids[2], wrist_origin_fk,
+            wrist_z, 0.12, np.array([0.0, 0.0, 1.0, 0.95]),
         )
 
     def close(self) -> None:

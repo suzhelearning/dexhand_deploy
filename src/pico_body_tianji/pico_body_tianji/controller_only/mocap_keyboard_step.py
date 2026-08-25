@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """动捕键盘控制纯逻辑：按键解析、位移累积和正面圆轨迹。
 
-按键映射（动捕/Motive 系，y-up）：
+按键映射（动捕/Motive 系，x-forward / z-up）：
 
     上 ← ↑（ESC [ A）→ 动捕 +z     下 ← ↓（ESC [ B）→ 动捕 -z
-    左 ← ←（ESC [ D）→ 动捕 +x     右 ← →（ESC [ C）→ 动捕 -x
-    '1' → +y                        '0' → -y
+    左 ← ←（ESC [ D）→ 动捕 +y     右 ← →（ESC [ C）→ 动捕 -y
+    '1' → +x                        '0' → -x
     's' → 开始/结束                 'c' → 运行正面圆轨迹
 
 ``StepAccumulator`` 在冻结参考上保存动捕系位移。``MotiveFrontCircleTrajectory``
@@ -23,10 +23,10 @@ import numpy as np
 AXIS_STEPS: dict[str, tuple[float, float, float]] = {
     "up": (0.0, 0.0, 1.0),
     "down": (0.0, 0.0, -1.0),
-    "left": (1.0, 0.0, 0.0),
-    "right": (-1.0, 0.0, 0.0),
-    "1": (0.0, 1.0, 0.0),
-    "0": (0.0, -1.0, 0.0),
+    "left": (0.0, 1.0, 0.0),
+    "right": (0.0, -1.0, 0.0),
+    "1": (1.0, 0.0, 0.0),
+    "0": (-1.0, 0.0, 0.0),
 }
 
 _ESCAPE_MAP = {
@@ -177,9 +177,10 @@ class CircleTrajectorySample:
 class MotiveFrontCircleTrajectory:
     """上移 ``2r`` 后在 Motive x-y 平面顺时针画整圆。
 
-    观察方向为 Motive ``+z`` 指向原点。直线上升和整圆相位均使用
-    minimum-jerk 标量曲线，段首尾速度、加速度为零；圆的中途不断点。
-    ``maximum_speed_mm_s`` 是直线和圆弧上的最大笛卡尔速度。
+    观察方向为 Motive ``+z``（竖直上）指向原点。
+    直线上升和整圆相位均使用 minimum-jerk 标量曲线，段首尾速度、
+    加速度为零；圆的中途不断点。``maximum_speed_mm_s`` 是直线和圆弧上
+    的最大笛卡尔速度。
     """
 
     radius_mm: float = 100.0

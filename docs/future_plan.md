@@ -27,52 +27,47 @@ Motive 刚体 + Manus 手套骨架    →     HDF5（Motive 系绝对位姿）  
 
 | 坐标系 | +X | +Y | +Z |
 |---|---|---|---|
-| Motive（动捕，y-up 右手系，以操作者为参照） | 左 | 上 | 前 |
+| Motive（动捕，z-up 右手系） | 前 | 左 | 上 |
 | PICO（手柄，y-up） | 右 | 上 | 后（朝用户） |
 | 机器人 world（REP 103） | 前 | 左 | 上 |
 | right_chest（IK 目标系） | 前 | 上 | 右 |
 
-Motive 与 PICO 水平轴相差 180°（绕 Y），**不能复用 `pico_to_robot`**。
-链路使用独立同向矩阵（见 `vendor/python/tianji_world_output/config/tianji_robot.yaml`）：
+Windows Motive、H5 与机器人世界系已统一为 +X 前、+Y 左、+Z 上。
+链路使用单位矩阵（见
+`vendor/python/tianji_world_output/config/tianji_robot.yaml`）：
 
 ```
-mocap_to_robot = [[0,0,1],[1,0,0],[0,1,0]]
-  Robot_X = +Motive_Z   （操作者前 → 机器人前）
-  Robot_Y = +Motive_X   （操作者左 → 机器人左）
-  Robot_Z = +Motive_Y   （上 → 上）
+mocap_to_robot = [[1,0,0],[0,1,0],[0,0,1]]
 ```
 
 H5 `hands/<side>/wrist_*` 是 Manus 人手 wrist 位姿；机器人端点必须是
-wuji2 `r_base` wrist。`right_arm` marker 只是 6mm 板中心测量帧，
-不能直接作为 wrist。按 `s`：`T_M_rbase_home =
-T_M_marker·T_marker_rbase`，再用 `T_rbase_home·inverse(T_h5_0)`
-把 H5 wrist 第 0 帧对齐到机器人 wrist Home；对齐后的 wrist 经
-`inverse(T_tcp_rbase)` 转成 Tianji TCP IK 目标。
+wuji hand2 beta1 厂商 URDF 的 `r_wrist`。Motive `tianji_wrist`
+rigid 经 GL/GO 定位 marker，再通过安装链定位 `r_mount` 和
+`r_wrist`；`r_mount` 不能代替 Manus wrist 端点。对齐后的
+`r_wrist` 经 `inverse(T_tcp_wrist)` 转成 Tianji TCP IK 目标。
 
 ## 2. 当前状态（2026-08-20）
 
 **已实现并验证**（`sim_mocap_h5` / `real_mocap_h5`）：
 
-- 绝对 wrist→r_base frame0 接近：s 读取实时 raw rigid，经 GL/GO、
-  marker→r_wrist 和固定 `r_wrist→r_base=Rx(π)` 推导 Home；Enter
-  保压接近，稳定后 r 装载后续轨迹；
-- raw `right_arm` rigid→URDF `marker_mocap` 使用 Motive Visuals：
-  GL `[-3,-4,0]mm`、GO Pitch/Yaw/Roll `[2,-90,0]deg`；
-- 机械中间外参 marker_mocap→r_wrist：
-  `[0.0325,0.00025,0.003]m` / `[0,-0.70710678,0,0.70710678]`；
-- URDF `r_base→r_wrist`：同原点 `Rx(π)`；回放语义端点固定为
-  `r_base`，所有外参均由上述中间外参乘其逆派生；
-- 派生 TCP→r_base：`[0.00025,0.003,0.0365]m` /
-  `[0,0,0.70710678,0.70710678]`（整体取负等价）；
-- 派生 H5 Manus wrist→wuji2 r_base：`[0,0,0]m`，
-  旋转 `[[0,0,-1],[0,-1,0],[-1,0,0]]`（data→base，det=+1）；
-  对应 Manus→r_wrist 四元数 `[0,0.70710678,0,0.70710678]`（绕 y +90°）；
-  base `+x=-data z`、`+y=-data y`、`+z=-data x`；
-- 机械安装轴关系：marker `+x→mount +z`、`+y→mount -y`、
-  `+z→mount +x`（右手旋转，det=+1）；
-- `mocap_to_robot` 独立同向世界轴映射；
+- 绝对 wrist→r_wrist frame0 接近：s 读取实时 raw rigid，经 GL/GO、
+  marker→r_mount→r_wrist 推导 Home；Enter 保压接近，稳定后 r 装载
+  后续轨迹；
+- raw `tianji_wrist` rigid→URDF `marker_mocap` 使用 Motive Visuals：
+  GL `[1,-4,2]mm`、GO Pitch/Yaw/Roll `[-1,10,0]deg`；
+- marker_mocap→r_mount：
+  `[0.004,0,0]m` / `[0,-0.70710678,0,0.70710678]`；
+- 厂商 beta1 `r_mount→r_wrist`：
+  `[0.003,0.00025016,-0.0285]m` /
+  `[0,0,0.0000081995,0.99999999997]`；
+- TCP→r_mount：`[0,0,0.008]m` /
+  `[0.70710678,0.70710678,0,0]`；
+- H5 Manus wrist→wuji2 r_wrist：`[0,0,0]m`，
+  旋转 `[[0,0,-1],[0,-1,0],[-1,0,0]]`（det=+1），四元数
+  `[0.70710678,0,-0.70710678,0]`；
+- `mocap_to_robot` 为单位世界轴映射；
 - 组合 URDF 物理链为 TCP→marker(tianji/center/wuji2 三 frame)
-  →wuji2 `r_mount_frame`→`r_base`→`r_wrist`→fingers；
+  →wuji2 `r_mount`→`r_wrist`→fingers；
 - `real_mocap_h5` 严格 readiness，marker 名称日志去重。
 
 **验证证据**：

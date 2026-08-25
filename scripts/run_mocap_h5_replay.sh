@@ -10,7 +10,7 @@ if ! python -c 'import h5py, zenoh' 2>/dev/null; then
   fi
 fi
 
-# 任意 mocap-acquisition v4.0 HDF5：以实时 Motive right_arm Home 为
+# 任意 mocap-acquisition v4.0 HDF5：以实时 Motive tianji_wrist Home 为
 # IK 增量起点，移动到 hands/right Manus 手腕的绝对动捕位姿，再经
 # controller-only 相对末端映射送入天机右臂 IK。节点前台读取 s/r/q；
 # X11 物理 Enter 作为回放的持续保压门控。
@@ -23,7 +23,7 @@ VALIDATE_ONLY=false
 H5_PATH=""
 SPEED=1.0
 YAW_DEG=0.0
-RIGHT_RIGID_ID=right_arm
+RIGHT_RIGID_ID=tianji_wrist
 CONNECT_ENDPOINT=""
 SHOW_FRAME_ZERO_SKELETON=false
 MUJOCO_PID=""
@@ -45,8 +45,8 @@ usage() {
   --topics-only           只启动 IK 与 H5 回放
   --wuji2                MuJoCo 使用带 wuji2 右手与双坐标轴的组合 URDF
   --speed N               按住 Enter 时的源轨迹倍速（默认 1.0）
-  --yaw-deg N             轨迹绕 Motive +Y 的朝向修正（默认 0）
-  --right-rigid-id ID     天机右末端刚体 id/名称（默认 right_arm）
+  --yaw-deg N             轨迹绕 Motive 竖直轴(+Z)的朝向修正（默认 0）
+  --right-rigid-id ID     天机右末端刚体 id/名称（默认 tianji_wrist）
   --connect-endpoint EP   可选 Zenoh Router 端点（默认 scouting）
   --frame0-skeleton      MuJoCo 显示 H5 frame0 的 21 点/20 骨段目标骨架；
                           自动启用 --wuji2，按 s 前预览、按 s 后冻结
@@ -54,16 +54,16 @@ usage() {
   -h, --help
 
 键盘流程：
-  s                 读取本次 marker，推导当前机器人 r_base wrist Home
-  按住 Enter        将机器人 wrist 移动到 H5 绝对 frame0；松开保持
+  s                 读取刚体并推导 r_mount 与 r_wrist Home
+  按住 Enter        将机器人 r_wrist 移动到 H5 绝对 frame0；松开保持
   r                 稳定到达 frame0 后装载后续轨迹
   按住 Enter        从 frame0 推进后续 wrist 轨迹；松开保持
   s                 任意活动阶段立即取消并回 Home
   q                 回 Home 后退出（已经在 Home 时直接退出）
 
 H5 路径不是固定值；每次运行可选择不同 TAKE.h5。运行前必须启动
-Motive natnet-zenoh 并确保 right_arm marker 有效。marker 仅用于
-推导 wuji2 r_base wrist Home；H5 wrist 第 0 帧与该 Home 对齐。
+Motive natnet-zenoh 并确保 tianji_wrist marker 有效。marker 用于定位
+wuji2 r_mount；H5 Manus wrist 直接对齐厂商 URDF 的 r_wrist。
 只控制右臂，左臂保持 Home；本脚本不连接 Marvin 实体机械臂。
 EOF
 }

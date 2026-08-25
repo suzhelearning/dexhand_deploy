@@ -229,16 +229,16 @@ class HostReadinessGate:
             if not (
                 source.get("source") == "offline_replay"
                 and source.get("mapping")
-                == "motive_absolute_wrist_to_wuji2_base_tcp_v6"
+                == "motive_r_mount_h5_wrist_to_wuji2_r_wrist_beta1"
                 and source.get("control_mode")
-                == "h5_right_wrist_to_wuji2_base_hold_to_run"
+                == "h5_right_wrist_to_wuji2_wrist_hold_to_run"
                 and source.get("body_tracking") == "disabled"
                 and source.get("motion_trackers_required") is True
                 and source.get("elbow_constraint")
                 == "published_default_zsp_backend_selected"
                 and source.get("smpl_used") is False
                 and source.get("scope") == "mocap_replay"
-                and source.get("endpoint") == "wuji2_r_base"
+                and source.get("endpoint") == "wuji2_r_wrist"
                 and source.get("side") == "right"
                 and source.get("phase") == "armed"
                 and source.get("at_safe_home") is True

@@ -19,11 +19,12 @@ from pico_body_tianji.controller_only.mocap_h5 import (
     HAND_KEYPOINT_EDGES,
     HandTrajectorySample,
     compose_pose,
+    invert_pose,
 )
 from pico_body_tianji.controller_only.mocap_h5_replay_node import (
     DEFAULT_PARAMETERS,
     MocapH5ReplayNode,
-    _WUJI2_WRIST_TO_BASE_POSE,
+    _WUJI2_MOUNT_TO_WRIST_POSE,
     _configure_logging,
     _configured_pose,
 )
@@ -120,7 +121,7 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         node._frame_zero_pose = np.array(
             [0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         )
-        node._h5_wrist_to_wuji2_base_pose = np.array(
+        node._h5_wrist_to_wuji2_wrist_pose = np.array(
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         )
         node._frame_zero_source_index = 0
@@ -137,17 +138,25 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         node._rigid_to_marker_mocap_pose = np.array(
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         )
-        node._marker_to_base_pose = np.array(
+        desired_marker_to_wrist = np.array(
             [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         )
-        node._tcp_to_base_pose = np.array(
+        node._marker_to_mount_pose = compose_pose(
+            desired_marker_to_wrist,
+            invert_pose(_WUJI2_MOUNT_TO_WRIST_POSE),
+        )
+        node._marker_to_wrist_pose = desired_marker_to_wrist
+        desired_tcp_to_wrist = np.array(
             [0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         )
-        node._base_to_tcp_pose = np.array(
-            [-0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        node._tcp_to_mount_pose = compose_pose(
+            desired_tcp_to_wrist,
+            invert_pose(_WUJI2_MOUNT_TO_WRIST_POSE),
         )
-        node._right_rigid_id = "right_arm"
-        node._rigid_body_names = {7: "right_arm"}
+        node._tcp_to_wrist_pose = desired_tcp_to_wrist
+        node._wrist_to_tcp_pose = invert_pose(desired_tcp_to_wrist)
+        node._right_rigid_id = "tianji_wrist"
+        node._rigid_body_names = {7: "tianji_wrist"}
         node._latest_motive_frame = {
             "frame_number": 42,
             "rigid_bodies": [
@@ -162,9 +171,10 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         node._motive_received_at = time.monotonic()
         node._right_rigid_home_pose = None
         node._right_marker_home_pose = None
-        node._right_base_home_pose = None
+        node._right_mount_home_pose = None
+        node._right_wrist_home_pose = None
         node._virtual_tcp_home_pose = None
-        node._current_motive_base_target_pose = None
+        node._current_motive_wrist_target_pose = None
         node._approach_stable_ticks = 0
         node._cached_targets = None
         node._source_complete = False
@@ -199,112 +209,101 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         node._yaw_deg = 0.0
         return node
 
-    def test_default_right_arm_visual_offset_derives_r_base(self) -> None:
+    def test_default_rigid_pose_derives_mount_and_wrist(self) -> None:
         rigid_to_marker = _configured_pose(
             DEFAULT_PARAMETERS, "right_rigid_to_marker_mocap"
         )
-        marker_to_wrist = _configured_pose(
-            DEFAULT_PARAMETERS, "right_marker_to_wrist"
+        marker_to_mount = _configured_pose(
+            DEFAULT_PARAMETERS, "right_marker_to_mount"
+        )
+        rigid_to_mount = compose_pose(
+            rigid_to_marker, marker_to_mount
         )
         rigid_to_wrist = compose_pose(
-            rigid_to_marker, marker_to_wrist
+            rigid_to_mount, _WUJI2_MOUNT_TO_WRIST_POSE
         )
-        rigid_to_base = compose_pose(
-            rigid_to_wrist, _WUJI2_WRIST_TO_BASE_POSE
-        )
-        tcp_to_base = compose_pose(
-            _configured_pose(DEFAULT_PARAMETERS, "right_tcp_to_wrist"),
-            _WUJI2_WRIST_TO_BASE_POSE,
+        tcp_to_wrist = compose_pose(
+            _configured_pose(DEFAULT_PARAMETERS, "right_tcp_to_mount"),
+            _WUJI2_MOUNT_TO_WRIST_POSE,
         )
 
         np.testing.assert_allclose(
             rigid_to_marker,
             [
-                -0.003, -0.004, 0.0,
-                0.0123407149398269, -0.7069990853988243,
-                0.0123407149398269, 0.7069990853988243,
+                0.001, -0.004, 0.002,
+                -0.0086933284, 0.0871524241,
+                0.0007605677, 0.9961567661,
             ],
-            atol=1e-9,
+            atol=1e-8,
+        )
+        np.testing.assert_allclose(
+            rigid_to_mount,
+            [
+                0.0049392310, -0.004, 0.0013054073,
+                -0.0056093089, -0.6427631343, 0.0066849140,
+                0.7660152745,
+            ],
+            atol=1e-8,
         )
         np.testing.assert_allclose(
             rigid_to_wrist,
             [
-                -0.0060068974, -0.0038548508, 0.0325,
-                0.0174524064, -0.9998476952, 0.0, 0.0,
+                0.0335263590, -0.0036975209, -0.0006938921,
+                -0.0056145792, -0.6427630883, 0.0066911950,
+                0.7660152196,
             ],
-            atol=1e-9,
-        )
-        np.testing.assert_allclose(rigid_to_base[:3], rigid_to_wrist[:3])
-        relative = (
-            Rotation.from_quat(rigid_to_wrist[3:]).inv()
-            * Rotation.from_quat(rigid_to_base[3:])
+            atol=1e-8,
         )
         np.testing.assert_allclose(
-            relative.as_rotvec(), [np.pi, 0.0, 0.0], atol=1e-9
-        )
-        np.testing.assert_allclose(
-            tcp_to_base[:3],
-            [0.00025, 0.003, 0.0365],
+            tcp_to_wrist[:3],
+            [0.00025016, 0.003, 0.0365],
             atol=1e-9,
         )
-        expected_tcp_base = Rotation.from_euler(
-            "z", 90.0, degrees=True
-        )
-        tcp_base_error = (
-            expected_tcp_base.inv()
-            * Rotation.from_quat(tcp_to_base[3:])
-        )
-        self.assertAlmostEqual(tcp_base_error.magnitude(), 0.0, places=9)
 
-    def test_h5_manus_wrist_axes_map_to_wuji2_r_base(self) -> None:
+    def test_h5_manus_wrist_axes_map_to_wuji2_r_wrist(self) -> None:
         wrist_transform = _configured_pose(
             DEFAULT_PARAMETERS, "right_h5_wrist_to_wuji2_wrist"
         )
-        base_transform = compose_pose(
-            wrist_transform, _WUJI2_WRIST_TO_BASE_POSE
-        )
-        rotation_base_from_h5 = Rotation.from_quat(
-            base_transform[3:]
+        rotation_wrist_from_h5 = Rotation.from_quat(
+            wrist_transform[3:]
         ).as_matrix()
-        # 绕 base z +90° 补偿数据与 wuji2 手朝向（实测绕 base z 偏 -90°）。
-        # 合成外参后 T_H_base = [[-0.0111,0.9526,-0.3039],
-        #   [0.9997,0.0037,-0.0248],[-0.0225,-0.3041,-0.9524]]，det=+1。
         np.testing.assert_allclose(
-            rotation_base_from_h5,
+            rotation_wrist_from_h5,
             [
-                [-0.0111, 0.9526, -0.3039],
-                [0.9997, 0.0037, -0.0248],
-                [-0.0225, -0.3041, -0.9524],
+                [0.0, 0.0, -1.0],
+                [0.0, -1.0, 0.0],
+                [-1.0, 0.0, 0.0],
             ],
-            atol=1e-4,
+            atol=1e-9,
         )
         self.assertAlmostEqual(
-            float(np.linalg.det(rotation_base_from_h5)), 1.0
+            float(np.linalg.det(rotation_wrist_from_h5)), 1.0
         )
 
+
         node = self._node()
-        node._h5_wrist_to_wuji2_base_pose = base_transform
-        node._right_base_home_pose = np.array(
+        node._h5_wrist_to_wuji2_wrist_pose = wrist_transform
+        node._right_wrist_home_pose = np.array(
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         )
-        node._virtual_tcp_home_pose = node._right_base_home_pose.copy()
+        node._virtual_tcp_home_pose = node._right_wrist_home_pose.copy()
         self.assertTrue(node._map_right_pose(node._frame_zero_pose))
-        desired_base = compose_pose(
-            node._frame_zero_pose, base_transform
+        desired_wrist = compose_pose(
+            node._frame_zero_pose, wrist_transform
         )
         expected_tcp = compose_pose(
-            desired_base, node._base_to_tcp_pose
+            desired_wrist, node._wrist_to_tcp_pose
         )
         np.testing.assert_allclose(
             node._mapper.mapped_frames[-1].right_pose,
             expected_tcp,
             atol=1e-9,
         )
-        reconstructed_base = compose_pose(
-            expected_tcp, node._tcp_to_base_pose
+        reconstructed_wrist = compose_pose(
+            expected_tcp, node._tcp_to_wrist_pose
         )
         np.testing.assert_allclose(
-            reconstructed_base, desired_base, atol=1e-9
+            reconstructed_wrist, desired_wrist, atol=1e-9
         )
 
 
@@ -321,7 +320,7 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
             [1.05, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0],
         )
         np.testing.assert_allclose(
-            node._right_base_home_pose,
+            node._right_wrist_home_pose,
             [1.1, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0],
         )
         self.assertEqual(node._mapper.map_count, 0)
@@ -438,17 +437,17 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         self.assertEqual(node._phase, "armed")
         self.assertFalse(node._mapper.initialized)
 
-    def test_tracking_status_reports_actual_base_to_target_error(
+    def test_tracking_status_reports_actual_wrist_to_target_error(
         self,
     ) -> None:
         node = self._node()
         node._right_marker_home_pose = np.array(
             [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]
         )
-        node._right_base_home_pose = np.array(
+        node._right_wrist_home_pose = np.array(
             [1.1, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]
         )
-        node._current_motive_base_target_pose = np.array(
+        node._current_motive_wrist_target_pose = np.array(
             [1.11, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]
         )
         status = node._motive_tracking_status(time.monotonic())
@@ -461,7 +460,7 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
             [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0],
         )
         np.testing.assert_allclose(
-            status["actual_base_pose_xyzw"],
+            status["actual_wrist_pose_xyzw"],
             [1.1, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0],
         )
 
@@ -497,12 +496,12 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         self.assertEqual(status["motive_right_arm"]["resolved_id"], 7)
         self.assertEqual(
             status["mapping"],
-            "motive_absolute_wrist_to_wuji2_base_tcp_v6",
+            "motive_r_mount_h5_wrist_to_wuji2_r_wrist_beta1",
         )
-        self.assertEqual(status["endpoint"], "wuji2_r_base")
+        self.assertEqual(status["endpoint"], "wuji2_r_wrist")
         self.assertEqual(
             status["control_mode"],
-            "h5_right_wrist_to_wuji2_base_hold_to_run",
+            "h5_right_wrist_to_wuji2_wrist_hold_to_run",
         )
 
     def test_q_returns_home_before_exit(self) -> None:
@@ -632,7 +631,7 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
             "frame0_manus_quat_xyzw": (
                 wrist_quaternion_motive.tolist()
             ),
-            "home_wuji2_base_pose_motive": [
+            "home_wuji2_wrist_pose_motive": [
                 *wrist_position_motive.tolist(),
                 *wrist_quaternion_motive.tolist(),
             ],

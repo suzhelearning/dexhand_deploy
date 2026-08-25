@@ -30,9 +30,9 @@ usage() {
 
 说明：
   机械臂+wuji2 组合 URDF 场景的 H5 数据回放：机械臂摆到
-  controller_only_ik.yaml 的 Home 关节角；读取 Motive right_arm
-  仅用于定位动捕原点，世界旋转固定使用 mocap_to_robot；H5 右手
-  21 点按时间轴播放。不启动 IK，不控制机械臂。
+  controller_only_ik.yaml 的 Home 关节角；读取 Motive tianji_wrist
+  经 marker 安装链定位 r_mount/r_wrist，世界旋转固定使用
+  mocap_to_robot；H5 右手 21 点按时间轴播放。不启动 IK，不控制机械臂。
 
   Home 关节角（度）：
     left  [55, -65, -70, -60, 60, 0, 0]
@@ -41,8 +41,8 @@ usage() {
 选项：
   --speed N       播放倍速（默认 1.0）
   --hold-s N      首帧停留秒数（默认 2.0）
-  --yaw-deg N     绕 Motive +Y 旋转整条轨迹（默认 0）
-  --right-arm-pose P  固定 right_arm Motive 位姿 x,y,z,qx,qy,qz,qw；
+  --yaw-deg N     绕 Motive 竖直轴(+Z)旋转整条轨迹（默认 0）
+  --right-arm-pose P  固定 tianji_wrist Motive 位姿 x,y,z,qx,qy,qz,qw；
                       缺省时订阅 mocap/hands/frame
   --loop          循环播放
   --paused        开始即暂停
@@ -178,7 +178,7 @@ printf '%s\n' \
   "  H5=${H5_PATH}" \
   "  speed=${SPEED} hold_s=${HOLD_S} yaw_deg=${YAW_DEG}" \
   "  loop=${LOOP} paused=${PAUSED}" \
-  "  right_arm_pose=${RIGHT_ARM_POSE:-<live Motive>}" \
-  '  机械臂保持 Home；right_arm 只定位原点；不启动 IK。'
+  "  tianji_wrist_pose=${RIGHT_ARM_POSE:-<live Motive>}" \
+  '  机械臂保持 Home；tianji_wrist 只定位原点；不启动 IK。'
 
 exec python "${VIEWER}" "${arguments[@]}"

@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # 前置：
 #   - 主机必须用 --topics-only --speed <= 0.25 启动，且 yaw=0；
-#   - Motive right_arm 当前帧必须有效，Enter 必须处于松开状态；
+#   - Motive tianji_wrist 当前帧必须有效，Enter 必须处于松开状态；
 #   - 必须显式 --confirm-real；
 #   - 确认双臂 48V、电气急停、控制模式和运动空间均已检查，并
 #     关闭 FxStation、官方天机控制节点及其他 Marvin SDK 会话。
@@ -44,7 +44,7 @@ usage() {
       --right-rigid-id ID
 
 真机桥只接受 speed <= 0.25、yaw=0、phase=armed、IK/Home 安全、
-Motive right_arm marker 有效、Enter 松开的绝对 wrist 回放主机。
+Motive tianji_wrist marker 有效、Enter 松开的绝对 wrist 回放主机。
 EOF
 }
 
@@ -119,7 +119,7 @@ printf '%s\n' \
   '  复用 sim_mocap_h5 的 marker→wrist 接近 + IK 主机链路' \
   '  安全桥 → Marvin 低层关节控制' \
   "  速度比例=${VELOCITY_RATIO}% 加速度比例=${ACCELERATION_RATIO}%" \
-  '请确认双臂 48V、电气急停、控制模式、轨迹空间及 right_arm ID。' \
+  '请确认双臂 48V、电气急停、控制模式、轨迹空间及 tianji_wrist ID。' \
   '关闭 FxStation、官方天机控制节点及其他 Marvin SDK 会话。' \
   '等待提示“真机链路已就绪”（phase=armed_idle）；此前不得按 s 或 Enter。' \
   '就绪后按 s 读取 marker；Enter 保压到 frame0，松开后按 r，再保压回放。'

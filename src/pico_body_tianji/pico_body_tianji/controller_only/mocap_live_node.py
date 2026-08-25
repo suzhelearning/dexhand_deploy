@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Motive 刚体定零 + 键盘步进/正面圆轨迹节点（Zenoh，无 ROS）。
 
-订阅 ``mocap/hands/frame`` 中的 Motive 刚体位姿（y-up 右手系、米制）。
-默认使用机器人右臂末端的 ``right_arm``：按 ``s`` 时冻结当前位姿
-作为控制零点；开始后刚体实测运动不再反馈进目标，避免正反馈。
+订阅 ``mocap/hands/frame`` 中的 Motive 刚体位姿（x-forward / z-up
+右手系、米制）。默认使用机器人右臂末端的 ``tianji_wrist``：按 ``s`` 时
+冻结当前位姿作为控制零点；开始后刚体实测运动不再反馈进目标，避免
+正反馈。
 
 键盘命令在冻结参考上生成虚拟目标，四元数保持不变：
 
     上/下          动捕 +z/-z
-    左/右          动捕 +x/-x
-    1/0            动捕 +y/-y
+    左/右          动捕 +y/-y
+    1/0            动捕 +x/-x
     c              装载 x-y 正面顺时针圆轨迹
     Enter          按住推进轨迹 / 松开立即暂停
     s              记录参考开始 / 回 Home 后重新待命
@@ -80,10 +81,10 @@ _S_DEBOUNCE_S = 0.5
 _AXIS_LABELS = {
     "up": "动捕 +z",
     "down": "动捕 -z",
-    "left": "动捕 +x",
-    "right": "动捕 -x",
-    "1": "动捕 +y",
-    "0": "动捕 -y",
+    "left": "动捕 +y",
+    "right": "动捕 -y",
+    "1": "动捕 +x",
+    "0": "动捕 -x",
 }
 # 目标整形参数与 mocap 回放/键盘步进一致（1:1 验收/标定模式），
 # 修改时同步 config/mode/controller_only/controller_only_ik.yaml 的
@@ -122,8 +123,8 @@ class MocapLiveNode:
         session,
         params: dict,
         *,
-        left_rigid_id: int | str = "left_wrist",
-        right_rigid_id: int | str = "right_arm",
+        left_rigid_id: int | str = "left_back",
+        right_rigid_id: int | str = "tianji_wrist",
         rate: float = 60.0,
         side: str = "right",
         step_mm: float = 10.0,
@@ -1029,13 +1030,13 @@ def main(argv=None) -> int:
         extra={
             "--left-rigid-id": {
                 "type": str,
-                "default": "left_wrist",
-                "help": "左臂 Motive 刚体：数字 id 或刚体名（默认 left_wrist）",
+                "default": "left_back",
+                "help": "左臂 Motive 刚体：数字 id 或刚体名（默认 left_back）",
             },
             "--right-rigid-id": {
                 "type": str,
-                "default": "right_arm",
-                "help": "右臂 Motive 刚体：数字 id 或刚体名（默认 right_arm）",
+                "default": "tianji_wrist",
+                "help": "右臂 Motive 刚体：数字 id 或刚体名（默认 tianji_wrist）",
             },
             "--rate": {
                 "type": float,
@@ -1110,7 +1111,7 @@ def main(argv=None) -> int:
     )
     try:
         _LOG.warning(
-            "等待 Motive 刚体帧与键盘 's'；按 s 冻结当前 right_arm "
+            "等待 Motive 刚体帧与键盘 's'；按 s 冻结当前 tianji_wrist "
             "位姿为零点。方向键/1/0 连续累计（每键 %gmm）；零位"
             "按 c 只装载圆轨迹，必须持续按住 Enter 才运动，松开"
             "立即暂停，再按从暂停处继续。轨迹：先上移 %.0fmm，"

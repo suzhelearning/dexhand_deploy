@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Manus HDF5 右手腕轨迹的 Enter 保压安全回放节点。
 
-端点契约：输入是 H5 Manus wrist；机器人端对应 wuji2 ``r_base``，
-不是固定旋转 180° 后的 ``r_wrist``。Motive ``right_arm`` 经 GL/GO
-到 marker_mocap，再由机械外参和 ``r_wrist→r_base`` 固定变换推导
-``r_base`` Home。H5 wrist 同样转换到 ``r_base``，随后由
-``r_base→TCP`` 固定外参送入 IK。
+端点契约：输入是 H5 Manus wrist；机器人端直接对应新版 wuji hand2
+``r_wrist``。Motive ``tianji_wrist`` 经 GL/GO 到 marker_mocap，再由
+机械安装外参推导 ``r_wrist`` Home。H5 wrist 同样转换到 ``r_wrist``，
+随后由 ``r_wrist→TCP`` 固定外参送入 IK。厂商 URDF 的 ``r_mount``
+保留为刚体安装位置，不参与 Manus wrist 端点定义。
 
 状态机：
 
@@ -75,13 +75,21 @@ _SOLVED_STALE_S = 0.5
 _MOTIVE_STALE_S = 0.5
 _SKELETON_PREVIEW_INTERVAL_S = 0.2
 _CREATE_DEADMAN = object()
-
-# wuji2 URDF 固定关节：r_base -> r_wrist，原点重合、绕 X 旋转 180°。
-# 其逆相同。H5/IK 回放的语义端点是 r_base，不是 r_wrist。
-_WUJI2_WRIST_TO_BASE_POSE = np.array(
-    [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+# 厂商 beta1 URDF 固定关节 r_mount -> r_wrist。
+_WUJI2_MOUNT_TO_WRIST_POSE = np.array(
+    [
+        0.003,
+        0.00025016,
+        -0.0285,
+        0.0,
+        0.0,
+        0.0000081994999999,
+        0.9999999999663841,
+    ],
     dtype=np.float64,
 )
+
+
 
 DEFAULT_PARAMETERS = {
     "min_cutoff": 1.2,
@@ -94,33 +102,29 @@ DEFAULT_PARAMETERS = {
     "maximum_angular_speed_rad_s": 1.55,
     "maximum_linear_acceleration_m_s2": 3.5,
     "maximum_angular_acceleration_rad_s2": 9.0,
-    # Motive raw right_arm rigid frame -> marker URDF marker_mocap frame。
-    # Motive Visuals: GL [-3,-4,0] mm；GO Pitch/Yaw/Roll [2,-90,0] deg。
-    "right_rigid_to_marker_mocap_translation_m": [-0.003, -0.004, 0.0],
+    # Motive raw tianji_wrist rigid frame -> marker URDF marker_mocap frame。
+    # Motive Visuals: GL [1,-4,2] mm；GO Pitch/Yaw/Roll [-1,10,0] deg。
+    "right_rigid_to_marker_mocap_translation_m": [0.001, -0.004, 0.002],
     "right_rigid_to_marker_mocap_quaternion_xyzw": [
-        0.0123407149398269, -0.7069990853988243,
-        0.0123407149398269, 0.7069990853988243
+        -0.0086933284, 0.0871524241, 0.0007605677, 0.9961567661
     ],
-    # right_arm marker 中心(G) -> wuji2 r_wrist(B)。SolidWorks
-    # marker URDF 为 8mm 刚体；安装轴关系为 marker
-    # +x→mount +z、+y→mount -y、+z→mount +x。
-    "right_marker_to_wrist_translation_m": [0.0325, 0.00025, 0.003],
-    "right_marker_to_wrist_quaternion_xyzw": [
+    # marker_mocap(G) -> beta1 r_mount(M)：marker 中心到手侧面 4mm，
+    # marker_wuji2 与 r_mount 的安装旋转为 Ry(-90°)。
+    "right_marker_to_mount_translation_m": [0.004, 0.0, 0.0],
+    "right_marker_to_mount_quaternion_xyzw": [
         0.0, -0.7071067811865476, 0.0, 0.7071067811865476
     ],
-    # Tianji TCP(T) -> wuji2 r_wrist(B)，含 8mm marker 刚体。
-    "right_tcp_to_wrist_translation_m": [0.00025, 0.003, 0.0365],
-    "right_tcp_to_wrist_quaternion_xyzw": [
+    # Tianji TCP(T) -> beta1 r_mount(M)，含 8mm marker 刚体。
+    "right_tcp_to_mount_translation_m": [0.0, 0.0, 0.008],
+    "right_tcp_to_mount_quaternion_xyzw": [
         0.7071067811865476, 0.7071067811865476, 0.0, 0.0
     ],
-    # H5 Manus wrist(H) -> wuji2 r_wrist(B)，两者原点都是人手 wrist。
-    # 回放语义端点是 r_base。组合 r_wrist→r_base=Rx(π) 后，再绕 base
-    # z +90° 补偿数据与 wuji2 手的朝向（实测数据目标绕 base z 偏 -90°）。
-    # 最终 H→r_wrist 四元数（xyzw）：
-    #   [0.10031515, 0.11726593, 0.70127022, 0.69599256]
+    # H5 Manus wrist(H) -> wuji2 r_wrist(B)：两者原点都是 wrist。
+    # H +x 指尖、+y 手背、+z 小拇指侧；
+    # B -z 指尖、-y 手背、+x 拇指侧。
     "right_h5_wrist_to_wuji2_wrist_translation_m": [0.0, 0.0, 0.0],
     "right_h5_wrist_to_wuji2_wrist_quaternion_xyzw": [
-        0.10031515, 0.11726593, 0.70127022, 0.69599256
+        0.7071067811865476, 0.0, -0.7071067811865476, 0.0
     ],
     "approach_position_tolerance_m": 0.002,
     "approach_orientation_tolerance_deg": 1.0,
@@ -170,12 +174,12 @@ def _rotation_error_rad(first_xyzw: np.ndarray, second_xyzw: np.ndarray) -> floa
     return float(np.linalg.norm(delta.as_rotvec()))
 
 def _rotate_points_yaw(points: np.ndarray, yaw_deg: float) -> np.ndarray:
-    """绕 Motive +Y 旋转世界系点，与手腕轨迹 yaw 标定一致。"""
+    """绕 Motive 竖直轴（+Z）旋转世界系点，与手腕轨迹 yaw 标定一致。"""
     values = np.asarray(points, dtype=np.float64)
     if values.shape != (21, 3) or not np.isfinite(values).all():
         raise ValueError("frame0 keypoints 必须是有限 (21,3) 数组")
     rotation = Rotation.from_rotvec(
-        np.array([0.0, np.deg2rad(float(yaw_deg)), 0.0])
+        np.array([0.0, 0.0, np.deg2rad(float(yaw_deg))])
     ).as_matrix()
     return values @ rotation.T
 
@@ -203,7 +207,7 @@ class MocapH5ReplayNode:
         params: dict[str, Any],
         recording: MocapRecording,
         *,
-        right_rigid_id: int | str = "right_arm",
+        right_rigid_id: int | str = "tianji_wrist",
         speed: float = 1.0,
         yaw_deg: float = 0.0,
         rate: float = 60.0,
@@ -245,25 +249,26 @@ class MocapH5ReplayNode:
         h5_wrist_to_wuji2_wrist = _configured_pose(
             params, "right_h5_wrist_to_wuji2_wrist"
         )
-        marker_to_wrist = _configured_pose(
-            params, "right_marker_to_wrist"
+        marker_to_mount = _configured_pose(
+            params, "right_marker_to_mount"
         )
-        tcp_to_wrist = _configured_pose(
-            params, "right_tcp_to_wrist"
+        tcp_to_mount = _configured_pose(
+            params, "right_tcp_to_mount"
         )
-        self._h5_wrist_to_wuji2_base_pose = compose_pose(
-            h5_wrist_to_wuji2_wrist,
-            _WUJI2_WRIST_TO_BASE_POSE,
+        self._h5_wrist_to_wuji2_wrist_pose = (
+            h5_wrist_to_wuji2_wrist.copy()
         )
-        self._marker_to_base_pose = compose_pose(
-            marker_to_wrist,
-            _WUJI2_WRIST_TO_BASE_POSE,
+        self._marker_to_mount_pose = marker_to_mount.copy()
+        self._tcp_to_mount_pose = tcp_to_mount.copy()
+        self._marker_to_wrist_pose = compose_pose(
+            self._marker_to_mount_pose,
+            _WUJI2_MOUNT_TO_WRIST_POSE,
         )
-        self._tcp_to_base_pose = compose_pose(
-            tcp_to_wrist,
-            _WUJI2_WRIST_TO_BASE_POSE,
+        self._tcp_to_wrist_pose = compose_pose(
+            self._tcp_to_mount_pose,
+            _WUJI2_MOUNT_TO_WRIST_POSE,
         )
-        self._base_to_tcp_pose = invert_pose(self._tcp_to_base_pose)
+        self._wrist_to_tcp_pose = invert_pose(self._tcp_to_wrist_pose)
         self._left_reference_pose = synthetic_reference_pose()
         self._rigid_to_marker_mocap_pose = _configured_pose(
             params, "right_rigid_to_marker_mocap"
@@ -361,9 +366,10 @@ class MocapH5ReplayNode:
         self._rigid_body_names: dict[int, str] = {}
         self._right_rigid_home_pose: np.ndarray | None = None
         self._right_marker_home_pose: np.ndarray | None = None
-        self._right_base_home_pose: np.ndarray | None = None
+        self._right_mount_home_pose: np.ndarray | None = None
+        self._right_wrist_home_pose: np.ndarray | None = None
         self._virtual_tcp_home_pose: np.ndarray | None = None
-        self._current_motive_base_target_pose: np.ndarray | None = None
+        self._current_motive_wrist_target_pose: np.ndarray | None = None
         self._motive_frame_sub = ZenohJsonSub(
             session, MOCAP_FRAME_KEY, self._on_motive_frame
         )
@@ -437,7 +443,7 @@ class MocapH5ReplayNode:
         _LOG.info(
             "H5 Manus wrist 相对轨迹已加载：%s；right 有效=%d/%d，"
             "插值丢帧=%d，时长=%.3fs，speed=%g，yaw=%g°；"
-            "等待 Motive 刚体 %s 推导 wuji2 r_base Home",
+            "等待 Motive 刚体 %s 推导 wuji2 r_mount/r_wrist Home",
             recording.path,
             int(recording.hands["right"].valid.sum()),
             recording.frame_count,
@@ -448,10 +454,10 @@ class MocapH5ReplayNode:
             self._right_rigid_id,
         )
         _LOG.warning(
-            "等待 IK Home、有效 right_arm marker 后按 s；节点推导 "
-            "wuji2 r_base Home，并把 H5 wrist frame0 转换到 r_base。"
-            "随后 Enter 保压接近，按 r 装载后续轨迹；活动阶段按 s "
-            "回 Home，按 q 回 Home 后退出。"
+            "等待 IK Home、有效 tianji_wrist marker 后按 s；节点推导 "
+            "wuji2 r_mount/r_wrist Home，并把 H5 wrist frame0 转换到 "
+            "r_wrist。随后 Enter 保压接近，按 r 装载后续轨迹；"
+            "活动阶段按 s 回 Home，按 q 回 Home 后退出。"
         )
 
     def _frame(self, right_pose: np.ndarray) -> ControllerFrame:
@@ -547,21 +553,29 @@ class MocapH5ReplayNode:
             )
         pose = self._right_arm_pose(self._latest_motive_frame)
         if pose is None:
-            return None, f"right_arm 刚体 id={rigid_id} 无效或缺失"
+            return None, f"tianji_wrist 刚体 id={rigid_id} 无效或缺失"
         return pose, None
 
-    def _base_pose_from_rigid(self, rigid_pose: np.ndarray) -> np.ndarray:
+    def _mount_pose_from_rigid(self, rigid_pose: np.ndarray) -> np.ndarray:
         marker_pose = compose_pose(
             rigid_pose, self._rigid_to_marker_mocap_pose
         )
-        return compose_pose(marker_pose, self._marker_to_base_pose)
+        return compose_pose(marker_pose, self._marker_to_mount_pose)
+
+    def _wrist_pose_from_rigid(self, rigid_pose: np.ndarray) -> np.ndarray:
+        return compose_pose(
+            self._mount_pose_from_rigid(rigid_pose),
+            _WUJI2_MOUNT_TO_WRIST_POSE,
+        )
 
     def _frame_zero_skeleton_payload(
-        self, base_home_pose: np.ndarray
+        self,
+        wrist_home_pose: np.ndarray,
+        mount_home_pose: np.ndarray,
     ) -> dict[str, Any]:
-        target_base_motive = compose_pose(
+        target_wrist_motive = compose_pose(
             self._frame_zero_pose,
-            self._h5_wrist_to_wuji2_base_pose,
+            self._h5_wrist_to_wuji2_wrist_pose,
         )
         return {
             "frame_id": "motive_world",
@@ -579,21 +593,26 @@ class MocapH5ReplayNode:
             "frame0_manus_quat_xyzw": (
                 self._frame_zero_pose[3:7].tolist()
             ),
-            "home_wuji2_base_pose_motive": base_home_pose.tolist(),
-            "frame0_wuji2_base_pose_motive": (
-                target_base_motive.tolist()
+            "home_wuji2_mount_pose_motive": mount_home_pose.tolist(),
+            "home_wuji2_wrist_pose_motive": wrist_home_pose.tolist(),
+            "frame0_wuji2_wrist_pose_motive": (
+                target_wrist_motive.tolist()
             ),
             "transform_contract": (
-                "world axes use mocap_to_robot; right_arm locates "
-                "the shared r_base/r_wrist origin only"
+                "world axes use mocap_to_robot; tianji_wrist locates "
+                "r_mount; Manus wrist maps directly to r_wrist"
             ),
         }
 
     def _publish_frame_zero_skeleton(
-        self, base_home_pose: np.ndarray
+        self,
+        wrist_home_pose: np.ndarray,
+        mount_home_pose: np.ndarray,
     ) -> bool:
         try:
-            payload = self._frame_zero_skeleton_payload(base_home_pose)
+            payload = self._frame_zero_skeleton_payload(
+                wrist_home_pose, mount_home_pose
+            )
             self._frame_zero_skeleton_pub.put_json(payload)
         except Exception as exc:
             message = str(exc)
@@ -610,9 +629,11 @@ class MocapH5ReplayNode:
         rigid_pose, _reason = self._fresh_right_arm_pose(now)
         if rigid_pose is None:
             return False
-        return self._publish_frame_zero_skeleton(
-            self._base_pose_from_rigid(rigid_pose)
+        mount_pose = self._mount_pose_from_rigid(rigid_pose)
+        wrist_pose = compose_pose(
+            mount_pose, _WUJI2_MOUNT_TO_WRIST_POSE
         )
+        return self._publish_frame_zero_skeleton(wrist_pose, mount_pose)
 
     def _on_at_home_query(self, reply) -> None:
         if reply.ok and reply.result.payload:
@@ -680,7 +701,7 @@ class MocapH5ReplayNode:
 
             if self._phase != "ready":
                 _LOG.info(
-                    "键盘 r：尚未稳定到达 H5 wrist→r_base frame0，phase=%s",
+                    "键盘 r：尚未稳定到达 H5 wrist→r_wrist frame0，phase=%s",
                     self._phase,
                 )
                 return
@@ -698,7 +719,7 @@ class MocapH5ReplayNode:
             self._phase = "replaying"
             self._phase_started = now
             _LOG.warning(
-                "键盘 r：后续 wrist→r_base 轨迹已装载；持续按住 Enter "
+                "键盘 r：后续 wrist→r_wrist 轨迹已装载；持续按住 Enter "
                 "从 frame0 推进，松开立即保持。"
             )
 
@@ -713,38 +734,43 @@ class MocapH5ReplayNode:
             )
             return
         if self._read_deadman():
-            _LOG.warning("键盘 s：请先完全松开 Enter，再记录实时 r_base Home")
+            _LOG.warning("键盘 s：请先完全松开 Enter，再记录实时 wrist Home")
             return
         rigid_home_pose, reason = self._fresh_right_arm_pose()
         if rigid_home_pose is None:
-            _LOG.warning("键盘 s：%s，拒绝记录 r_base Home", reason)
+            _LOG.warning("键盘 s：%s，拒绝记录 wrist Home", reason)
             return
         try:
             marker_home_pose = compose_pose(
                 rigid_home_pose,
                 self._rigid_to_marker_mocap_pose,
             )
-            base_home_pose = compose_pose(
+            mount_home_pose = compose_pose(
                 marker_home_pose,
-                self._marker_to_base_pose,
+                self._marker_to_mount_pose,
+            )
+            wrist_home_pose = compose_pose(
+                mount_home_pose,
+                _WUJI2_MOUNT_TO_WRIST_POSE,
             )
             virtual_tcp_home_pose = compose_pose(
-                base_home_pose,
-                self._base_to_tcp_pose,
+                wrist_home_pose,
+                self._wrist_to_tcp_pose,
             )
             self._mapper.initialize(self._frame(virtual_tcp_home_pose))
         except ValueError as exc:
             _LOG.warning(
-                "键盘 s：r_base/TCP Home 外参无效，拒绝开始：%s",
+                "键盘 s：r_mount/r_wrist/TCP Home 外参无效，拒绝开始：%s",
                 exc,
             )
             return
 
         self._right_rigid_home_pose = rigid_home_pose.copy()
         self._right_marker_home_pose = marker_home_pose.copy()
-        self._right_base_home_pose = base_home_pose
+        self._right_mount_home_pose = mount_home_pose
+        self._right_wrist_home_pose = wrist_home_pose
         self._virtual_tcp_home_pose = virtual_tcp_home_pose
-        self._current_motive_base_target_pose = None
+        self._current_motive_wrist_target_pose = None
         self._cached_targets = None
         self._approach_stable_ticks = 0
         self._source_complete = False
@@ -758,10 +784,13 @@ class MocapH5ReplayNode:
         self._current_source_frame = 0
         self._phase = "approaching"
         self._phase_started = time.monotonic()
-        self._publish_frame_zero_skeleton(base_home_pose)
+        self._publish_frame_zero_skeleton(
+            wrist_home_pose, mount_home_pose
+        )
         _LOG.warning(
-            "键盘 s：已读取 right_arm marker 并推导 wuji2 r_base Home；"
-            "持续按住 Enter，使 r_base 接近 H5 wrist frame0，松开保持。"
+            "键盘 s：已读取 tianji_wrist marker 并推导 r_mount/r_wrist "
+            "Home；持续按住 Enter，使 r_wrist 接近 H5 wrist frame0，"
+            "松开保持。"
         )
 
     def _request_quit(self) -> None:
@@ -798,9 +827,10 @@ class MocapH5ReplayNode:
         self._deadman_pressed = False
         self._right_rigid_home_pose = None
         self._right_marker_home_pose = None
-        self._right_base_home_pose = None
+        self._right_mount_home_pose = None
+        self._right_wrist_home_pose = None
         self._virtual_tcp_home_pose = None
-        self._current_motive_base_target_pose = None
+        self._current_motive_wrist_target_pose = None
         self._phase = "armed"
         self._phase_started = time.monotonic()
         self._last_skeleton_preview_at = -float("inf")
@@ -808,21 +838,21 @@ class MocapH5ReplayNode:
 
     def _map_right_pose(self, h5_wrist_pose: np.ndarray) -> bool:
         if (
-            self._right_base_home_pose is None
+            self._right_wrist_home_pose is None
             or self._virtual_tcp_home_pose is None
         ):
-            self._last_error = "wuji2 r_base Home reference missing"
-            _LOG.error("wuji2 r_base Home 起点丢失，立即回 Home")
+            self._last_error = "wuji2 r_wrist Home reference missing"
+            _LOG.error("wuji2 r_wrist Home 起点丢失，立即回 Home")
             self._begin_return(exit_after_return=False)
             return False
         try:
-            desired_base_pose = compose_pose(
+            desired_wrist_pose = compose_pose(
                 np.asarray(h5_wrist_pose, dtype=np.float64),
-                self._h5_wrist_to_wuji2_base_pose,
+                self._h5_wrist_to_wuji2_wrist_pose,
             )
             virtual_tcp_pose = compose_pose(
-                desired_base_pose,
-                self._base_to_tcp_pose,
+                desired_wrist_pose,
+                self._wrist_to_tcp_pose,
             )
             targets = self._mapper.map_frame(
                 self._frame(virtual_tcp_pose)
@@ -830,12 +860,12 @@ class MocapH5ReplayNode:
         except Exception as exc:
             self._last_error = str(exc)
             _LOG.error(
-                "H5 wrist→r_base/TCP 目标映射失败，立即回 Home：%s",
+                "H5 wrist→r_wrist/TCP 目标映射失败，立即回 Home：%s",
                 exc,
             )
             self._begin_return(exit_after_return=False)
             return False
-        self._current_motive_base_target_pose = desired_base_pose.copy()
+        self._current_motive_wrist_target_pose = desired_wrist_pose.copy()
         self._cached_targets = targets
         return True
 
@@ -929,29 +959,36 @@ class MocapH5ReplayNode:
                 self._rigid_to_marker_mocap_pose,
             )
         )
-        actual_base_pose = (
+        actual_mount_pose = (
             None
             if actual_marker_pose is None
             else compose_pose(
-                actual_marker_pose, self._marker_to_base_pose
+                actual_marker_pose, self._marker_to_mount_pose
+            )
+        )
+        actual_wrist_pose = (
+            None
+            if actual_mount_pose is None
+            else compose_pose(
+                actual_mount_pose, _WUJI2_MOUNT_TO_WRIST_POSE
             )
         )
         fresh = (
             age_s is not None
             and age_s <= _MOTIVE_STALE_S
-            and actual_base_pose is not None
+            and actual_wrist_pose is not None
         )
-        desired_pose = self._current_motive_base_target_pose
+        desired_pose = self._current_motive_wrist_target_pose
         position_error_m = None
         orientation_error_deg = None
         if fresh and desired_pose is not None:
             position_error_m = float(
-                np.linalg.norm(actual_base_pose[:3] - desired_pose[:3])
+                np.linalg.norm(actual_wrist_pose[:3] - desired_pose[:3])
             )
             orientation_error_deg = float(
                 np.rad2deg(
                     _rotation_error_rad(
-                        actual_base_pose[3:7], desired_pose[3:7]
+                        actual_wrist_pose[3:7], desired_pose[3:7]
                     )
                 )
             )
@@ -977,12 +1014,17 @@ class MocapH5ReplayNode:
                 if self._right_marker_home_pose is None
                 else self._right_marker_home_pose.tolist()
             ),
-            "base_home_pose_xyzw": (
+            "mount_home_pose_xyzw": (
                 None
-                if self._right_base_home_pose is None
-                else self._right_base_home_pose.tolist()
+                if self._right_mount_home_pose is None
+                else self._right_mount_home_pose.tolist()
             ),
-            "desired_base_pose_xyzw": (
+            "wrist_home_pose_xyzw": (
+                None
+                if self._right_wrist_home_pose is None
+                else self._right_wrist_home_pose.tolist()
+            ),
+            "desired_wrist_pose_xyzw": (
                 None if desired_pose is None else desired_pose.tolist()
             ),
             "actual_rigid_pose_xyzw": (
@@ -995,10 +1037,15 @@ class MocapH5ReplayNode:
                 if actual_marker_pose is None
                 else actual_marker_pose.tolist()
             ),
-            "actual_base_pose_xyzw": (
+            "actual_mount_pose_xyzw": (
                 None
-                if actual_base_pose is None
-                else actual_base_pose.tolist()
+                if actual_mount_pose is None
+                else actual_mount_pose.tolist()
+            ),
+            "actual_wrist_pose_xyzw": (
+                None
+                if actual_wrist_pose is None
+                else actual_wrist_pose.tolist()
             ),
             "position_error_m": position_error_m,
             "orientation_error_deg": orientation_error_deg,
@@ -1010,13 +1057,13 @@ class MocapH5ReplayNode:
             "source": "offline_replay",
             "input": "mocap_h5_replay",
             "scope": "mocap_replay",
-            "mapping": "motive_absolute_wrist_to_wuji2_base_tcp_v6",
+            "mapping": "motive_r_mount_h5_wrist_to_wuji2_r_wrist_beta1",
             "body_tracking": "disabled",
             "motion_trackers_required": True,
             "elbow_constraint": "published_default_zsp_backend_selected",
             "smpl_used": False,
             "at_safe_home": state == "idle" and self._at_home,
-            "control_mode": "h5_right_wrist_to_wuji2_base_hold_to_run",
+            "control_mode": "h5_right_wrist_to_wuji2_wrist_hold_to_run",
             "side": "right",
             "right_rigid_id": self._right_rigid_id,
             "recording": self._recording.summary(),
@@ -1033,31 +1080,35 @@ class MocapH5ReplayNode:
                 time.monotonic()
             ),
             "coordinate_contract": (
-                "raw right_arm rigid * Motive GL/GO -> marker_mocap; "
-                "marker_mocap -> current wuji2 r_base; "
-                "H5 Manus wrist * T_manus_base -> wuji2 r_base; "
-                "wuji2 r_base * inverse(T_tcp_to_base) -> Tianji TCP IK"
+                "raw tianji_wrist rigid * Motive GL/GO -> marker_mocap; "
+                "marker_mocap -> wuji2 r_mount -> r_wrist; "
+                "H5 Manus wrist * T_manus_wrist -> wuji2 r_wrist; "
+                "wuji2 r_wrist * inverse(T_tcp_to_wrist) -> Tianji TCP IK"
             ),
             "frame_zero_target": (
-                "absolute_h5_manus_wrist_pose_converted_to_wuji2_r_base"
+                "absolute_h5_manus_wrist_pose_converted_to_wuji2_r_wrist"
             ),
-            "position_delta": "p_h5_base - p_current_robot_base",
+            "position_delta": "p_h5_wrist - p_current_robot_wrist",
             "orientation_delta": (
-                "R_h5_manus * R_manus_base * "
-                "inverse(R_current_robot_base)"
+                "R_h5_manus * R_manus_wrist * "
+                "inverse(R_current_robot_wrist)"
             ),
             "rigid_to_marker_mocap_pose_xyzw": (
                 self._rigid_to_marker_mocap_pose.tolist()
             ),
-            "marker_to_base_pose_xyzw": (
-                self._marker_to_base_pose.tolist()
+            "marker_to_mount_pose_xyzw": (
+                self._marker_to_mount_pose.tolist()
             ),
-            "tcp_to_base_pose_xyzw": self._tcp_to_base_pose.tolist(),
-            "h5_wrist_to_wuji2_base_pose_xyzw": (
-                self._h5_wrist_to_wuji2_base_pose.tolist()
+            "mount_to_wrist_pose_xyzw": (
+                _WUJI2_MOUNT_TO_WRIST_POSE.tolist()
             ),
-            "base_to_tcp_pose_xyzw": self._base_to_tcp_pose.tolist(),
-            "endpoint": "wuji2_r_base",
+            "tcp_to_mount_pose_xyzw": self._tcp_to_mount_pose.tolist(),
+            "tcp_to_wrist_pose_xyzw": self._tcp_to_wrist_pose.tolist(),
+            "h5_wrist_to_wuji2_wrist_pose_xyzw": (
+                self._h5_wrist_to_wuji2_wrist_pose.tolist()
+            ),
+            "wrist_to_tcp_pose_xyzw": self._wrist_to_tcp_pose.tolist(),
+            "endpoint": "wuji2_r_wrist",
             "error": self._last_error,
         }
 
@@ -1277,12 +1328,12 @@ def _parser() -> argparse.ArgumentParser:
         "--yaw-deg",
         type=float,
         default=0.0,
-        help="绕 Motive +Y 旋转整条轨迹的角度",
+        help="绕 Motive 竖直轴(+Z)旋转整条轨迹的角度",
     )
     parser.add_argument(
         "--right-rigid-id",
-        default="right_arm",
-        help="天机右末端 Motive 刚体：数字 id 或刚体名（默认 right_arm）",
+        default="tianji_wrist",
+        help="天机右末端 Motive 刚体：数字 id 或刚体名（默认 tianji_wrist）",
     )
     parser.add_argument(
         "--rate", type=float, default=60.0, help="目标映射与发布频率 Hz"

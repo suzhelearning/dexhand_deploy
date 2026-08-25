@@ -144,11 +144,11 @@ class MocapH5LoaderTest(unittest.TestCase):
     def test_apply_yaw_world_rotates_position_and_orientation(self) -> None:
         poses = np.array([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]])
         rotated = apply_yaw_world(poses, 90.0)
-        np.testing.assert_allclose(rotated[0, :3], [0.0, 0.0, -1.0],
+        np.testing.assert_allclose(rotated[0, :3], [0.0, 1.0, 0.0],
                                    atol=1e-9)
-        # 绕 +Y 旋转 90°：xyzw 序 [0, sin45, 0, cos45]。
+        # 绕 +Z（Motive 竖直轴）旋转 90°：xyzw 序 [0, 0, sin45, cos45]。
         expected_quat = np.array(
-            [0.0, np.sin(np.pi / 4), 0.0, np.cos(np.pi / 4)]
+            [0.0, 0.0, np.sin(np.pi / 4), np.cos(np.pi / 4)]
         )
         np.testing.assert_allclose(rotated[0, 3:], expected_quat, atol=1e-9)
 

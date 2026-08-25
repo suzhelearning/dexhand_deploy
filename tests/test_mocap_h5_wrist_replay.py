@@ -76,9 +76,9 @@ class MocapH5WristReplayCoordinateTest(unittest.TestCase):
         # 当前组合 URDF 世界轴与 Robot world 对齐；允许 URDF/FK 数值舍入。
         np.testing.assert_allclose(actual, expected, atol=1.0e-4)
         self.assertAlmostEqual(float(np.linalg.det(actual)), 1.0, places=6)
-        np.testing.assert_allclose(actual[:, 0], [0.0, 1.0, 0.0], atol=1e-4)
-        np.testing.assert_allclose(actual[:, 1], [0.0, 0.0, 1.0], atol=1e-4)
-        np.testing.assert_allclose(actual[:, 2], [1.0, 0.0, 0.0], atol=1e-4)
+        np.testing.assert_allclose(actual[:, 0], [1.0, 0.0, 0.0], atol=1e-4)
+        np.testing.assert_allclose(actual[:, 1], [0.0, 1.0, 0.0], atol=1e-4)
+        np.testing.assert_allclose(actual[:, 2], [0.0, 0.0, 1.0], atol=1e-4)
 
 
 if __name__ == "__main__":

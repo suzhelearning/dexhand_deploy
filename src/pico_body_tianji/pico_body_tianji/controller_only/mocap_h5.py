@@ -13,7 +13,7 @@
   纯动捕会话中通常从未跟踪，根级 ``valid`` 几乎恒为 False，**不能**
   用作手腕回放的门控；
 - ``hands/<side>/valid`` 是单侧手部标记，手腕位姿为 Motive 系
-  （y-up 右手系、米制）：
+  （x-forward / z-up 右手系、米制）：
   - ``hands/<side>/wrist_position``        (N,3) float32
   - ``hands/<side>/wrist_quaternion_xyzw``  (N,4) float32（xyzw 序）
 - 单侧可能完全没有跟踪（如 take003 左手全 NaN）：本模块将其视为
@@ -22,12 +22,12 @@
 安全防护：拒绝包含外部/软链接的 HDF5（与采集端 replay_hdf5.py
 一致），防止恶意文件经 HDF5 外部链接读取任意本地文件。
 
-坐标约定：Motive 系为 y-up（+X 操作者左，+Z 操作者前），与 PICO
-手柄系（+X 右，+Z 后）水平轴相差 180°，链路使用独立的
-``mocap_to_robot`` 同向映射（操作者前 -> 机器人前）。
-``apply_yaw_world`` 绕 Motive +Y（竖直轴）旋转整个轨迹，等价于在
-``mocap_to_robot`` 映射后绕机器人世界 Z（竖直轴）旋转，用于标定
-录制时人的朝向与机器人正前方的夹角。
+坐标约定：Motive 系为 x-forward / z-up（+X 操作者前，+Y 操作者左，
++Z 上），与机器人 world 系（+X 前、+Y 左、+Z 上）轴完全同向，故
+``mocap_to_robot`` 为单位阵。
+``apply_yaw_world`` 绕 Motive +Z（竖直轴）旋转整个轨迹，等价于绕
+机器人世界 Z（竖直轴）旋转，用于标定录制时人的朝向与机器人正前方
+的夹角。
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ _SYNTHETIC_REFERENCE_POSE = np.array(
 
 @dataclass(frozen=True)
 class HandRecording:
-    """单侧手部轨迹（Motive 系，y-up，米制）。"""
+    """单侧手部轨迹（Motive 系，x-forward / z-up，米制）。"""
 
     valid: np.ndarray  # (N,) bool；False 表示该帧手腕缺失
     wrist: np.ndarray  # (N,7) float64 [x,y,z,qx,qy,qz,qw]
@@ -261,11 +261,12 @@ def load_mocap_h5(path: str | Path) -> MocapRecording:
 def apply_yaw_world(
     wrist: np.ndarray, yaw_deg: float
 ) -> np.ndarray:
-    """把整条手腕轨迹绕 Motive 竖直轴（+Y）旋转 yaw_deg 度。
+    """把整条手腕轨迹绕 Motive 竖直轴（+Z）旋转 yaw_deg 度。
 
-    位置与姿态一起旋转：p' = Ry(θ)·p，q' = q_yaw ⊗ q（xyzw 序左乘）。
-    经回放节点的 ``mocap_to_robot`` 映射后，等价于绕机器人世界 Z 轴
-    旋转，用于对齐录制时人的朝向与机器人正前方。θ=0 时原样返回。
+    Motive 系为 x-forward / z-up：竖直轴为 +Z，故绕 +Z 旋转。
+    位置与姿态一起旋转：p' = Rz(θ)·p，q' = q_yaw ⊗ q（xyzw 序左乘）。
+    经回放节点的 ``mocap_to_robot``（单位阵）映射后，等价于绕机器人
+    世界 Z 轴旋转，用于对齐录制时人的朝向与机器人正前方。θ=0 时原样。
     """
     if not np.isfinite(yaw_deg):
         raise ValueError("yaw_deg 必须为有限数值")
@@ -275,15 +276,15 @@ def apply_yaw_world(
     cos_a, sin_a = np.cos(angle), np.sin(angle)
     rotation = np.array(
         [
-            [cos_a, 0.0, sin_a],
-            [0.0, 1.0, 0.0],
-            [-sin_a, 0.0, cos_a],
+            [cos_a, -sin_a, 0.0],
+            [sin_a, cos_a, 0.0],
+            [0.0, 0.0, 1.0],
         ],
         dtype=np.float64,
     )
     half = 0.5 * angle
     yaw_quat = np.array(
-        [0.0, np.sin(half), 0.0, np.cos(half)], dtype=np.float64
+        [0.0, 0.0, np.sin(half), np.cos(half)], dtype=np.float64
     )
 
     poses = np.asarray(wrist, dtype=np.float64)
@@ -341,7 +342,7 @@ def align_pose_to_reference(
 
     ``T_aligned(t) = T_target_ref · inverse(T_source_ref) · T_source(t)``。
     H5 回放只允许 wrist→wrist 对齐：H5 第 0 帧 wrist 对齐机器人
-    ``r_base`` wrist Home，不允许 marker 中心作为目标参考点。
+    ``r_wrist`` Home，不允许 r_mount/marker 中心作为目标参考点。
     """
     alignment = compose_pose(
         target_reference,
