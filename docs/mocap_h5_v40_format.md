@@ -22,7 +22,7 @@
 │  └─ type          (M,)  uint8   0=start, 1=stop(当前仅有这两个枚举)
 ├─ hands/
 │  ├─ left/                       必须存在组;可完全无效(见 §4.3)
-│  │  ├─ keypoints_world        (N,21,3) float32 腕部相对,MediaPipe 点序
+│  │  ├─ keypoints_world        (N,21,3) float32 绝对坐标(0 号=腕中心),MediaPipe 点序
 │  │  ├─ wrist_position         (N,3)   float32 Motive 系,米
 │  │  ├─ wrist_quaternion_xyzw  (N,4)   float32 W 系,xyzw 序
 │  │  ├─ valid                  (N,)    uint8
@@ -68,13 +68,13 @@
 
 | 数据集 | 形状/类型 | 语义 |
 | --- | --- | --- |
-| `keypoints_world` | (N,21,3) float32 | 手部 21 键点,**腕部相对**坐标(0 号点=腕中心≈0),MediaPipe 点序 |
+| `keypoints_world` | (N,21,3) float32 | 手部 21 键点,**绝对坐标**(0 号点=腕中心=`wrist_position`),MediaPipe 点序 |
 | `wrist_position` | (N,3) float32 | 手腕中心绝对位置(Motive 系,米) |
 | `wrist_quaternion_xyzw` | (N,4) float32 | 手腕姿态,**xyzw 元素序**,W 局部系 |
 | `valid` | (N,) uint8 | 该侧逐帧有效标记 |
 
-键点 0 号(腕)必须与 `wrist_position` 重合(加载器按 ≤ 1e-5 m 清洗),
-即 `keypoints_world` 天然满足"腕部相对"定义。
+键点 0 号(腕)必须与 `wrist_position` 重合(加载器按 ≤ 1e-5 m 清洗)。
+H5 内存储为**绝对坐标**;回放节点发布给 retarget 桥时才转为腕部相对。
 
 **MediaPipe 21 点序**:0=腕,1-4=拇指,5-8=食指,9-12=中指,
 13-16=无名指,17-20=小指。骨段连接(20 条边):
@@ -119,15 +119,36 @@ Motive 系:**x-forward / z-up** 右手系,米制
 故 `mocap_to_robot` 为单位阵;`apply_yaw_world` 绕竖直轴(+Z)旋转
 整个轨迹,用于标定录制时人的朝向与机器人正前方的夹角。
 
-### 4.2 wrist 局部系 W
+### 4.2 Manus 手腕局部系 W(方向定义)
 
-采集端标定、经 21 点几何验证:
+`hands/<side>/wrist_quaternion_xyzw` 表示**采集端已标定的手腕局部系 W**
+(不是 Manus SDK 原始输出,是采集端经手背刚体 + `wrist_offset` 标定后的
+结果,见采集端 `WRIST_TRANSFORM.md`)。W 是**右手系**,方向定义经
+21 点键点几何验证:
 
 ```text
-W +x = 指尖方向   W +y = 手背法向   W +z = 小指方向
+W +x = 指尖方向(手掌平面内,腕 → 中指尖)
+W +y = 手背法向(掌心穿向手背)
+W +z = 小指方向(+x × +y 自动满足右手系)
 ```
 
-回放链路经固定 `W→wuji2` 变换(Ry(-90°))映射到机器人 `r_wrist` 系。
+直观理解(右手):手掌平放桌面、掌心朝下、指尖指向前方时,
+`+x` 指向前、`+y` 向上(手背)、`+z` 指向右(小指侧)。
+
+关键约定:
+
+- **`axis_transform` 只把 Manus 节点偏移表达进 W**,消费端不能再乘进
+  wrist pose,否则姿态会多转 90°;
+- 四元数元素序为 **xyzw**(H5 内);回放链路把 W 经固定变换
+  `W→wuji2 B = Ry(-90°)`(`right_h5_wrist_to_wuji2_wrist_quaternion_xyzw
+  = [0.707, 0, -0.707, 0]`)映射到机器人 `r_wrist` 系 B;
+- **与 wuji2 B 系的轴对应**:B −z=指尖、−y=手背、+x=拇指;
+- 左右手 W 系对称定义(镜像);右手标定见采集端
+  `WRIST_TRANSFORM.md`(刚体 id=2 + `wrist_offset` 欧拉修正)。
+
+⚠ 注意:外部数据的 wrist 局部系可能与 W 不同。例如 kp800 数据包的
+局部系为 `{+x≈拇指, +y≈−指尖, +z≈手背法向}`,需先乘标定旋转
+(见 `docs/kp800_to_v40_format_diff.md` 第 7 项)再写入。
 
 ### 4.3 无效侧的处理
 
@@ -162,7 +183,7 @@ out = "/tmp/demo_v40.h5"
 
 def side_group(f, name):
     g = f.create_group(f"hands/{name}")
-    g.create_dataset("keypoints_world", (N, 21, 3), dtype="f4")        # 腕部相对
+    g.create_dataset("keypoints_world", (N, 21, 3), dtype="f4")        # 绝对坐标(0 号=腕)
     g.create_dataset("wrist_position", (N, 3), dtype="f4")             # Motive 系,米
     g.create_dataset("wrist_quaternion_xyzw", (N, 4), dtype="f4")      # xyzw,W 系
     g.create_dataset("valid", (N,), dtype="u1")
@@ -179,8 +200,8 @@ with h5py.File(out, "w") as f:
         g = side_group(f, side)
         g["wrist_position"][:] = ...          # 绝对位置
         g["wrist_quaternion_xyzw"][:] = ...   # 归一化四元数(xyzw)
-        g["keypoints_world"][:, 0] = 0.0      # 0 号点=腕
-        g["keypoints_world"][:, 1:] = ...     # 腕部相对键点(MediaPipe 序)
+        g["keypoints_world"][:, 0] = g["wrist_position"][:]  # 0 号点=腕中心
+        g["keypoints_world"][:, 1:] = ...     # 绝对坐标键点(MediaPipe 序)
         g["valid"][:] = 1
 ```
 
