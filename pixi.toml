@@ -1,0 +1,67 @@
+[workspace]
+name = "pico-tianji-real-teleop"
+version = "0.3.0"
+description = "PICO + SMPL + Pinocchio 到 Marvin 双臂遥操作与 RViz/MuJoCo 仿真"
+channels = ["conda-forge", "robostack-staging"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.10.*"
+numpy = "2.2.*"
+scipy = "1.14.*"
+pyyaml = ">=6,<7"
+mujoco = ">=3.2,<4"
+packaging = ">=24,<26"
+lark = ">=1.1,<2"
+netifaces = ">=0.11,<1"
+h5py = ">=3.10,<4"
+
+[pypi-dependencies]
+# zenoh-python：PyPI 包名 eclipse-zenoh，import 名 zenoh
+eclipse-zenoh = ">=1.10,<2"
+
+[tasks]
+doctor = "bash scripts/doctor.sh"
+test = { cmd = "bash scripts/test.sh", depends-on = ["doctor"] }
+real = { cmd = "bash scripts/run_real.sh", depends-on = ["doctor"] }
+real_controller_only = { cmd = "bash scripts/run_controller_only_real.sh", depends-on = ["doctor"] }
+real_mocap_step = { cmd = "bash scripts/run_mocap_step_real.sh", depends-on = ["doctor"] }
+real_mocap_live = { cmd = "bash scripts/run_mocap_live_real.sh", depends-on = ["doctor"] }
+real_mocap_h5 = { cmd = "bash scripts/run_mocap_h5_real.sh", depends-on = ["doctor"], description = "复用低速 H5+IK 主机链路，经安全桥驱动 Marvin 真机（必须 --confirm-real）" }
+status = { cmd = "bash scripts/status.sh", depends-on = ["doctor"] }
+controller-only-joints = "bash scripts/watch_controller_only_joints.sh"
+controller-only-trace = "bash scripts/run_controller_only_trace.sh"
+controller-only-real-diagnostic = "bash scripts/run_controller_only_real_diagnostic.sh"
+replay-controller-only = { cmd = "bash scripts/run_controller_only_replay.sh", depends-on = ["doctor"] }
+sim_controller_only = { cmd = "bash scripts/run_controller_only_sim.sh --mujoco-only", depends-on = ["doctor"] }
+sim_mocap_step = { cmd = "bash scripts/run_mocap_step.sh --mujoco-only", description = "mocap 键盘步进控制（动捕系 10mm/键，s 启停，Zenoh）" }
+sim_mocap_live = { cmd = "bash scripts/run_mocap_live.sh --mujoco-only", description = "Motive tianji_wrist 定零 + 连续键盘位置步进 + 实时位姿显示（默认右臂 10mm/键，Zenoh）" }
+sim_mocap_h5 = { cmd = "bash scripts/run_mocap_h5_replay.sh --mujoco-only", description = "从 Motive tianji_wrist 实测 Home 移动到 HDF5 Manus 右腕绝对轨迹的 Enter 保压回放（右臂，Zenoh）" }
+sim_mocap_h5_replay = { cmd = "bash scripts/run_mocap_h5_wrist_replay.sh", description = "机械臂+wuji2 H5 数据回放（Home 静止；tianji_wrist 仅定位动捕原点；无 IK）" }
+wuji_hand2_dry = { cmd = "bash scripts/run_wuji_hand2_dry.sh", description = "wuji2 手桥 dry-run：键点→retarget→发布命令，不连接硬件（配合 sim_mocap_h5 仿真验收）" }
+wuji_hand2_real = { cmd = "bash scripts/run_wuji_hand2_real.sh", depends-on = ["doctor"], description = "wuji2 手桥真机：键点→retarget→Wuji Hand 2 关节控制（必须 --confirm-real）" }
+sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
+
+# C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。
+# 编译器使用 Ubuntu 24.04 系统 GCC 13；脚本会在编译前严格检查它们与
+# runtime 的 ABI 版本。
+[feature.ik-build.dependencies]
+python = "3.12.*"
+numpy = ">=2,<3"
+packaging = ">=24,<26"
+pyyaml = ">=6,<7"
+cmake = ">=3.22"
+eigen = "*"
+urdfdom_headers = "*"
+
+[feature.ik-build.pypi-dependencies]
+pin = "==4.0.0"
+eclipse-zenoh = ">=1.10,<2"
+
+[feature.ik-build.tasks]
+check-ik-build-env = "bash scripts/check_ik_build_env.sh"
+build-ik = { cmd = "bash scripts/build_ik.sh", depends-on = ["check-ik-build-env"] }
+deploy-ik = "bash scripts/deploy_ik_runtime.sh"
+
+[environments]
+ik-build = { features = ["ik-build"], no-default-feature = true }

@@ -1,0 +1,22 @@
+marvin_hardware_bridge:
+  ros__parameters:
+    robot_ip: "192.168.1.190"
+    rate: 30.0
+    velocity_ratio: 10
+    acceleration_ratio: 10
+    host_status_timeout_s: 1.0
+    command_timeout_s: 0.15
+    state_timeout_s: 1.0
+    feedback_timeout_s: 0.15
+    maximum_pair_skew_s: 0.03
+    maximum_output_step_deg: 0.25
+    maximum_teleop_speed_deg_s: 55.0
+    maximum_tracking_error_deg: 8.0
+    return_minimum_duration_s: 2.0
+    return_max_speed_deg_s: 10.0
+    home_tolerance_deg: 1.0
+    feedback_hard_limit_padding_deg: 5.0
+    left_home_deg: [55.0, -65.0, -70.0, -60.0, 60.0, 0.0, 0.0]
+    right_home_deg: [-55.0, -65.0, 70.0, -60.0, -60.0, 0.0, 0.0]
+    lower_limits_deg: [-165.0, -115.0, -165.0, -140.0, -165.0, -55.0, -85.0]
+    upper_limits_deg: [165.0, 115.0, 165.0, 55.0, 165.0, 55.0, 85.0]
