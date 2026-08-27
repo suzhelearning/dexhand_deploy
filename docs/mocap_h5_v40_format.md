@@ -1,10 +1,13 @@
-# mocap-acquisition HDF5 格式标准(v4.0)
+# mocap-acquisition HDF5 格式标准(v4.0,含 v5 `wuji2_joints` 扩展)
 
 本项目回放链路(`pixi run sim_mocap_h5`)唯一支持的动捕 H5 数据格式。
 本文件是完整格式规范,供采集端、数据提供方与消费端共同遵循。
 
 - 格式身份:`schema_name = "mocap-acquisition"`,`h5_version = "4.0"`,
   布局 `schema_layout = "compact-aligned-60hz-v1"`
+- **v5 扩展**:新增**可选**数据集 `hands/<side>/wuji2_joints`(离线
+  retarget 的 20 关节角),见 §3.5;其余布局、语义、校验规则与 v4.0
+  **完全一致**,旧文件与旧消费端不受影响
 - 加载器实现:`src/pico_body_tianji/pico_body_tianji/controller_only/mocap_h5.py`
   (`load_mocap_h5()`),以下校验规则以该实现为准
 
@@ -22,13 +25,16 @@
 │  │  ├─ keypoints_world        (N,21,3) float32 腕部相对,MediaPipe 点序
 │  │  ├─ wrist_position         (N,3)   float32 Motive 系,米
 │  │  ├─ wrist_quaternion_xyzw  (N,4)   float32 W 系,xyzw 序
-│  │  └─ valid                  (N,)    uint8
+│  │  ├─ valid                  (N,)    uint8
+│  │  └─ wuji2_joints           (N,20)  float32 可选,离线 retarget 关节角(见 §3.5)
 │  └─ right/                      同 left
 └─ objects/                       (可选)动捕物体刚体,每个物体一组
    └─ <object_name>/              如 hammer
       ├─ object_position        (N,3) float32 Motive 系,米
       ├─ object_quaternion_xyzw (N,4) float32 xyzw 序
       └─ valid                  (N,)  uint8
+
+*注:`wuji2_joints` 为 v5 扩展的可选字段,见 §3.5。其余布局与 v4.0 完全一致。*
 ```
 
 ## 2. 根属性
@@ -86,6 +92,24 @@
 动捕物体刚体(如锤子)的位姿轨迹。当前回放节点不消费该组,保留给
 viewer/后续功能;写入时仍应遵循同样形状与 xyzw 四元数约定。
 
+### 3.5 wuji2_joints(v5 扩展,可选)
+
+`hands/<side>/wuji2_joints` 是**可选**数据集:采集端**不写**(采集时没有
+该数据),采集完成后由数据处理团队用 retargeting 从 `keypoints_world`
+离线转换为 Wuji2 手的 20 个关节角后填入。
+
+| 属性 | 约定 |
+| --- | --- |
+| 形状/类型 | (N,20) float32,单位 rad |
+| 关节序 | Wuji2 手组合 URDF(`tianji_wuji2.urdf`)**20 个运动关节序**:`r_thumb_cmc_flex, r_thumb_cmc_abd, r_thumb_mcp, r_thumb_ip`,然后每指 `mcp_flex, mcp_abd, pip, dip`(index → middle → ring → pinky) |
+| 语义 | 与 `wuji_hand2_bridge` 运行时 retarget 输出同序(即组合 URDF 关节序) |
+| 缺失 | 数据集不存在时回放链路照旧走 keypoints → 运行时 retarget |
+| 存在 | 回放链路**直接使用**该关节角驱动手(跳过运行时 retarget),保证离线/在线一致 |
+
+同一文件可左右手各带一个 `wuji2_joints`;`hands/left` 全无效时该侧
+字段可缺省。加载器对**可选字段存在时**强制校验形状 (N,20),否则拒绝;
+数值有限性由消费端前向填充(与键点一致)。
+
 ## 4. 坐标系与语义约定
 
 ### 4.1 世界系
@@ -121,7 +145,9 @@ W +x = 指尖方向   W +y = 手背法向   W +z = 小指方向
 4. **布局**:`hands/left` 与 `hands/right` 都必须存在,且各自含
    `keypoints_world / wrist_position / wrist_quaternion_xyzw / valid`
    四个数据集,形状分别为 (N,21,3)/(N,3)/(N,4)/(N);
-5. **防御性清洗**(不满足的帧标记无效,不拒绝文件):
+5. **可选字段**:`hands/<side>/wuji2_joints` 若存在,形状必须为
+   (N,20),否则拒绝;
+6. **防御性清洗**(不满足的帧标记无效,不拒绝文件):
    - 所有数值有限(NaN/Inf 帧无效);
    - 键点 0 号与 `wrist_position` 差 ≤ 1e-5 m;
    - `wrist_quaternion_xyzw` 范数 ∈ [0.95, 1.05]。
@@ -140,6 +166,7 @@ def side_group(f, name):
     g.create_dataset("wrist_position", (N, 3), dtype="f4")             # Motive 系,米
     g.create_dataset("wrist_quaternion_xyzw", (N, 4), dtype="f4")      # xyzw,W 系
     g.create_dataset("valid", (N,), dtype="u1")
+    g.create_dataset("wuji2_joints", (N, 20), dtype="f4")  # 可选(v5):离线 retarget 关节角
     return g
 
 with h5py.File(out, "w") as f:
@@ -163,7 +190,11 @@ with h5py.File(out, "w") as f:
 - 键点 0 号必须与 wrist 重合,加载器依赖该性质做数值清洗;
 - 完全无效侧:回放节点以合成参考位姿"保持 Home";
 - `output_hz` 决定回放推进速率;`--speed` 为倍速;
-- viewer 显示 frame0 骨架时按 MediaPipe 点序与 20 条骨段绘制。
+- viewer 显示 frame0 骨架时按 MediaPipe 点序与 20 条骨段绘制;
+- **手部驱动二选一**:`hands/right/wuji2_joints` 存在 → 回放节点直接把
+  离线关节角发布到 `pico_body_sim/right_hand/joint_commands` 驱动手
+  (跳过 retarget 桥,仿真链不启 dry 桥);不存在 → 照旧发布键点给
+  `wuji_hand2_{dry,real}` 运行时 retarget。
 
 ## 8. 相关文件
 

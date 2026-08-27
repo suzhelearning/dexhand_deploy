@@ -29,6 +29,7 @@ def _write_v4_h5(
     version: str = "4.0",
     schema_name: str = "compact-aligned-60hz-v1",
     with_external_link: bool = False,
+    with_wuji2_joints: bool = False,
 ) -> None:
     time_ns = np.arange(frames, dtype=np.int64) * int(1.0e9 / output_hz)
     with h5py.File(path, "w") as f:
@@ -79,6 +80,16 @@ def _write_v4_h5(
             )
             group.create_dataset("valid", data=valid)
             group.create_dataset("keypoints_world", data=keypoints)
+            if with_wuji2_joints and side == "right":
+                # v5 可选字段：离线 retarget 的 20 关节角(rad)
+                joints = (
+                    np.sin(
+                        np.linspace(0.0, 2.0, frames)[:, None]
+                        + np.arange(20)[None, :]
+                    )
+                    * 0.5
+                ).astype(np.float32)
+                group.create_dataset("wuji2_joints", data=joints)
         if with_external_link:
             f["objects"] = h5py.ExternalLink("outside.h5", "/")
 
@@ -129,6 +140,43 @@ class MocapH5LoaderTest(unittest.TestCase):
     def test_missing_file_raises(self) -> None:
         with self.assertRaises(FileNotFoundError):
             load_mocap_h5("/nonexistent/take.h5")
+
+    def test_wuji2_joints_optional_field_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "take.h5"
+            _write_v4_h5(path, with_wuji2_joints=True)
+            recording = load_mocap_h5(path)
+            joints = recording.hands["right"].wuji2_joints
+            self.assertIsNotNone(joints)
+            self.assertEqual(joints.shape, (61, 20))
+            # 数值原样保留(float64 提升)
+            self.assertAlmostEqual(float(joints[0, 0]), 0.0, places=6)
+            # 左手未写 → None
+            self.assertIsNone(recording.hands["left"].wuji2_joints)
+            # summary 标记
+            self.assertTrue(recording.summary()["hands"]["right"]["wuji2_joints"])
+            self.assertFalse(recording.summary()["hands"]["left"]["wuji2_joints"])
+
+    def test_wuji2_joints_absent_is_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "take.h5"
+            _write_v4_h5(path)
+            recording = load_mocap_h5(path)
+            self.assertIsNone(recording.hands["right"].wuji2_joints)
+            self.assertFalse(
+                recording.summary()["hands"]["right"]["wuji2_joints"]
+            )
+
+    def test_wuji2_joints_wrong_shape_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "take.h5"
+            _write_v4_h5(path)
+            with h5py.File(path, "a") as f:
+                f["hands/right/wuji2_joints"] = np.zeros(
+                    (61, 21), dtype=np.float32
+                )
+            with self.assertRaisesRegex(ValueError, "wuji2_joints"):
+                load_mocap_h5(path)
 
     def test_nan_side_marks_all_frames_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

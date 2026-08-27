@@ -178,6 +178,24 @@ if [[ ! -f "${H5_PATH}" ]]; then
   exit 2
 fi
 
+# v5 可选字段探测：H5 带 hands/right/wuji2_joints 时进入直通模式
+# （节点直接发布离线 retarget 关节角，不启动 dry 桥避免双发布）。
+OFFLINE_RETARGET_JOINTS=false
+if python - "${H5_PATH}" <<'PY'
+import h5py
+import sys
+
+try:
+    with h5py.File(sys.argv[1], "r") as f:
+        group = f.get("hands/right")
+        sys.exit(0 if group is not None and "wuji2_joints" in group else 1)
+except Exception:
+    sys.exit(1)
+PY
+then
+  OFFLINE_RETARGET_JOINTS=true
+fi
+
 activate_bundle_runtime
 
 node_arguments=(
@@ -245,13 +263,19 @@ do
 done
 
 if [[ "${WITH_HAND_RETARGET}" == true ]]; then
-  if [[ ! -x "${HAND_BRIDGE}" ]]; then
-    printf '错误：完整回放缺少 wuji_hand2_bridge：%s；请重新 build/deploy。\n'       "${HAND_BRIDGE}" >&2
-    exit 1
+  if [[ "${OFFLINE_RETARGET_JOINTS}" == true ]]; then
+    printf '%s\n' \
+      '检测到 hands/right/wuji2_joints：直通离线 retarget 关节角，' \
+      '跳过 dry 手桥（避免双发布冲突）。'
+  else
+    if [[ ! -x "${HAND_BRIDGE}" ]]; then
+      printf '错误：完整回放缺少 wuji_hand2_bridge：%s；请重新 build/deploy。\n'       "${HAND_BRIDGE}" >&2
+      exit 1
+    fi
+    setsid "${HAND_BRIDGE}" --dry-run --rate 100 --side right &
+    HAND_BRIDGE_PID=$!
+    register_teleop_process_group     "${HAND_BRIDGE_PID}" wuji-hand2-dry-retarget 10
   fi
-  setsid "${HAND_BRIDGE}" --dry-run --rate 100 --side right &
-  HAND_BRIDGE_PID=$!
-  register_teleop_process_group     "${HAND_BRIDGE_PID}" wuji-hand2-dry-retarget 10
 fi
 
 if [[ "${WITH_MUJOCO}" == true ]]; then
@@ -288,6 +312,7 @@ printf '%s\n' \
   "  speed=${SPEED}  yaw_deg=${YAW_DEG}" \
   "  Router=${CONNECT_ENDPOINT:-<scouting>}  MuJoCo=${WITH_MUJOCO}" \
   "  Wuji2=${WITH_WUJI2}  Frame0Skeleton=${SHOW_FRAME_ZERO_SKELETON}  HandRetarget=${WITH_HAND_RETARGET}  HandCommandView=${WITH_HAND_COMMAND_VIEW}" \
+  "  离线 retarget 直通=${OFFLINE_RETARGET_JOINTS}(H5 带 wuji2_joints 时跳过 retarget 桥)" \
   '  s 读取 marker -> Enter 保压接近绝对 frame0 -> r -> Enter 回放。' \
   '  任意活动阶段 s 回 Home；q 回 Home 后退出；左臂保持 Home。' \
   '该任务不会连接 Marvin 控制器。'

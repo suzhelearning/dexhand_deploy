@@ -244,6 +244,28 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         node._yaw_deg = 0.0
         return node
 
+    def test_build_hand_joint_commands_payload(self) -> None:
+        node = object.__new__(MocapH5ReplayNode)
+        # 无离线关节 → None
+        self.assertIsNone(node._build_hand_joint_commands_payload(None))
+        # 正常数据 → float32 LE (N,20)
+        joints = np.linspace(0.0, 1.0, 200).reshape(10, 20)
+        payload = node._build_hand_joint_commands_payload(joints)
+        self.assertEqual(payload.shape, (10, 20))
+        self.assertEqual(payload.dtype, np.dtype("<f4"))
+        np.testing.assert_allclose(payload, joints, atol=1e-6)
+        # 非有限帧用最近有效帧前向填充
+        broken = joints.copy()
+        broken[3] = np.nan
+        payload = node._build_hand_joint_commands_payload(broken)
+        np.testing.assert_allclose(payload[3], payload[2])
+        # 全部无效 → None
+        self.assertIsNone(
+            node._build_hand_joint_commands_payload(
+                np.full((10, 20), np.nan)
+            )
+        )
+
     def test_default_rigid_pose_derives_mount_and_wrist(self) -> None:
         rigid_to_marker = _configured_pose(
             DEFAULT_PARAMETERS, "right_rigid_to_marker_mocap"
