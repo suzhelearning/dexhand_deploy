@@ -58,3 +58,5 @@
 - 保留风险：完整 formal JSON unknown-field parser、HostReadiness 到 Marvin 实际调用、完整 launcher/runtime clean cutover、跨语言 process fixture 与物理 executor 仍需后续闭合。
 
 - round2 follow-up verification repeated the same focused commands after restoring the periodic authority publish path; both remained green (`10 tests OK`, `Built target arm_ik_producer`).
+
+- round2 final source correction: `e2fdc5d` initializes the independent C++ status publisher before first health publication and refreshes `return_complete=true` each tick with the current coordinator sequence/timestamp. Verification repeated: `10 tests ... OK`; `Built target arm_ik_producer`.
