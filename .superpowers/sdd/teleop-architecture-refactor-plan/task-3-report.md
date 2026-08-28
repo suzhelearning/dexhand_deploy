@@ -87,3 +87,29 @@ OK
 ```
 
 未完成/风险：SessionClient 尚未完成三类 query reply 的独立 completion/reconnect 重查；H5/live real preflight 依赖 launcher 注入的 preflight 参数，Task 8/5 需接入真实配置扫描；旧 diagnostics 主体仍在 controller_only 待 Task 8 迁目录；原 1035 行 H5 测试已由 canonical 生命周期测试替代，完整几何/terminal/viewer 回归需从历史提交迁移恢复。
+
+## Fix round 2（重审修复）
+
+- 修复 `SessionClient`/`TargetPublisher` 构造字段回归，确保 `router_zid`、coordinator identity、clock、allocator 均实际保存；intent sequence 与 target/status/raw 共用同一 `SequenceAllocator`。
+- `open_session()` 统一使用 `TIANJI_ROUTER_ENDPOINT`，三 source CLI 强制 `TIANJI_COORDINATOR_INSTANCE_ID`，并在 source 创建前执行 `require_single_router(session, expected_zid)`。
+- live 增加正式 `raw_keyboard` 入口、typed bool real-mode/preflight 参数校验、configured conditioner、frozen reference relative rotation；PICO held-A 不再触发错误 return。
+- H5 增加 typed bool H5/hand preflight 与 real-mode fail-closed 校验、Motive typed parser、solved router/producer identity检查、return completion baseline、完成后自动请求 return；Frame0 viewer 改用 `Frame0HandSkeleton.from_dict()` canonical 字段。
+- diagnostics step node 的 mapper/controller imports 改为 canonical symbols，保留算法主体供后续 diagnostics 目录迁移。
+
+Round 2 实际 focused 输出：
+
+```text
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m py_compile ...  # 退出码 0，无输出
+............................等待 IK Home、有效 tianji_wrist marker 后按 s；节点推导 wuji2 r_mount/r_wrist Home，并把 H5 wrist frame0 转换到 r_wrist。随后 Enter 保压接近，松开保持；按 r 装载后续轨迹；活动阶段按 s 回 Home，按 q 回 Home 后退出。
+键盘 s：已读取 tianji_wrist marker 并推导 r_mount/r_wrist Home；持续按住 Enter，使 r_wrist 接近 H5 wrist frame0，松开保持。
+.
+----------------------------------------------------------------------
+Ran 29 tests in 0.084s
+
+OK
+
+git diff --check
+# 无输出，退出码 0
+```
+
+仍未覆盖：三类 query completion/reconnect 真实 Zenoh 行为、H5/live 完整设备 preflight 扫描、原 1035 行 H5 全部几何/terminal/viewer 回归测试恢复；这些已明确列入 concerns，不能宣称物理/全链路验收完成。

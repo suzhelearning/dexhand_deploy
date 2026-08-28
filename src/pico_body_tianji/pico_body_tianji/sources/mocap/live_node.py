@@ -52,6 +52,8 @@ DEFAULT_PARAMETERS = {
     "maximum_angular_acceleration_rad_s2": 9.0,
     "left_default_elbow_direction": [0.45638698, -0.74604902, -0.48489358],
     "right_default_elbow_direction": [0.45638698, 0.74604902, -0.48489358],
+    "real_preflight_passed": False,
+    "real_mode": False,
 }
 
 _FRAME_STALE_S = 0.5
@@ -151,6 +153,13 @@ class MocapLiveNode:
         clock: Any = time.monotonic,
     ) -> None:
         params = {**DEFAULT_PARAMETERS, **(params or {})}
+        for field in ("real_preflight_passed", "real_mode"):
+            if not isinstance(params[field], bool):
+                raise ValueError(f"{field} must be a YAML boolean")
+        self._real_mode = params["real_mode"]
+        self._real_preflight_ok = params["real_preflight_passed"]
+        if self._real_mode and not self._real_preflight_ok:
+            raise ValueError("real mode requires live preflight")
         if set(active_sides) not in ({"left"}, {"right"}, {"left", "right"}):
             raise ValueError("active_sides must contain left/right")
         self._active_sides = tuple(active_sides)

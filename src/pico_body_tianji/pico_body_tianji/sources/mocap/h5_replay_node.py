@@ -126,6 +126,9 @@ DEFAULT_PARAMETERS = {
     "approach_solved_position_tolerance_m": 0.005,
     "approach_solved_orientation_tolerance_deg": 2.0,
     "approach_stable_seconds": 0.25,
+    "h5_real_preflight_passed": False,
+    "hand_real_preflight_passed": False,
+    "real_mode": False,
     "left_default_zsp_direction": [
         0.45638698,
         -0.74604902,
@@ -219,6 +222,16 @@ class MocapH5ReplayNode:
             raise ValueError("yaw_deg 必须为有限数值")
         if not np.isfinite(rate) or rate <= 0.0:
             raise ValueError("rate 必须为正有限数值")
+        for field in ("h5_real_preflight_passed", "hand_real_preflight_passed", "real_mode"):
+            if not isinstance(params.get(field), bool):
+                raise ValueError(f"{field} must be a YAML boolean")
+        self._real_mode = params["real_mode"]
+        self._real_preflight_ok = (
+            params["h5_real_preflight_passed"]
+            and params["hand_real_preflight_passed"]
+        )
+        if self._real_mode and not self._real_preflight_ok:
+            raise ValueError("real mode requires H5 and hand preflight")
         if isinstance(right_rigid_id, int):
             if right_rigid_id <= 0:
                 raise ValueError("right_rigid_id 必须为正整数或刚体名")
@@ -414,6 +427,7 @@ class MocapH5ReplayNode:
             session, MOCAP_FRAME_KEY, self._on_motive_frame
         )
         self._motive_source = MotiveFrameSource()
+        self._latest_motive_typed = None
         self._rigid_names_sub = ZenohJsonSub(
             session, RIGID_BODY_NAMES_KEY, self._on_rigid_body_names
         )
@@ -438,10 +452,6 @@ class MocapH5ReplayNode:
                 )
         else:
             self._deadman = deadman  # type: ignore[assignment]
-        self._real_preflight_ok = bool(
-            params.get("h5_real_preflight_passed", False)
-            and params.get("hand_real_preflight_passed", False)
-        )
 
         self._at_home = False
         self._return_complete = False
@@ -499,11 +509,12 @@ class MocapH5ReplayNode:
 
     def _on_motive_frame(self, frame: dict[str, Any]) -> None:
         try:
-            self._motive_source.parse(frame)
+            typed = self._motive_source.parse(frame)
         except (TypeError, ValueError) as exc:
             self._last_error = str(exc)
             return
         with self._lock:
+            self._latest_motive_typed = typed
             self._latest_motive_frame = frame
             self._motive_received_at = time.monotonic()
 
@@ -537,6 +548,10 @@ class MocapH5ReplayNode:
     def _right_arm_pose(
         self, frame: dict[str, Any] | None
     ) -> np.ndarray | None:
+        typed = getattr(self, "_latest_motive_typed", None)
+        rigid_id = self._resolved_right_rigid_id()
+        if typed is not None and rigid_id is not None:
+            return typed.rigid_pose(rigid_id)
         if not isinstance(frame, dict):
             return None
         rigid_id = self._resolved_right_rigid_id()
@@ -1310,7 +1325,7 @@ class MocapH5ReplayNode:
                 return True
             if self._phase == "returning":
                 self._publish_state("returning")
-                if not (self._return_complete and self._at_home):
+                if not self._session_client.return_completion_fresh:
                     return True
                 if self._exit_after_return:
                     _LOG.info("已确认 IK 回到安全 Home，退出")

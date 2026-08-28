@@ -64,6 +64,7 @@ class SessionClient:
         self._pending_action: str | None = None
         self._pending_intent_sequence: int | None = None
         self._pending_deadline = 0.0
+        self._intent_baselines: dict[int, tuple[int, int, int]] = {}
         self._invalid_coordinator = False
 
     @property
@@ -80,7 +81,40 @@ class SessionClient:
     def return_complete(self) -> bool | None:
         with self._lock:
             return None if self._return_complete is None else self._return_complete.value
+    @property
+    def return_complete_sequence(self) -> int:
+        with self._lock:
+            return -1 if self._return_complete is None else self._return_complete.sequence
 
+    @property
+    def at_home_sequence(self) -> int:
+        with self._lock:
+            return -1 if self._at_home is None else self._at_home.sequence
+
+    @property
+    def return_authorized(self) -> bool:
+        with self._lock:
+            return (
+                self._pending_action == "return"
+                and self._state is not None
+                and self._state.intent_sequence == self._pending_intent_sequence
+                and self._state.state in {"returning", "idle"}
+            )
+
+    @property
+    def return_completion_fresh(self) -> bool:
+        with self._lock:
+            intent = self._pending_intent_sequence
+            if intent is None:
+                return False
+            baseline = self._intent_baselines.get(intent)
+            if baseline is None:
+                return False
+            return (
+                self.return_authorized
+                and self.return_complete_sequence > baseline[2]
+                and self.at_home_sequence > baseline[1]
+            )
     @property
     def pending_intent_sequence(self) -> int | None:
         with self._lock:
@@ -284,6 +318,11 @@ class SessionClient:
             self._poll_timeout_locked()
             if not self._started:
                 raise RuntimeError("SessionClient must be started before requesting intents")
+            baseline = (
+                -1 if self._state is None else self._state.sequence,
+                -1 if self._at_home is None else self._at_home.sequence,
+                -1 if self._return_complete is None else self._return_complete.sequence,
+            )
             sequence = self._allocator.next()
             timestamp_ns = int(self._clock())
             intent = SessionIntent(
@@ -296,6 +335,7 @@ class SessionClient:
                 publisher_instance_id=self.publisher_instance_id,
                 router_zid=self.router_zid,
             )
+            self._intent_baselines[sequence] = baseline
             self._pending_action = action
             self._pending_intent_sequence = sequence
             self._pending_deadline = time.monotonic() + float(timeout_s)

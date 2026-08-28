@@ -32,10 +32,9 @@ class MotiveFrameSource:
     def parse(self, payload: Mapping[str, Any]) -> MotiveFrame:
         if not isinstance(payload, Mapping):
             raise ValueError("Motive frame must be an object")
-        try:
-            frame_number = int(payload["frame_number"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("Motive frame_number must be an integer") from exc
+        frame_number = payload.get("frame_number")
+        if isinstance(frame_number, bool) or not isinstance(frame_number, int) or frame_number < 0:
+            raise ValueError("Motive frame_number must be a non-negative integer")
         bodies = payload.get("rigid_bodies")
         if not isinstance(bodies, list):
             raise ValueError("Motive rigid_bodies must be a list")
@@ -43,10 +42,9 @@ class MotiveFrameSource:
         for item in bodies:
             if not isinstance(item, Mapping):
                 raise ValueError("Motive rigid body must be an object")
-            try:
-                rigid_id = int(item["id"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError("Motive rigid body id must be an integer") from exc
+            rigid_id = item.get("id")
+            if isinstance(rigid_id, bool) or not isinstance(rigid_id, int) or rigid_id <= 0:
+                raise ValueError("Motive rigid body id must be a positive integer")
             valid = item.get("tracking_valid")
             if not isinstance(valid, bool):
                 raise ValueError("Motive tracking_valid must be boolean")
@@ -54,15 +52,19 @@ class MotiveFrameSource:
             if valid:
                 position = item.get("position")
                 quaternion = item.get("quaternion_xyzw")
-                values = np.asarray(
-                    list(position) + list(quaternion), dtype=np.float64
-                ) if isinstance(position, (list, tuple)) and isinstance(quaternion, (list, tuple)) else np.empty(0)
+                if (
+                    not isinstance(position, (list, tuple))
+                    or not isinstance(quaternion, (list, tuple))
+                    or len(position) != 3
+                    or len(quaternion) != 4
+                ):
+                    raise ValueError("Motive pose must contain 3 position and 4 quaternion values")
+                values = np.asarray(list(position) + list(quaternion), dtype=np.float64)
                 if values.shape != (7,) or not np.isfinite(values).all():
                     raise ValueError("valid Motive rigid body pose must be finite 7-vector")
                 norm = float(np.linalg.norm(values[3:]))
-                if norm < 1.0e-8:
-                    raise ValueError("Motive quaternion must be nonzero")
-                values[3:] /= norm
+                if not 0.999 <= norm <= 1.001:
+                    raise ValueError("Motive quaternion must be normalized")
                 pose = values
             parsed.append(MotiveRigidBody(rigid_id, valid, pose))
         return MotiveFrame(frame_number, tuple(parsed))
