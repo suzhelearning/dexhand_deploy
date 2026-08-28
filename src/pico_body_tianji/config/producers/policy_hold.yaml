@@ -1,0 +1,6 @@
+policy: hold
+rate_hz: 90.0
+stale_timeout_s: 0.2
+maximum_step_rad: 0.0132645022
+capabilities:
+  - simulation

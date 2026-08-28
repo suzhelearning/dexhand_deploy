@@ -235,7 +235,7 @@ install(
     scripts/mujoco_executor
     scripts/wuji_hand2_executor
     scripts/arm_command_coordinator
-  DESTINATION lib/${PROJECT_NAME}
+    scripts/policy_hold_producer
 )
 install(
   DIRECTORY pico_body_tianji
