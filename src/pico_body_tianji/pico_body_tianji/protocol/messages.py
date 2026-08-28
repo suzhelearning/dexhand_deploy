@@ -663,15 +663,14 @@ class SafetyStopRequest:
         env = ProtocolEnvelope.from_dict({key: value[key] for key in ("schema_version", "publisher_instance_id", "router_zid", "sequence", "timestamp_ns")})
         return cls(env, value["run_id"], value["reason"], value["latch"])
 
-    def validate_authority(self, expected_supervisor_instance_id: str, expected_run_id: str | None = None) -> None:
-        """Validate launcher authorization before a consumer acts on the stop."""
+    def validate_authority(self, expected_supervisor_instance_id: str, expected_run_id: str) -> None:
+        """Validate launcher authorization and active-run binding before consuming a stop."""
         _identity(expected_supervisor_instance_id, "expected_supervisor_instance_id")
+        _identity(expected_run_id, "expected_run_id")
         if self.envelope.publisher_instance_id != expected_supervisor_instance_id:
             raise ProtocolError("safety stop publisher is not the authorized supervisor")
-        if expected_run_id is not None:
-            _identity(expected_run_id, "expected_run_id")
-            if self.run_id != expected_run_id:
-                raise ProtocolError("safety stop run_id does not match active run")
+        if self.run_id != expected_run_id:
+            raise ProtocolError("safety stop run_id does not match active run")
 
 
 @dataclass(eq=True)

@@ -108,3 +108,30 @@ PYTHONPATH=src/pico_body_tianji pixi run python -m py_compile src/pico_body_tian
 ```
 
 无输出，返回成功。
+
+## Round 2 审查修复
+
+- `SafetyStopRequest.validate_authority()` 取消 `expected_run_id=None` 默认值，active run 必须显式传入并始终比较，避免陈旧 run 被授权 supervisor 绕过；保留 ack executor/run/latch 绑定。
+- 扩充协议测试：断言 brief 全部 topic key、消息 unknown field、explicit elbow zero、mocap/H5 source discriminator、invalid hand non-null、nested NaN/非 JSON diagnostics、除 proposal 外所有 direct-wire constructor 缺 identity。
+
+Round 2 聚焦测试命令及实际输出：
+
+```bash
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest discover -s tests -p 'test_protocol.py'
+```
+
+```text
+.............
+----------------------------------------------------------------------
+Ran 13 tests in 0.001s
+
+OK
+```
+
+Round 2 语法检查命令及实际输出：
+
+```bash
+PYTHONPATH=src/pico_body_tianji pixi run python -m py_compile src/pico_body_tianji/pico_body_tianji/protocol/topics.py src/pico_body_tianji/pico_body_tianji/protocol/messages.py tests/test_protocol.py
+```
+
+无输出，返回成功。

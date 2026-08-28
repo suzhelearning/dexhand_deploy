@@ -30,12 +30,26 @@ from pico_body_tianji.protocol import topics
 
 class ProtocolTopicsTest(unittest.TestCase):
     def test_topics_are_canonical_and_parameterized(self) -> None:
-        self.assertEqual(topics.SESSION_INTENT, "tianji/session/intent")
-        self.assertEqual(topics.SOURCE_STATUS, "tianji/source/status")
-        self.assertEqual(topics.MOCAP_ALIGNED_HANDS, "mocap/aligned/hands")
-        self.assertEqual(topics.ARM_TARGET.format(side="left"), "tianji/target/arm/left")
-        self.assertEqual(topics.ARM_COMMAND.format(side="right"), "tianji/command/arm/right")
-        self.assertEqual(topics.SAFETY_ACK.format(executor_id="arm-1"), "tianji/safety/ack/arm-1")
+        expected = {
+            "SESSION_INTENT": "tianji/session/intent", "SESSION_STATE": "tianji/session/state",
+            "SOURCE_STATUS": "tianji/source/status", "ARM_TARGET": "tianji/target/arm/{side}",
+            "HAND_TARGET": "tianji/target/hand/{side}", "PRODUCER_STATUS": "tianji/producer/status",
+            "ARM_PROPOSAL": "tianji/proposal/arm/{side}", "ARM_SOLVED_POSE": "tianji/producer/arm/{side}/solved_pose",
+            "COORDINATOR_STATUS": "tianji/coordinator/status", "AT_HOME": "tianji/coordinator/at_home",
+            "RETURN_COMPLETE": "tianji/coordinator/return_complete", "ARM_COMMAND": "tianji/command/arm/{side}",
+            "HAND_COMMAND": "tianji/command/hand/{side}", "ARM_STATE": "tianji/state/arm",
+            "HAND_STATE": "tianji/state/hand/{side}", "EXECUTOR_STATUS": "tianji/executor/status",
+            "HAND_EXECUTOR_STATUS": "tianji/executor/hand/{side}/status", "SAFETY_STOP": "tianji/safety/stop",
+            "SAFETY_ACK": "tianji/safety/ack/{executor_id}", "RAW_PICO_CONTROLLER": "tianji/raw/pico_controller",
+            "RAW_MOCAP_LIVE": "tianji/raw/mocap_live", "RAW_H5_REPLAY": "tianji/raw/h5_replay",
+            "FRAME0_HAND_SKELETON": "tianji/diagnostics/h5/frame0_hand_skeleton",
+            "MOCAP_ALIGNED_HANDS": "mocap/aligned/hands", "MOCAP_HANDS_FRAME": "mocap/hands/frame",
+            "MOCAP_RIGID_BODY_NAMES": "mocap/rigid_body_names",
+        }
+        for name, value in expected.items():
+            self.assertEqual(getattr(topics, name), value)
+        self.assertEqual(topics.hand_target("right"), "tianji/target/hand/right")
+        self.assertEqual(topics.arm_proposal("left"), "tianji/proposal/arm/left")
 
 
 class ProtocolMessagesTest(unittest.TestCase):
@@ -192,6 +206,14 @@ class ProtocolMessagesTest(unittest.TestCase):
         unknown["unexpected"] = 1
         with self.assertRaises(ValueError):
             ProtocolEnvelope.from_dict(unknown)
+        target_unknown = ArmTargetCommand(
+            envelope=self.envelope, source_timestamp_ns=None, source="x", side="left",
+            frame_id="Base_L", position_m=[0.1, 0.2, 0.3], orientation_xyzw=[0, 0, 0, 1],
+            elbow_reference_direction=[1, 0, 0],
+        ).to_dict()
+        target_unknown["unexpected"] = True
+        with self.assertRaises(ValueError):
+            ArmTargetCommand.from_dict(target_unknown)
         with self.assertRaises(ValueError):
             ArmTargetCommand(
                 envelope=self.envelope, source_timestamp_ns=None, source="x", side="left",
@@ -210,6 +232,12 @@ class ProtocolMessagesTest(unittest.TestCase):
                 source="x", side="left", frame_id="wrist_relative_mediapipe",
                 keypoints_m=[[1.0, 0.0, 0.0]] + self.keypoints[1:],
                 publisher_instance_id="source-1", router_zid="router-1",
+            )
+        with self.assertRaises(ValueError):
+            ArmTargetCommand(
+                envelope=self.envelope, source_timestamp_ns=None, source="x", side="left",
+                frame_id="Base_L", position_m=[0.1, 0.2, 0.3], orientation_xyzw=[0, 0, 0, 1],
+                elbow_reference_direction=[0, 0, 0],
             )
 
     def test_rejects_nonfinite_envelope_geometry_and_wrong_orders(self) -> None:
@@ -252,9 +280,8 @@ class ProtocolMessagesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             SafetyStopAck(self.envelope, "arm-1", "run-1", False, "operator").validate_for("arm-1", "run-1")
 
-    def test_rejects_nested_non_json_diagnostics_and_topic_side(self) -> None:
         with self.assertRaises(ValueError):
-            ComponentStatus(1, 1, 2, "producer_arm", "ik", "ready", True, True, ["simulation"], None, {"nested": {"bad": math.inf}}, "ik-1", "router-1")
+            ComponentStatus(1, 1, 2, "producer_arm", "ik", "ready", True, True, ["simulation"], None, {"nested": {"bad": object()}}, "ik-1", "router-1")
         with self.assertRaises(ValueError):
             topics.arm_target("bad")
         with self.assertRaises(ValueError):
@@ -277,6 +304,51 @@ class ProtocolMessagesTest(unittest.TestCase):
             ArmJointProposal(1, 1, 1, "ik", "left", None, self.arm_names, [0.0] * 7, {})
 
 
+
+    def test_raw_discriminators_and_invalid_hand_fields(self) -> None:
+        live = RawMocapLiveSample(
+            envelope=self.envelope, source_timestamp_ns=None, stream_instance_id="stream-1",
+            stream_sequence=1, frame_index=1, hands={
+                "left": {"valid": False, "wrist_pose": None, "keypoints_world_m": None},
+                "right": {"valid": False, "wrist_pose": None, "keypoints_world_m": None},
+            },
+        ).to_dict()
+        live["source_type"] = "h5_replay"
+        with self.assertRaises(ValueError):
+            RawMocapLiveSample.from_dict(live)
+        h5 = RawH5ReplaySample(
+            envelope=self.envelope, source_timestamp_ns=None, hands={
+                "left": {"valid": False, "wrist_pose": None, "keypoints_world_m": None, "wuji2_joints_rad": None},
+                "right": {"valid": False, "wrist_pose": None, "keypoints_world_m": None, "wuji2_joints_rad": None},
+            },
+        ).to_dict()
+        h5["source_type"] = "mocap_live"
+        with self.assertRaises(ValueError):
+            RawH5ReplaySample.from_dict(h5)
+        bad_hand = dict(live)
+        bad_hand["source_type"] = "mocap_live"
+        bad_hand["hands"] = dict(bad_hand["hands"])
+        bad_hand["hands"]["left"] = {"valid": False, "wrist_pose": self.pose, "keypoints_world_m": None}
+        with self.assertRaises(ValueError):
+            RawMocapLiveSample.from_dict(bad_hand)
+
+    def test_all_direct_wire_constructors_require_identity(self) -> None:
+        missing = [
+            lambda: ArmJointCommand(1, 1, 1, "coordinator", "left", "idle", None, None, self.arm_names, [0.0] * 7),
+            lambda: ArmJointState(1, 1, 1, "mujoco", self.arm_names + [f"Joint{i}_R" for i in range(1, 8)], [0.0] * 14, None),
+            lambda: HandTargetCommand(1, 1, 1, None, "source", "left", "wrist_relative_mediapipe", self.keypoints),
+            lambda: HandJointCommand(1, 1, 1, "retarget", "left", self.hand_names, [0.0] * 20),
+            lambda: HandJointState(1, 1, 1, "wuji", "left", self.hand_names, [0.0] * 20, None),
+            lambda: SessionIntent(1, 1, 1, "source", "start", "reason"),
+            lambda: SessionState(1, 1, 1, "idle", "reason", "coordinator", None),
+            lambda: LatchedBool(1, 1, 1, True),
+            lambda: ComponentStatus(1, 1, 2, "source", "id", "ready", True, True, ["simulation"], None, {}),
+            lambda: HandExecutorStatus(1, 1, 1, "left", True, True, True, False, None),
+            lambda: Frame0HandSkeleton(1, 1, "left", "motive_world", self.keypoints, [[0, 1]] * 20, self.pose, self.pose, self.pose, self.pose, 1),
+        ]
+        for constructor in missing:
+            with self.assertRaises(TypeError):
+                constructor()
     def test_wire_boundaries_and_discriminators(self) -> None:
         target = ArmTargetCommand(
             envelope=self.envelope, source_timestamp_ns=None, source="x", side="left",
