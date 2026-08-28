@@ -117,10 +117,14 @@ class _ReplayLifecycle:
         self._pending_action = action; self._pending_intent_sequence = sequence
         if action == "start":
             self._at_home = False; self._return_complete = False; self._phase = "start_pending"
+        elif self._phase == "fault":
+            # A fault is a terminal local lock.  The coordinator may still
+            # need a shutdown/return intent, but that intent must never turn
+            # this instance into a returning phase or complete/unlock it.
+            self._at_home = False; self._return_complete = False; self._return_requested = True
         else:
             self._at_home = False; self._return_complete = False; self._phase = "returning"; self._return_requested = True
         return sequence
-
     def request_start(self, reason: str = "replay_start") -> int:
         if self._phase == "fault": raise RuntimeError("replay is fault-locked")
         if self._session_client is not None and not self._session_client.startup_ready:
@@ -136,7 +140,7 @@ class _ReplayLifecycle:
         if state.router_zid != self.router_zid: return
         if self._session_client is not None and state.publisher_instance_id != self._session_client.expected_coordinator_instance_id: return
         self._state = state
-        if state.state == "fault" and self._phase in {"armed", "start_pending", "replaying", "returning"}:
+        if state.state == "fault":
             self._phase = "fault"; self._paused = False; self._pending_action = None; return
         if state.state == "returning" and self._phase == "replaying":
             self._phase = "returning"; self._paused = False; return
@@ -179,6 +183,7 @@ class _ReplayLifecycle:
         self._maybe_finish_return()
 
     def _maybe_finish_return(self) -> None:
+        if self._phase == "fault": return
         if self._pending_action in {"return", "shutdown"} and self._session_client is not None and not self._session_client.return_completion_fresh: return
         if self._pending_action in {"return", "shutdown"} and self._state is not None and self._state.state == "idle" and self._at_home and self._return_complete:
             self._phase = "armed"; self._pending_action = None; self._pending_intent_sequence = None; self._paused = False; self._return_requested = False; self.on_return_complete()
@@ -341,6 +346,8 @@ class JointReplayNode(_ReplayLifecycle):
         self._arms = {side: self.reader.read_arm_command(side) for side in self.active_sides}; self._hands = {side: self.reader.read_hand_command(side) for side in self.active_hand_sides}
         for side in self.active_sides:
             if not self._arms[side]: raise ValueError(f"recording has no active arm command stream: {side}")
+        for side in self.active_hand_sides:
+            if not self._hands[side]: raise ValueError(f"recording has no active hand command stream: {side}")
         if self.reader.attrs.get("router_zid") != router_zid:
             raise ValueError("recording router_zid does not match replay router")
         super().__init__(session=session, source="joint_replay", source_publisher_instance_id=source_publisher_instance_id, router_zid=router_zid, expected_coordinator_instance_id=expected_coordinator_instance_id, rate_hz=rate_hz, clock=clock, session_client=session_client)

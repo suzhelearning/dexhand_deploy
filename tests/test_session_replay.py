@@ -80,6 +80,102 @@ class ReplayLifecycleTest(unittest.TestCase):
             self.assertGreaterEqual(len(session.publishers[topics.SOURCE_STATUS].payloads), 2)
             self.assertIn(topics.arm_target("right"), session.publishers)
             node.close()
+    def test_joint_replay_rejects_missing_active_hand_command_stream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.h5"
+            self._record(path)
+            session = _Session()
+            with self.assertRaisesRegex(ValueError, "active hand command stream: left"):
+                JointReplayNode(
+                    path,
+                    session=session,
+                    source_publisher_instance_id="source",
+                    producer_publisher_instance_id="producer",
+                    router_zid="router",
+                    active_sides=("right",),
+                    inactive_sides=("left",),
+                    active_hand_sides=("left",),
+                    inactive_hand_sides=("right",),
+                )
+            self.assertEqual(session.tokens, [])
+
+    def test_fault_stays_locked_after_return_and_shutdown_intents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.h5"
+            self._record(path)
+            session = _Session()
+            node = JointReplayNode(
+                path,
+                session=session,
+                source_publisher_instance_id="source",
+                producer_publisher_instance_id="producer",
+                router_zid="router",
+                active_sides=("right",),
+                inactive_sides=("left",),
+                active_hand_sides=("right",),
+                inactive_hand_sides=("left",),
+            )
+            node.on_session_state(
+                SessionState(1, 1, 1, "fault", "unsafe", "coordinator", None, "coordinator", "router")
+            )
+            self.assertEqual(node.phase, "fault")
+
+            return_sequence = node.request_return()
+            self.assertEqual(node.phase, "fault")
+            return_intent = json.loads(
+                session.publishers[topics.SESSION_INTENT].payloads[-1]
+            )
+            self.assertEqual(return_intent["action"], "return")
+            self.assertEqual(return_intent["sequence"], return_sequence)
+            node.on_session_state(
+                SessionState(
+                    1,
+                    2,
+                    2,
+                    "idle",
+                    "returned",
+                    "coordinator",
+                    return_sequence,
+                    "coordinator",
+                    "router",
+                )
+            )
+            node.on_latched(
+                {
+                    "schema_version": 1,
+                    "sequence": 3,
+                    "timestamp_ns": 3,
+                    "value": True,
+                    "publisher_instance_id": "coordinator",
+                    "router_zid": "router",
+                },
+                kind="return_complete",
+            )
+            self.assertEqual(node.phase, "fault")
+
+            shutdown_sequence = node.request_shutdown()
+            self.assertEqual(node.phase, "fault")
+            shutdown_intent = json.loads(
+                session.publishers[topics.SESSION_INTENT].payloads[-1]
+            )
+            self.assertEqual(shutdown_intent["action"], "shutdown")
+            self.assertEqual(shutdown_intent["sequence"], shutdown_sequence)
+            node.on_session_state(
+                SessionState(
+                    1,
+                    4,
+                    4,
+                    "idle",
+                    "shutdown",
+                    "coordinator",
+                    shutdown_sequence,
+                    "coordinator",
+                    "router",
+                )
+            )
+            self.assertEqual(node.phase, "fault")
+            node.close()
+
 
 
 if __name__ == "__main__": unittest.main()

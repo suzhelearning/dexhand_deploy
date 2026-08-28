@@ -104,3 +104,27 @@ git diff --check
 ```
 
 仍未完成 Task 8 launcher/CLI `--record` exit 2、managed-router 多进程 wiring，以及 Task 9/10 实体设备和物理安全验收。
+
+## Round 4 修复与验证
+
+- 恢复 `JointReplayNode` 对每个 `active_hand_sides` 的构造期 command stream 非空检查；缺失 active stream 在注册任何 source/producer liveliness token 或发布 status 前直接 `ValueError` fail closed，active/inactive side union 仍要求完整覆盖 left/right。
+- 修复 replay fault lock：收到权威 `SessionState(state="fault")` 后，无论当前 phase 均锁存本地 `fault`；后续 `return`/`shutdown` intent 仍可按需发送，但不会把 phase 改为 `returning`，也不会因 idle、at_home、return_complete 解除锁存或调用完成回调。只有新实例/进程才能恢复。
+- 新增真实行为测试：active hand command stream 缺失拒绝且不声明 token；fault 后 return/shutdown intent 仍保持 fault；保留并验证 pause 时 wire sequence/timestamp heartbeat 持续刷新且 recorded frame/target sequence 不变。
+
+验证：
+
+```text
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_session_replay.ReplayLifecycleTest.test_joint_replay_rejects_missing_active_hand_command_stream tests.test_session_replay.ReplayLifecycleTest.test_fault_stays_locked_after_return_and_shutdown_intents
+→ Ran 2 tests ... OK
+
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_session_h5 tests.test_session_recorder tests.test_session_replay
+→ Ran 12 tests in 0.176s，OK。
+
+PYTHONPATH=src/pico_body_tianji pixi run python -m py_compile src/pico_body_tianji/pico_body_tianji/recording/replay.py tests/test_session_replay.py
+→ 输出为空。
+
+git diff --check
+→ 输出为空。
+```
+
+仍未完成 Task 8 `run_session.sh`/CLI `--record` exit 2、managed-router 多进程接线，以及 Task 9/10 实体设备、急停、servo/feedback/hand-zero 物理验收；本轮未运行 formatter、lint、full suite 或派生子代理。
