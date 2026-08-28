@@ -256,13 +256,15 @@ private:
   void publish_state(const std::array<float, kJointCount> &values, std::uint64_t sequence);
   void publish_status(const std::string &error = {});
 
-  zenoh::Session &session_;
+  zenoh::Session & session_;
   Params params_;
   std::unique_ptr<zenoh::Publisher> command_pub_;
   std::unique_ptr<zenoh::Publisher> state_pub_;
   std::unique_ptr<zenoh::Publisher> status_pub_;
+  std::unique_ptr<zenoh::Publisher> component_status_pub_;
   std::unique_ptr<zenoh::Publisher> safety_ack_pub_;
-  std::unique_ptr<zenoh::LivelinessToken> live_token_;
+  std::unique_ptr<zenoh::LivelinessToken> producer_live_token_;
+  std::unique_ptr<zenoh::LivelinessToken> executor_live_token_;
   std::unique_ptr<zenoh::Subscriber<void>> input_sub_;
   std::unique_ptr<zenoh::Subscriber<void>> state_sub_;
   std::unique_ptr<zenoh::Subscriber<void>> safety_sub_;
@@ -275,6 +277,7 @@ private:
   std::uint64_t input_sequence_{0};
   std::uint64_t last_input_sequence_{0};
   std::string session_state_{"idle"};
+  std::int64_t session_state_received_ns_{0};
   bool safety_locked_{false};
   std::uint64_t last_safety_sequence_{0};
   std::uint64_t wire_sequence_{0};
@@ -284,17 +287,24 @@ private:
   WujiHand2Device * active_device_{nullptr};
   std::array<float, kJointCount> measured_{};
   bool measured_valid_{false};
+  std::int64_t measured_received_ns_{0};
+  std::uint64_t measured_serial_{0};
+  std::array<double, kJointCount> zero_position_{};
+  std::array<double, kJointCount> zero_tolerance_{};
   bool tracking_allowed_{false};
 };
-
 void WujiHand2Bridge::on_target(const zenoh::Sample &sample) {
   try {
     const auto parsed = parse_target(sample.get_payload().as_string(), params_.side, params_.router, params_.authorized_instance);
     std::lock_guard<std::mutex> guard(mutex_);
-    if (session_state_ == "returning" || session_state_ == "fault") throw std::invalid_argument("hand target rejected outside teleop");
+    const auto received = now_ns();
+    if (session_state_ != "teleop" || session_state_received_ns_ == 0 ||
+        received - session_state_received_ns_ > kFreshnessNs) {
+      throw std::invalid_argument("hand target requires fresh teleop state");
+    }
     if (parsed.sequence <= last_input_sequence_) throw std::invalid_argument("hand target sequence rollback");
     keypoints_ = parsed.keypoints;
-    input_received_ns_ = now_ns();
+    input_received_ns_ = received;
     input_sequence_ = parsed.sequence;
     last_input_sequence_ = parsed.sequence;
     have_target_ = true;
@@ -302,6 +312,7 @@ void WujiHand2Bridge::on_target(const zenoh::Sample &sample) {
     std::lock_guard<std::mutex> guard(mutex_);
     last_error_ = std::string("target rejected: ") + error.what();
     have_target_ = false;
+    tracking_allowed_ = false;
   }
 }
 
@@ -311,10 +322,14 @@ void WujiHand2Bridge::on_command(const zenoh::Sample &sample) {
     std::uint64_t sequence = 0;
     const auto command = parse_joint_array(root, params_.side, params_.authorized_producer, params_.authorized_instance, params_.router, params_.config_path, &sequence);
     std::lock_guard<std::mutex> guard(mutex_);
-    if (session_state_ == "returning" || session_state_ == "fault") throw std::invalid_argument("hand command rejected outside teleop");
+    const auto received = now_ns();
+    if (session_state_ != "teleop" || session_state_received_ns_ == 0 ||
+        received - session_state_received_ns_ > kFreshnessNs) {
+      throw std::invalid_argument("hand command requires fresh teleop state");
+    }
     if (sequence <= last_input_sequence_) throw std::invalid_argument("hand command sequence rollback");
     direct_command_ = command;
-    input_received_ns_ = now_ns();
+    input_received_ns_ = received;
     input_sequence_ = sequence;
     last_input_sequence_ = sequence;
     have_direct_ = true;
@@ -322,6 +337,7 @@ void WujiHand2Bridge::on_command(const zenoh::Sample &sample) {
     std::lock_guard<std::mutex> guard(mutex_);
     last_error_ = std::string("command rejected: ") + error.what();
     have_direct_ = false;
+    tracking_allowed_ = false;
   }
 }
 
@@ -331,26 +347,32 @@ void WujiHand2Bridge::on_session_state(const zenoh::Sample &sample) {
     const auto publisher = protocol::field(root, "publisher_instance_id").as_string("publisher_instance_id");
     const auto timestamp = protocol::field(root, "timestamp_ns").as_uint("timestamp_ns");
     const auto sequence = protocol::field(root, "sequence").as_uint("sequence");
+    const auto received = now_ns();
     if (protocol::field(root, "schema_version").as_uint("schema_version") != 1 ||
         protocol::field(root, "router_zid").as_string("router_zid") != params_.router ||
         publisher != params_.coordinator_instance ||
-        timestamp > static_cast<std::uint64_t>(now_ns()) ||
-        now_ns() - static_cast<std::int64_t>(timestamp) > kFreshnessNs ||
-        sequence <= last_session_sequence_) {
+        timestamp > static_cast<std::uint64_t>(received) ||
+        received - static_cast<std::int64_t>(timestamp) > kFreshnessNs) {
       throw std::invalid_argument("session state identity/sequence/freshness mismatch");
     }
-    last_session_sequence_ = sequence;
     const auto state = protocol::field(root, "state").as_string("state");
     if (state != "idle" && state != "teleop" && state != "returning" && state != "fault") throw std::invalid_argument("invalid session state");
     std::lock_guard<std::mutex> guard(mutex_);
+    if (sequence <= last_session_sequence_) {
+      throw std::invalid_argument("session state sequence rollback");
+    }
+    last_session_sequence_ = sequence;
     session_state_ = state;
+    session_state_received_ns_ = received;
     if (state == "returning" || state == "fault") {
       have_target_ = false;
       have_direct_ = false;
+      tracking_allowed_ = false;
     }
   } catch (const std::exception &error) {
     std::lock_guard<std::mutex> guard(mutex_);
     last_error_ = std::string("session state rejected: ") + error.what();
+    tracking_allowed_ = false;
   }
 }
 
@@ -381,6 +403,7 @@ void WujiHand2Bridge::on_safety_stop(const zenoh::Sample &sample) {
         ",\"executor_id\":" + quote(params_.instance) + ",\"run_id\":" +
         quote(params_.run_id) + ",\"latched\":true,\"reason\":" + quote(reason) + "}"));
     }
+    publish_status();
   } catch (const std::exception &error) {
     std::lock_guard<std::mutex> guard(mutex_);
     last_error_ = std::string("safety stop rejected: ") + error.what();
@@ -412,17 +435,61 @@ void WujiHand2Bridge::publish_state(const std::array<float, kJointCount> &values
 }
 
 void WujiHand2Bridge::publish_status(const std::string &error) {
-  if (!status_pub_) return;
   std::lock_guard<std::mutex> guard(mutex_);
   const auto status_error = error.empty() ? last_error_ : error;
-  const bool healthy = !safety_locked_ && status_error.empty();
-  bool at_zero = measured_valid_;
-  for (const auto value : measured_) at_zero = at_zero && std::isfinite(value) && std::abs(value) <= 0.05F;
-  std::ostringstream out;
-  out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(params_.instance) << ",\"router_zid\":" << quote(params_.router) << ",\"sequence\":" << ++status_sequence_ << ",\"timestamp_ns\":" << now_ns() << ",\"side\":" << quote(params_.side) << ",\"ready\":" << (safety_locked_ ? "false" : "true") << ",\"healthy\":" << (healthy ? "true" : "false") << ",\"at_zero\":" << (at_zero ? "true" : "false") << ",\"tracking_allowed\":" << (tracking_allowed_ && healthy ? "true" : "false") << ",\"error\":" << (status_error.empty() ? "null" : quote(status_error)) << '}';
-  status_pub_->put(zenoh::Bytes(out.str()));
+  const auto current = now_ns();
+  const bool measured_fresh = measured_valid_ && measured_received_ns_ > 0 &&
+    current >= measured_received_ns_ && current - measured_received_ns_ <= kFreshnessNs;
+  bool at_zero = measured_fresh;
+  for (std::size_t index = 0; index < kJointCount; ++index) {
+    at_zero = at_zero && std::isfinite(measured_[index]) &&
+      std::abs(static_cast<double>(measured_[index]) - zero_position_[index]) <= zero_tolerance_[index];
+  }
+  const bool healthy = !safety_locked_ && status_error.empty() && measured_fresh;
+  const bool input_fresh = input_received_ns_ > 0 && current >= input_received_ns_ &&
+    current - input_received_ns_ <= static_cast<std::int64_t>(params_.keypoint_timeout_s * 1.0e9);
+  const bool state_fresh = session_state_received_ns_ > 0 && current >= session_state_received_ns_ &&
+    current - session_state_received_ns_ <= kFreshnessNs;
+  const bool tracking = !safety_locked_ && healthy && tracking_allowed_ &&
+    session_state_ == "teleop" && state_fresh && input_fresh;
+  const auto sequence = ++status_sequence_;
+  if (status_pub_) {
+    std::ostringstream out;
+    out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(params_.instance)
+        << ",\"router_zid\":" << quote(params_.router) << ",\"sequence\":"
+        << sequence << ",\"timestamp_ns\":" << current << ",\"side\":"
+        << quote(params_.side) << ",\"ready\":" << (healthy ? "true" : "false")
+        << ",\"healthy\":" << (healthy ? "true" : "false")
+        << ",\"at_zero\":" << (at_zero ? "true" : "false")
+        << ",\"tracking_allowed\":" << (tracking ? "true" : "false")
+        << ",\"error\":" << (status_error.empty() ? "null" : quote(status_error)) << '}';
+    status_pub_->put(zenoh::Bytes(out.str()));
+  }
+  if (component_status_pub_) {
+    const auto capability = params_.dry_run ? "simulation" : "real";
+    const auto component = [&](const std::string &role, const std::string &id) {
+      std::ostringstream out;
+      out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(params_.instance)
+          << ",\"router_zid\":" << quote(params_.router) << ",\"sequence\":"
+          << sequence << ",\"timestamp_ns\":" << current << ",\"component_role\":"
+          << quote(role) << ",\"component_id\":" << quote(id)
+          << ",\"phase\":" << quote(params_.mode) << ",\"ready\":"
+          << (healthy ? "true" : "false") << ",\"healthy\":"
+          << (healthy ? "true" : "false") << ",\"capabilities\":["
+          << quote(capability) << "],\"error\":"
+          << (status_error.empty() ? "null" : quote(status_error))
+          << ",\"diagnostics\":{\"side\":" << quote(params_.side)
+          << ",\"mode\":" << quote(params_.mode) << ",\"at_zero\":"
+          << (at_zero ? "true" : "false") << ",\"tracking_allowed\":"
+          << (tracking ? "true" : "false") << "}}";
+      component_status_pub_->put(zenoh::Bytes(out.str()));
+    };
+    if (params_.mode == "retarget") {
+      component("producer_hand", "wuji_hand2_" + params_.side + "_producer");
+    }
+    component("executor_hand", "wuji_hand2_" + params_.side + "_executor");
+  }
 }
-
 int WujiHand2Bridge::run() {
   if (params_.instance.empty() || params_.router.empty() || params_.authorized_producer.empty() || params_.authorized_instance.empty()) throw std::invalid_argument("Wuji executor identities are required");
   if (params_.mode != "direct" && params_.mode != "retarget") throw std::invalid_argument("mode must be direct or retarget");
@@ -436,15 +503,20 @@ int WujiHand2Bridge::run() {
   if (params_.mode == "retarget") command_pub_ = std::make_unique<zenoh::Publisher>(session_.declare_publisher(zenoh::KeyExpr(command_key)));
   state_pub_ = std::make_unique<zenoh::Publisher>(session_.declare_publisher(zenoh::KeyExpr(state_key)));
   status_pub_ = std::make_unique<zenoh::Publisher>(session_.declare_publisher(zenoh::KeyExpr(status_key)));
+  component_status_pub_ = std::make_unique<zenoh::Publisher>(session_.declare_publisher(zenoh::KeyExpr("tianji/executor/status")));
   safety_ack_pub_ = std::make_unique<zenoh::Publisher>(session_.declare_publisher(zenoh::KeyExpr("tianji/safety/ack/" + params_.instance)));
   state_sub_ = std::make_unique<zenoh::Subscriber<void>>(session_.declare_subscriber(zenoh::KeyExpr(state_topic), [this](const zenoh::Sample &sample) { on_session_state(sample); }, []() {}));
   safety_sub_ = std::make_unique<zenoh::Subscriber<void>>(session_.declare_subscriber(zenoh::KeyExpr(safety_topic), [this](const zenoh::Sample &sample) { on_safety_stop(sample); }, []() {}));
   if (params_.mode == "retarget") input_sub_ = std::make_unique<zenoh::Subscriber<void>>(session_.declare_subscriber(zenoh::KeyExpr(hand_key), [this](const zenoh::Sample &sample) { on_target(sample); }, []() {}));
   else input_sub_ = std::make_unique<zenoh::Subscriber<void>>(session_.declare_subscriber(zenoh::KeyExpr(command_key), [this](const zenoh::Sample &sample) { on_command(sample); }, []() {}));
-  const auto live_key = params_.mode == "retarget"
-    ? "tj/live/producer/hand/" + params_.logical_producer + "/" + params_.instance
-    : "tj/live/executor/hand/" + params_.side + "/" + params_.instance;
-  live_token_ = std::make_unique<zenoh::LivelinessToken>(session_.liveliness_declare_token(zenoh::KeyExpr(live_key)));
+  if (params_.mode == "retarget") {
+    producer_live_token_ = std::make_unique<zenoh::LivelinessToken>(
+      session_.liveliness_declare_token(zenoh::KeyExpr(
+        "tj/live/producer/hand/" + params_.logical_producer + "/" + params_.instance)));
+  }
+  executor_live_token_ = std::make_unique<zenoh::LivelinessToken>(
+    session_.liveliness_declare_token(zenoh::KeyExpr(
+      "tj/live/executor/hand/" + params_.side + "/" + params_.instance)));
 
   std::unique_ptr<WujiRetargeter> retargeter;
   if (params_.mode == "retarget") {
@@ -463,31 +535,64 @@ int WujiHand2Bridge::run() {
     std::string error;
     if (!device->connect_device(options, &error) || !device->enable_and_wait(&error) || !device->open_publisher(&error)) throw std::runtime_error("Wuji device setup failed: " + error);
   }
-  publish_status();
   std::array<float, kJointCount> output{};
   std::array<float, kJointCount> desired{};
   const auto lower_limits = load_yaml_vector(params_.config_path, "lower_limits_rad");
   const auto upper_limits = load_yaml_vector(params_.config_path, "upper_limits_rad");
+  zero_position_ = load_yaml_vector(params_.config_path, "zero_position_rad");
+  zero_tolerance_ = load_yaml_vector(params_.config_path, "zero_tolerance_rad");
+  publish_status();
   auto next_tick = std::chrono::steady_clock::now();
   while (!g_stop) {
     next_tick += std::chrono::nanoseconds(static_cast<std::int64_t>(1.0e9 / params_.rate_hz));
-    bool locked = false, tracking = false;
+    const auto current = now_ns();
+    bool locked = false;
+    bool tracking = false;
     std::string state;
     std::array<float, kKeypointCount * 3> keypoints{};
     {
       std::lock_guard<std::mutex> guard(mutex_);
-      locked = safety_locked_; state = session_state_; keypoints = keypoints_;
-      tracking = !locked && state == "teleop" && now_ns() - input_received_ns_ <= static_cast<std::int64_t>(params_.keypoint_timeout_s * 1.0e9);
+      locked = safety_locked_;
+      state = session_state_;
+      keypoints = keypoints_;
+      const bool state_fresh = session_state_received_ns_ > 0 &&
+        current >= session_state_received_ns_ &&
+        current - session_state_received_ns_ <= kFreshnessNs;
+      const bool input_fresh = input_received_ns_ > 0 &&
+        current >= input_received_ns_ &&
+        current - input_received_ns_ <=
+          static_cast<std::int64_t>(params_.keypoint_timeout_s * 1.0e9);
+      tracking = !locked && state == "teleop" && state_fresh && input_fresh &&
+        (params_.mode == "retarget" ? have_target_ : have_direct_);
+      if (state == "teleop" && !state_fresh) {
+        have_target_ = false;
+        have_direct_ = false;
+        tracking = false;
+        last_error_ = "coordinator teleop state expired";
+      } else if (state == "teleop" && !input_fresh) {
+        have_target_ = false;
+        have_direct_ = false;
+        tracking = false;
+        last_error_ = "hand input expired";
+      }
       tracking_allowed_ = tracking;
-      if (params_.mode == "direct" && have_direct_) desired = direct_command_;
+      desired.fill(0.0F);
+      if (params_.mode == "direct" && tracking && have_direct_) desired = direct_command_;
     }
-    if (locked || state == "returning" || state == "fault" || !tracking) desired.fill(0.0F);
-    else if (params_.mode == "retarget") {
+    if (tracking && params_.mode == "retarget") {
       std::string error;
-      if (!retargeter->step(keypoints.data(), desired.data(), &error)) { desired.fill(0.0F); publish_status(std::string("retarget rejected: ") + error); }
+      if (!retargeter->step(keypoints.data(), desired.data(), &error)) {
+        desired.fill(0.0F);
+        std::lock_guard<std::mutex> guard(mutex_);
+        tracking_allowed_ = false;
+        last_error_ = "retarget rejected: " + error;
+        tracking = false;
+      }
     }
     for (std::size_t index = 0; index < kJointCount; ++index) {
-      if (!std::isfinite(desired[index]) || desired[index] < lower_limits[index] || desired[index] > upper_limits[index]) {
+      if (!std::isfinite(desired[index]) ||
+          desired[index] < lower_limits[index] ||
+          desired[index] > upper_limits[index]) {
         std::lock_guard<std::mutex> guard(mutex_);
         desired.fill(0.0F);
         safety_locked_ = true;
@@ -498,39 +603,71 @@ int WujiHand2Bridge::run() {
       }
     }
     const float step = (tracking ? params_.tracking_slew_rate_rad_s : params_.command_slew_rate_rad_s) / params_.rate_hz;
-    for (std::size_t index = 0; index < kJointCount; ++index) output[index] += std::clamp(desired[index] - output[index], -step, step);
+    for (std::size_t index = 0; index < kJointCount; ++index) {
+      output[index] += std::clamp(desired[index] - output[index], -step, step);
+    }
     if (!locked) {
       if (device) {
         std::string error;
         if (!device->send(output.data(), &error)) {
-          publish_status("device send failed: " + error);
+          std::lock_guard<std::mutex> guard(mutex_);
+          tracking_allowed_ = false;
+          last_error_ = "device send failed: " + error;
         }
         float measured[kJointCount]{};
         float velocity[kJointCount]{};
         float effort[kJointCount]{};
-        if (device->latest_states(measured, velocity, effort)) {
-          std::array<float, kJointCount> measured_array{};
-          std::copy(std::begin(measured), std::end(measured), measured_array.begin());
-          publish_state(measured_array, ++wire_sequence_);
-          {
-            std::lock_guard<std::mutex> guard(mutex_);
-            measured_ = measured_array;
-            measured_valid_ = true;
-          }
-        } else {
-          publish_status("measured hand state unavailable");
+        std::int64_t received_ns = 0;
+        std::uint64_t serial = 0;
+        if (!device->latest_states(measured, velocity, effort, &received_ns, &serial)) {
           std::lock_guard<std::mutex> guard(mutex_);
           measured_valid_ = false;
           tracking_allowed_ = false;
           safety_locked_ = true;
           last_error_ = "measured hand state unavailable";
+          locked = true;
           device->close();
+        } else {
+          bool new_measurement = false;
+          {
+            std::lock_guard<std::mutex> guard(mutex_);
+            if (serial != measured_serial_) {
+              std::copy(std::begin(measured), std::end(measured), measured_.begin());
+              measured_received_ns_ = received_ns;
+              measured_serial_ = serial;
+              measured_valid_ = true;
+              new_measurement = true;
+            }
+            if (!measured_valid_ || current < measured_received_ns_ ||
+                current - measured_received_ns_ > kFreshnessNs) {
+              measured_valid_ = false;
+              tracking_allowed_ = false;
+              safety_locked_ = true;
+              last_error_ = "measured hand feedback stale";
+              locked = true;
+            }
+          }
+          if (new_measurement && !locked) {
+            std::array<float, kJointCount> measured_array{};
+            std::copy(std::begin(measured), std::end(measured), measured_array.begin());
+            publish_state(measured_array, ++wire_sequence_);
+          }
         }
       } else {
+        {
+          std::lock_guard<std::mutex> guard(mutex_);
+          measured_ = output;
+          measured_valid_ = true;
+          measured_received_ns_ = current;
+          ++measured_serial_;
+        }
         publish_state(output, ++wire_sequence_);
       }
-      if (params_.mode == "retarget" && tracking) publish_command(output, ++wire_sequence_);
+      if (params_.mode == "retarget" && tracking && !locked) {
+        publish_command(output, ++wire_sequence_);
+      }
     }
+    publish_status();
     std::this_thread::sleep_until(next_tick);
   }
   if (device) device->close();

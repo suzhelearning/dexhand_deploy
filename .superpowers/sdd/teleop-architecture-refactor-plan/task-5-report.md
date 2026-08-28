@@ -67,3 +67,73 @@
 - round 3 focused 验证：Python `py_compile` + `tests.test_task5_executor_contract` → `Ran 9 tests ... OK`；C++ `cmake --build build/ik --target wuji_hand2_bridge -j2` → `Built target wuji_hand2_bridge`；`git diff --check` → 空输出。
 
 仍未执行实体设备或完整多进程 Zenoh session 验收；设备/launcher 阶段必须继续使用最新 config、identity 和 preflight，不得以本地 fake 结果代替物理通过。
+
+## Round 4 修复与验证
+
+### 本轮修复
+
+- Python `WujiHandExecutor` 初始化并关闭 `_subscriptions` 与多个 liveliness token；`retarget` 同时声明 `producer_hand` / `executor_hand` token 和 typed `ComponentStatus`，`direct` 保持 executor-only。两种模式只在新鲜 `SessionState=teleop` 接收输入；coordinator state 在 control tick 过期后清空输入、回零并标记 unhealthy；direct accepted command 不再提前改写 qpos。
+- `MarvinExecutor` 在 SafetyStop 锁存后于 readiness/SDK 调用前拒绝同进程 `connect()`；`fault` 与 `returning` 均只接受新鲜 bounded returning command 重连。`HardwareSafetyController` 继续完整 observe feedback/state/command/decide 链路；目标先交给 controller 做 step/slew/limits，再校验最终 SDK 输出。SessionState freshness 使用真实 callback receive time，重复 feedback serial 交由 controller timeout 判定。
+- `MujocoExecutor` 将 SessionState、at_home、return_complete 改为逐 key typed snapshot barrier：每个 query 必须 exactly-one、coordinator identity/router/sequence/timestamp 合法；缺失、重复、失败或超时保持 not-ready，超时重新发完整三 key query。持续发布 arm/hand status，SafetyStop 保持冻结与 ack。
+- C++ Wuji bridge/device 保存 measured state 的本机 monotonic receive time 与递增 callback serial；dry-run 也填充 measured cache。每 tick 发布基于 fresh measured 的 status，zero 使用 YAML tolerance；serial/cache stale 后锁存 unhealthy/disable。retarget 同时发布 producer/executor authority，direct 仅 executor；输入要求 fresh teleop state，SafetyStop 回调同 tick 发布 unhealthy status 与 matching ack。
+- 修复 legacy `marvin_hardware_bridge` 使用未定义 `router_zid` 的入口，改为 `require_single_router(session, TIANJI_ROUTER_ZID)` 并在 node 构造失败时关闭 session。
+
+### 回归 RED（实现前）
+
+执行：
+
+```text
+pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m unittest tests.test_task5_executor_contract'
+```
+
+结果：`Ran 17 tests ... FAILED (failures=7, errors=1)`。失败覆盖预期的 Wuji `_subscriptions` 缺失、MuJoCo snapshot 误解锁/无 retry、Marvin duplicate serial 立即 stale、fault reconnect 触发 SDK、原始 step 误停、旧 SessionState 被 feedback 续鲜，以及 Wuji stale teleop 未置 unhealthy。
+
+### Round 4 实际验证
+
+1. focused Python executor regression：
+
+   ```text
+   pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m unittest tests.test_task5_executor_contract'
+   ```
+
+   输出：`Ran 20 tests ... OK`。
+
+2. Python 语法：
+
+   ```text
+   pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m py_compile src/pico_body_tianji/pico_body_tianji/executors/wuji_hand2/node.py src/pico_body_tianji/pico_body_tianji/executors/mujoco/node.py src/pico_body_tianji/pico_body_tianji/executors/marvin/bridge.py src/pico_body_tianji/pico_body_tianji/executors/marvin/readiness.py src/pico_body_tianji/pico_body_tianji/marvin_hardware_bridge.py tests/test_task5_executor_contract.py'
+   ```
+
+   输出：无错误。
+
+3. C++ Wuji build：
+
+   ```text
+   pixi run -e ik-build bash -lc 'cmake --build build/ik --target wuji_hand2_bridge -j2'
+   ```
+
+   输出：`[100%] Built target wuji_hand2_bridge`。
+
+4. real Zenoh session constructor smoke（peer session，无需 managed router）：
+
+   ```text
+   Wuji: 3 2
+   MuJoCo: False waiting_snapshot
+   Marvin: waiting_for_connection False
+   ```
+
+   Wuji 实际 Zenoh session 能完成 3 个 subscriber、2 个 token 的构造与关闭；MuJoCo 在未收到三份 snapshot 时保持 not-ready；Marvin 构造保持等待连接。
+
+5. 空白检查：
+
+   ```text
+   git diff --check
+   ```
+
+   输出：空。
+
+### 未完成 / 不可宣称项
+
+- 本轮没有启动 managed router、完整 `run_session`/Task 8 profile token wiring，也没有完成多进程 Zenoh query/liveliness E2E。
+- C++ Wuji 只完成目标构建与代码路径核查；没有真实 Wuji SDK feedback/servo/disable 网络验收。Marvin 同样没有物理设备连接、跟踪、限位或急停实体验收。
+- 以上 focused fake/headless 与 peer-session smoke 不能替代 Task 9/10 设备 gate；不得据此宣称实体执行器通过。

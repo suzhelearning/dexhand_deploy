@@ -137,11 +137,11 @@ class MarvinExecutor:
         )
         self._phase = "waiting_for_connection"
         self._session_state: SessionState | None = None
+        self._session_state_received_ns: int | None = None
         self._commands: dict[str, ArmJointCommand] = {}
         self._command_received_ns: dict[str, int] = {}
         self._feedback: MarvinFeedback | None = None
         self._feedback_received_ns: int | None = None
-        self._last_feedback_serials: tuple[int, int] | None = None
         self._last_output_deg: np.ndarray | None = None
         self._last_error: str | None = None
         self._last_action = "none"
@@ -189,6 +189,11 @@ class MarvinExecutor:
     @property
     def status(self) -> ComponentStatus:
         return self._status
+    def _clock_seconds(self, now_ns: int | None = None) -> float:
+        """Convert the injected monotonic-ns clock to controller seconds."""
+        value = int(self.clock()) if now_ns is None else int(now_ns)
+        return value / 1e9
+
 
     def _setup_transport(self) -> None:
         if self.session is None:
@@ -220,8 +225,14 @@ class MarvinExecutor:
             state = value if isinstance(value, SessionState) else SessionState.from_dict(_payload(value))
             if state.router_zid != self.router_zid or state.publisher_instance_id != self.coordinator_instance_id:
                 raise ProtocolError("session state coordinator identity mismatch")
+            received_ns = int(self.clock())
+            if state.timestamp_ns > received_ns or received_ns - state.timestamp_ns > int(self.params["state_timeout_s"] * 1e9):
+                raise ProtocolError("session state is stale")
+            if self._session_state is not None and state.sequence <= self._session_state.sequence:
+                raise ProtocolError("session state sequence rollback")
             self._session_state = state
-            self._readiness.observe_session_state(state, received_ns=int(self.clock()))
+            self._session_state_received_ns = received_ns
+            self._readiness.observe_session_state(state, received_ns=received_ns)
             if state.state == "fault":
                 self._phase = "fault_return"
             elif state.state == "returning":
@@ -290,9 +301,12 @@ class MarvinExecutor:
         if not value.admitted:
             self._last_error = "real capability preflight denied"
             return False
-        return True
-
     def connect(self) -> bool:
+        if self._safety_locked:
+            self._last_error = "SafetyStop is latched; restart executor before reconnect"
+            self._phase = "soft_stopped"
+            self._publish_status()
+            return False
         now = int(self.clock())
         fault_reconnect = self._readiness.fault_return_ready(now_ns=now)
         if not fault_reconnect:
@@ -381,19 +395,14 @@ class MarvinExecutor:
             self._trip_soft_stop("command exceeds robot hard limits")
             return
         output_deg = np.degrees(output)
-        if self._last_output_deg is not None:
-            step = float(self.params["maximum_output_step_deg"])
-            if np.max(np.abs(output_deg - self._last_output_deg), initial=0.0) > step:
-                self._trip_soft_stop("command exceeds maximum output step")
-                return
         try:
-            now = time.monotonic()
+            now = self._clock_seconds()
             self._hardware_safety.observe_command("left", output_deg[:7], received_at=now, frame_id="left_base_marvin_degrees")
             self._hardware_safety.observe_command("right", output_deg[7:], received_at=now, frame_id="right_base_marvin_degrees")
         except (TypeError, ValueError) as exc:
             self._trip_soft_stop(f"hardware safety rejected command: {exc}")
             return
-        decision = self._hardware_safety.decide(now=time.monotonic())
+        decision = self._hardware_safety.decide(now=self._clock_seconds())
         if decision.action == "soft_stop":
             self._trip_soft_stop(decision.reason)
             return
@@ -408,6 +417,7 @@ class MarvinExecutor:
         if self._last_output_deg is None:
             self._last_output_deg = measured.copy()
             self._hardware_safety._last_output = measured.copy()
+        feedback_received_at = self._clock_seconds(now_ns)
         self._hardware_safety.observe_feedback(
             left_joints_deg=feedback.left_joints_deg,
             right_joints_deg=feedback.right_joints_deg,
@@ -416,16 +426,23 @@ class MarvinExecutor:
             error_codes=feedback.error_codes,
             servo_error_reports=feedback.servo_error_reports,
             frame_serials=feedback.frame_serials,
-            received_at=time.monotonic(),
+            received_at=feedback_received_at,
         )
-        current_state = "returning" if self._session_state is None or self._session_state.state == "fault" else self._session_state.state
-        if self._last_feedback_serials is not None and tuple(feedback.frame_serials) == self._last_feedback_serials:
-            return "feedback_frame_stale"
-        self._last_feedback_serials = tuple(feedback.frame_serials)
-        self._hardware_safety.observe_teleop_state(current_state, received_at=time.monotonic())
-        received_ns = self._feedback_received_ns if received_ns is None else received_ns
-        if received_ns is not None and now_ns - received_ns > int(self.params["feedback_timeout_s"] * 1e9):
-            return "feedback_stale"
+        if self._session_state is None:
+            current_state = "returning"
+            state_received_at = feedback_received_at
+        else:
+            current_state = "returning" if self._session_state.state == "fault" else self._session_state.state
+            state_received_at = (
+                feedback_received_at
+                if self._session_state_received_ns is None
+                else self._session_state_received_ns / 1e9
+            )
+        # Authority freshness is tied to the actual SessionState receive event.
+        # Feedback polling must never renew an old coordinator state.
+        self._hardware_safety.observe_teleop_state(
+            current_state, received_at=state_received_at
+        )
         if feedback.error_codes != (0, 0):
             return f"arm_error:{feedback.error_codes}"
         if feedback.servo_error_reports != ("None", "None"):
@@ -471,11 +488,11 @@ class MarvinExecutor:
         if self._hardware is None:
             return
         try:
-            previous_feedback_ns = self._feedback_received_ns
             feedback = self._hardware.read_feedback(include_servo_errors=True)
-            unsafe = self._check_feedback(feedback, now_ns, received_ns=previous_feedback_ns)
+            unsafe = self._check_feedback(feedback, now_ns)
             self._feedback = feedback
-            self._feedback_received_ns = now_ns
+            if unsafe is None:
+                unsafe = self._hardware_safety.feedback_unsafe_reason(now=self._clock_seconds(now_ns))
             if unsafe:
                 self._trip_soft_stop(unsafe)
                 self._publish_status()

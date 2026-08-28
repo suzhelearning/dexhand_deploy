@@ -221,6 +221,10 @@ class MujocoExecutor:
         self._arm_baseline: dict[str, tuple[str, int]] = {}
         self._hand_baseline: dict[str, tuple[str, int]] = {}
         self._session_state: SessionState | None = None
+        self._at_home: LatchedBool | None = None
+        self._return_complete: LatchedBool | None = None
+        self._session_received_ns: int | None = None
+        self._latch_received_ns: dict[str, int] = {}
         self._latest_received_ns: dict[tuple[str, str], int] = {}
         self._state_sequence = 0
         self._status_sequence = 0
@@ -230,10 +234,18 @@ class MujocoExecutor:
         self._last_error: str | None = None
         self._subscriptions: list[Any] = []
         self._publishers: dict[str, Any] = {}
+        self._snapshot_timeout_ns = max(self.command_timeout_ns, 1_000_000_000)
+        self._snapshot_attempt = 0
+        self._snapshot_query_started_ns: int | None = None
+        self._snapshot_seen: set[str] = set()
+        self._snapshot_values: dict[str, Any] = {}
+        self._snapshot_failed = False
         self._snapshot_ready = session is None or not hasattr(session, "get")
         self._setup_transport()
         self._initialize_home()
-        self._status = self._make_status(ready=True, healthy=True, phase="ready")
+        self._status = self._make_status(
+            ready=self._snapshot_ready, healthy=self._snapshot_ready, phase="ready"
+        )
         self._publish_status()
 
     @property
@@ -292,17 +304,82 @@ class MujocoExecutor:
             self._publishers[f"hand_state_{side}"] = _declare_publisher(self.session, topics.hand_state(side))
             self._publishers[f"hand_status_{side}"] = _declare_publisher(self.session, topics.hand_executor_status(side))
         if hasattr(self.session, "get"):
-            pending = {"count": 3}
-            def on_reply(reply):
-                if getattr(reply, "ok", False):
-                    pending["count"] -= 1
-                    if pending["count"] == 0:
-                        self._snapshot_ready = True
-            for snapshot_key in (topics.SESSION_STATE, topics.AT_HOME, topics.RETURN_COMPLETE):
-                try:
-                    self.session.get(snapshot_key, on_reply, timeout=1.0)
-                except (AttributeError, RuntimeError, TypeError):
-                    self._last_error = "coordinator snapshot query failed"
+            self._query_coordinator_snapshot()
+
+    def _reply_payload(self, reply: Any) -> Mapping[str, Any]:
+        if not getattr(reply, "ok", False):
+            raise ProtocolError("coordinator snapshot reply is not successful")
+        payload = reply.get_payload() if callable(getattr(reply, "get_payload", None)) else getattr(reply, "payload", reply)
+        return _sample_payload(payload)
+
+    def _on_snapshot_reply(self, key_name: str, reply: Any, attempt: int) -> None:
+        if attempt != self._snapshot_attempt:
+            return
+        if key_name in self._snapshot_seen:
+            self._snapshot_failed = True
+            self._snapshot_ready = False
+            self._last_error = f"duplicate coordinator snapshot reply: {key_name}"
+            return
+        self._snapshot_seen.add(key_name)
+        try:
+            payload = self._reply_payload(reply)
+            if key_name == "state":
+                parsed: SessionState | LatchedBool = SessionState.from_dict(payload)
+                if parsed.publisher_instance_id != self.coordinator_instance_id:
+                    raise ProtocolError("snapshot coordinator instance mismatch")
+            elif key_name in {"at_home", "return_complete"}:
+                parsed = LatchedBool.from_dict(payload)
+                if parsed.publisher_instance_id != self.coordinator_instance_id:
+                    raise ProtocolError("snapshot coordinator instance mismatch")
+            else:
+                raise ProtocolError(f"unknown coordinator snapshot key: {key_name}")
+            now_ns = int(self.clock())
+            if parsed.router_zid != self.router_zid:
+                raise ProtocolError("snapshot router_zid mismatch")
+            if parsed.timestamp_ns > now_ns or now_ns - parsed.timestamp_ns > self._snapshot_timeout_ns:
+                raise ProtocolError(f"stale coordinator snapshot: {key_name}")
+            if key_name == "state":
+                self._session_state = parsed
+                self._session_received_ns = now_ns
+            elif key_name == "at_home":
+                self._at_home = parsed
+                self._latch_received_ns[key_name] = now_ns
+            else:
+                self._return_complete = parsed
+                self._latch_received_ns[key_name] = now_ns
+            self._snapshot_values[key_name] = parsed
+            if len(self._snapshot_seen) == 3 and not self._snapshot_failed:
+                self._snapshot_ready = True
+        except (ProtocolError, TypeError, ValueError) as exc:
+            self._snapshot_failed = True
+            self._snapshot_ready = False
+            self._last_error = f"invalid coordinator snapshot {key_name}: {exc}"
+
+    def _query_coordinator_snapshot(self) -> None:
+        self._snapshot_attempt += 1
+        attempt = self._snapshot_attempt
+        self._snapshot_query_started_ns = int(self.clock())
+        self._snapshot_seen.clear()
+        self._snapshot_values.clear()
+        self._snapshot_failed = False
+        self._snapshot_ready = False
+        keys = (
+            ("state", topics.SESSION_STATE),
+            ("at_home", topics.AT_HOME),
+            ("return_complete", topics.RETURN_COMPLETE),
+        )
+        for key_name, snapshot_key in keys:
+            try:
+                self.session.get(
+                    snapshot_key,
+                    lambda reply, key_name=key_name, attempt=attempt: self._on_snapshot_reply(
+                        key_name, reply, attempt
+                    ),
+                    timeout=1.0,
+                )
+            except (AttributeError, RuntimeError, TypeError) as exc:
+                self._snapshot_failed = True
+                self._last_error = f"coordinator snapshot query failed: {exc}"
 
     def _initialize_home(self) -> None:
         for side in SIDES:
@@ -322,24 +399,47 @@ class MujocoExecutor:
             state = value if isinstance(value, SessionState) else SessionState.from_dict(_sample_payload(value))
             if state.router_zid != self.router_zid or state.publisher_instance_id != self.coordinator_instance_id:
                 raise ProtocolError("session state coordinator identity mismatch")
+            now_ns = int(self.clock())
+            if state.timestamp_ns > now_ns or now_ns - state.timestamp_ns > self._snapshot_timeout_ns:
+                raise ProtocolError("session state is stale")
+            if self._session_state is not None:
+                if state.sequence < self._session_state.sequence:
+                    raise ProtocolError("session state sequence rollback")
+                if state.sequence == self._session_state.sequence:
+                    return
             self._session_state = state
+            self._session_received_ns = now_ns
         except (ProtocolError, TypeError, ValueError) as exc:
+            self._healthy = False
             self._last_error = f"invalid session state: {exc}"
+
+    def _observe_latch(self, name: str, value: LatchedBool | Mapping[str, Any] | Any) -> None:
+        latch = value if isinstance(value, LatchedBool) else LatchedBool.from_dict(_sample_payload(value))
+        if latch.router_zid != self.router_zid or latch.publisher_instance_id != self.coordinator_instance_id:
+            raise ProtocolError(f"{name} coordinator identity mismatch")
+        previous = self._snapshot_values.get(name)
+        if isinstance(previous, LatchedBool) and latch.sequence < previous.sequence:
+            raise ProtocolError(f"{name} sequence rollback")
+        now_ns = int(self.clock())
+        if latch.timestamp_ns > now_ns or now_ns - latch.timestamp_ns > self._snapshot_timeout_ns:
+            raise ProtocolError(f"{name} is stale")
+        self._snapshot_values[name] = latch
+        self._latch_received_ns[name] = now_ns
 
     def on_at_home(self, value: LatchedBool | Mapping[str, Any] | Any) -> None:
         try:
-            latch = value if isinstance(value, LatchedBool) else LatchedBool.from_dict(_sample_payload(value))
-            if latch.router_zid != self.router_zid:
-                raise ProtocolError("at_home router_zid mismatch")
+            self._observe_latch("at_home", value)
+            self._at_home = self._snapshot_values["at_home"]
         except (ProtocolError, TypeError, ValueError) as exc:
+            self._healthy = False
             self._last_error = f"invalid at_home latch: {exc}"
 
     def on_return_complete(self, value: LatchedBool | Mapping[str, Any] | Any) -> None:
         try:
-            latch = value if isinstance(value, LatchedBool) else LatchedBool.from_dict(_sample_payload(value))
-            if latch.router_zid != self.router_zid:
-                raise ProtocolError("return_complete router_zid mismatch")
+            self._observe_latch("return_complete", value)
+            self._return_complete = self._snapshot_values["return_complete"]
         except (ProtocolError, TypeError, ValueError) as exc:
+            self._healthy = False
             self._last_error = f"invalid return_complete latch: {exc}"
 
     def _accept_sequence(self, kind: str, side: str, instance: str, sequence: int) -> None:
@@ -435,20 +535,27 @@ class MujocoExecutor:
     def _publish_states(self) -> None:
         self._publish("arm_state", self.arm_state.to_dict())
         self._publish_status()
+        now = int(self.clock())
+        session_fresh = bool(
+            self._session_received_ns is not None
+            and 0 <= now - self._session_received_ns <= self._snapshot_timeout_ns
+        )
         for side in self.hand_sides:
             state = self.hand_state(side)
             self._publish(f"hand_state_{side}", state.to_dict())
+            ready = self._snapshot_ready and not self._safety_locked
+            healthy = ready and self._healthy
+            tracking = bool(
+                healthy
+                and session_fresh
+                and self._session_state is not None
+                and self._session_state.state == "teleop"
+            )
             self._publish(
                 f"hand_status_{side}",
                 HandExecutorStatus(
-                    1, self._state_sequence, int(self.clock()), side,
-                    not self._safety_locked, self._healthy and not self._safety_locked,
-                    self.hand_config.at_zero(state.position_rad),
-                    bool(
-                        self._session_state is not None
-                        and self._session_state.state == "teleop"
-                        and not self._safety_locked
-                    ),
+                    1, self._state_sequence, now, side, ready, healthy,
+                    self.hand_config.at_zero(state.position_rad), tracking,
                     self._last_error, self.publisher_instance_id, self.router_zid,
                 ).to_dict(),
             )
@@ -457,6 +564,9 @@ class MujocoExecutor:
         now_ns = int(self.clock()) if now_ns is None else int(now_ns)
         self._state_sequence += 1
         if not self._snapshot_ready:
+            started = self._snapshot_query_started_ns
+            if started is None or now_ns - started >= self._snapshot_timeout_ns:
+                self._query_coordinator_snapshot()
             self._publish_states()
             return {"arm": {}, "hand": {}}
         if self._safety_locked:

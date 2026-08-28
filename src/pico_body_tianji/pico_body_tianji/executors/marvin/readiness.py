@@ -165,9 +165,16 @@ class MarvinReadiness:
         return True
 
     def _commands_bounded_home(self, now_ns: int) -> bool:
+        lower = self.robot.lower_limits_rad
+        upper = self.robot.upper_limits_rad
         for side in ("left", "right"):
             timed = self._commands.get(side)
-            if not self._fresh(timed, now_ns, self.command_timeout_ns) or timed.value.mode != "returning":
+            if not self._fresh(timed, now_ns, self.command_timeout_ns):
+                return False
+            command = timed.value
+            if command.mode != "returning":
+                return False
+            if any(value < lo or value > hi for value, lo, hi in zip(command.position_rad, lower, upper)):
                 return False
         return True
 
@@ -202,7 +209,12 @@ class MarvinReadiness:
         return bool(np.max(np.abs(values - home), initial=0.0) <= self.home_tolerance_rad)
 
     def fault_return_ready(self, *, now_ns: int) -> bool:
-        return bool(self._fresh(self._state, int(now_ns)) and self._state.value.state == "fault" and self._commands_bounded_home(int(now_ns)))
+        """允许 returning/fault 期间仅凭 fresh bounded command 安全重连。"""
+        return bool(
+            self._fresh(self._state, int(now_ns))
+            and self._state.value.state in {"fault", "returning"}
+            and self._commands_bounded_home(int(now_ns))
+        )
 
 
 __all__ = ["MarvinReadiness", "ReadinessDecision"]

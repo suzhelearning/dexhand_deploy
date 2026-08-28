@@ -147,23 +147,24 @@ class WujiHandExecutor:
         self.clock = clock
         self._state = "idle"
         self._session_sequence = -1
+        self._session_received_ns: int | None = None
         self._latest_target: HandTargetCommand | None = None
         self._latest_command: HandJointCommand | None = None
         self._input_received_ns: int | None = None
         self._baseline: tuple[str, int] | None = None
+        self._target_baseline: tuple[str, int] | None = None
         self._sequence = 0
         self._status_sequence = 0
         self._safety_locked = False
         self._safety_ack: SafetyStopAck | None = None
         self._healthy = True
-        self._baseline: tuple[str, int] | None = None
-        self._target_baseline: tuple[str, int] | None = None
         self._qpos = list(self.config.zero_position_rad)
         self._last_command: HandJointCommand | None = None
         self._last_error: str | None = None
         self._last_safety_sequence: int | None = None
+        self._subscriptions: list[Any] = []
         self._publishers: dict[str, Any] = {}
-        self._live_token = None
+        self._live_tokens: dict[str, Any] = {}
         self._setup_transport()
         self._publish_status()
 
@@ -190,7 +191,6 @@ class WujiHandExecutor:
     @property
     def position_rad(self) -> list[float]:
         return list(self._qpos)
-
     def _setup_transport(self) -> None:
         if self.session is None:
             return
@@ -212,10 +212,14 @@ class WujiHandExecutor:
         if self.mode == "retarget":
             self._publishers["command"] = self.session.declare_publisher(topics.hand_command(self.side))
         if hasattr(self.session, "liveliness"):
-            logical = "wuji_retarget" if self.mode == "retarget" else f"direct_{self.side}"
-            self._live_token = self.session.liveliness().declare_token(
-                f"tj/live/{'producer/hand' if self.mode == 'retarget' else 'executor/hand'}/{logical}/{self.publisher_instance_id}"
+            executor_logical = f"wuji_{self.side}"
+            self._live_tokens["executor"] = self.session.liveliness().declare_token(
+                f"tj/live/executor/hand/{executor_logical}/{self.publisher_instance_id}"
             )
+            if self.mode == "retarget":
+                self._live_tokens["producer"] = self.session.liveliness().declare_token(
+                    f"tj/live/producer/hand/{self.authorized_producer}/{self.publisher_instance_id}"
+                )
 
     def on_session_state(self, value: SessionState | Mapping[str, Any] | Any) -> None:
         try:
@@ -230,10 +234,12 @@ class WujiHandExecutor:
             if state.sequence <= self._session_sequence:
                 raise ProtocolError("session state sequence rollback")
             self._session_sequence = state.sequence
+            self._session_received_ns = now
             self._state = state.state
             if self._state in {"returning", "fault"}:
                 self._latest_target = None
                 self._latest_command = None
+                self._input_received_ns = None
         except (ProtocolError, TypeError, ValueError) as exc:
             self._mark_unhealthy(f"invalid session state: {exc}")
 
@@ -243,14 +249,37 @@ class WujiHandExecutor:
         self._state = "fault"
         self._latest_target = None
         self._latest_command = None
+    def _teleop_state_fresh(self, now_ns: int) -> bool:
+        return bool(
+            self._state == "teleop"
+            and self._session_received_ns is not None
+            and 0 <= now_ns - self._session_received_ns <= self.command_timeout_ns
+        )
+
+    def _expire_to_return(self, reason: str) -> None:
+        if self._state == "teleop":
+            self._state = "returning"
+        self._healthy = False
+        self._last_error = reason
+        self._latest_target = None
+        self._latest_command = None
+        self._input_received_ns = None
+
+    def _require_fresh_teleop(self) -> None:
+        now = int(self.clock())
+        if self._state != "teleop":
+            raise ProtocolError("hand input is accepted only in teleop")
+        if not self._teleop_state_fresh(now):
+            self._expire_to_return("coordinator teleop state is stale")
+            raise ProtocolError("coordinator teleop state is stale")
+
 
     def on_hand_target(self, value: HandTargetCommand | Mapping[str, Any] | Any) -> bool:
         if self.mode != "retarget" or self._safety_locked:
             return False
-        if self._state in {"returning", "fault"}:
-            return False
         try:
             target = value if isinstance(value, HandTargetCommand) else HandTargetCommand.from_dict(_payload(value))
+            self._require_fresh_teleop()
             if target.router_zid != self.router_zid or target.side != self.side:
                 raise ProtocolError("hand target identity mismatch")
             if self.authorized_target_source is not None and target.source != self.authorized_target_source:
@@ -289,10 +318,9 @@ class WujiHandExecutor:
     def on_hand_command(self, value: HandJointCommand | Mapping[str, Any] | Any) -> bool:
         if self.mode != "direct" or self._safety_locked:
             return False
-        if self._state in {"returning", "fault"}:
-            return False
         try:
             command = value if isinstance(value, HandJointCommand) else HandJointCommand.from_dict(_payload(value))
+            self._require_fresh_teleop()
             if command.router_zid != self.router_zid or command.side != self.side or command.producer != self.authorized_producer:
                 raise ProtocolError("hand command producer/side/router is not authorized")
             if self.authorized_publisher_instance_id is not None and command.publisher_instance_id != self.authorized_publisher_instance_id:
@@ -305,7 +333,6 @@ class WujiHandExecutor:
             # Only accepted commands update baseline and watchdog.
             self._baseline = (command.publisher_instance_id, command.sequence)
             self._latest_command = command
-            self._qpos = positions
             self._input_received_ns = int(self.clock())
             return True
         except (ProtocolError, TypeError, ValueError) as exc:
@@ -355,6 +382,7 @@ class WujiHandExecutor:
     def _tracking_allowed(self, now_ns: int) -> bool:
         return bool(
             not self._safety_locked and self._healthy and self._state == "teleop"
+            and self._teleop_state_fresh(now_ns)
             and self._input_received_ns is not None
             and 0 <= now_ns - self._input_received_ns <= self.command_timeout_ns
         )
@@ -375,13 +403,14 @@ class WujiHandExecutor:
             send = getattr(self.device, "send", None)
             if callable(send):
                 send(list(values))
-
     def tick(self, *, now_ns: int | None = None) -> HandJointCommand | None:
         now_ns = int(self.clock()) if now_ns is None else int(now_ns)
         self._sequence += 1
         if self._safety_locked:
             self._publish_state(now_ns)
             return None
+        if self._state == "teleop" and not self._teleop_state_fresh(now_ns):
+            self._expire_to_return("coordinator teleop state expired")
         if not self._real_admission_ok():
             self._mark_unhealthy(self._last_error or "real capability denied")
             self._publish_state(now_ns)
@@ -422,29 +451,30 @@ class WujiHandExecutor:
             self.publisher_instance_id, self.router_zid,
         )
         _put(self._publishers.get("state"), state.to_dict())
-
     def _publish_status(self) -> None:
         now = int(self.clock())
         self._status_sequence += 1
+        healthy = self._healthy and not self._safety_locked
+        tracking = self._tracking_allowed(now)
         status = HandExecutorStatus(
             1, self._status_sequence, now, self.side,
-            self._healthy and not self._safety_locked,
-            self._healthy and not self._safety_locked,
-            self.at_zero, self._tracking_allowed(now), self._last_error,
+            healthy, healthy, self.at_zero, tracking, self._last_error,
             self.publisher_instance_id, self.router_zid,
         )
         _put(self._publishers.get("status"), status.to_dict())
-        component = ComponentStatus(
-            1, self._status_sequence, now,
-            "producer_hand" if self.mode == "retarget" else "executor_hand",
-            f"wuji_hand2_{self.side}", self.mode,
-            self._healthy and not self._safety_locked,
-            self._healthy and not self._safety_locked,
-            ["simulation"] if self.dry_run else ["real"], self._last_error,
-            {"side": self.side, "mode": self.mode, "at_zero": self.at_zero, "tracking_allowed": self._tracking_allowed(now)},
-            self.publisher_instance_id, self.router_zid,
+        roles = (
+            (("producer_hand", "executor_hand") if self.mode == "retarget" else ("executor_hand",))
         )
-        _put(self._publishers.get("component"), component.to_dict())
+        for role in roles:
+            component = ComponentStatus(
+                1, self._status_sequence, now, role,
+                f"wuji_hand2_{self.side}_{role.removeprefix('producer_').removeprefix('executor_')}",
+                self.mode, healthy, healthy,
+                ["simulation"] if self.dry_run else ["real"], self._last_error,
+                {"side": self.side, "mode": self.mode, "at_zero": self.at_zero, "tracking_allowed": tracking},
+                self.publisher_instance_id, self.router_zid,
+            )
+            _put(self._publishers.get("component"), component.to_dict())
 
     def run(self, *, rate_hz: float = 100.0) -> None:
         if rate_hz <= 0.0:
@@ -465,11 +495,13 @@ class WujiHandExecutor:
                 pass
         self._subscriptions.clear()
         self._publishers.clear()
-        if self._live_token is not None:
+        for token in self._live_tokens.values():
             try:
-                self._live_token.undeclare()
+                if token is not None:
+                    token.undeclare()
             except (AttributeError, RuntimeError):
                 pass
+        self._live_tokens.clear()
         if self.device is not None:
             close = getattr(self.device, "close", None)
             if callable(close):

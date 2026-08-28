@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unittest
 
 import numpy as np
@@ -15,6 +16,7 @@ from pico_body_tianji.protocol.messages import (
     ComponentStatus,
     HandJointCommand,
     HandTargetCommand,
+    LatchedBool,
     ProtocolEnvelope,
     SafetyStopRequest,
     SessionState,
@@ -70,7 +72,178 @@ class _FakeSession:
         return Sub()
 
 
+class _Clock:
+    def __init__(self, value):
+        self.value = int(value)
+
+    def __call__(self):
+        return self.value
+
+
+class _FakeLiveSession(_FakeSession):
+    def __init__(self):
+        super().__init__()
+        self.tokens = []
+
+    def liveliness(self):
+        owner = self
+
+        class Live:
+            def declare_token(self, key):
+                token = type("Token", (), {"key": key, "undeclare": lambda self: None})()
+                owner.tokens.append(token)
+                return token
+
+        return Live()
+
+
+class _Reply:
+    def __init__(self, payload, ok=True):
+        self.payload = payload
+        self.ok = ok
+
+    def get_payload(self):
+        return self.payload
+
+
+class _SnapshotSession(_FakeSession):
+    def __init__(self, replies):
+        super().__init__()
+        self.replies = dict(replies)
+        self.queries = []
+
+    def get(self, key, callback, **kwargs):
+        self.queries.append(key)
+        if key in self.replies:
+            reply = self.replies[key]
+            if isinstance(reply, list):
+                for value in reply:
+                    callback(_Reply(value))
+            else:
+                callback(_Reply(reply))
+
 class Task5ExecutorContractTest(unittest.TestCase):
+    def test_mujoco_snapshot_barrier_requires_typed_replies(self):
+        clock = _Clock(time.monotonic_ns())
+        now = clock()
+        valid_state = SessionState(1, 1, now, "idle", "startup", "coordinator", None, "coord", "router").to_dict()
+        valid_latch = LatchedBool(1, 1, now, True, "coord", "router").to_dict()
+        session = _SnapshotSession({
+            "tianji/session/state": {"not": "a typed state"},
+            "tianji/coordinator/at_home": valid_latch,
+            "tianji/coordinator/return_complete": valid_latch | {"value": False},
+        })
+        executor = MujocoExecutor(
+            session=session, model=_FakeModel(), data=_FakeData(),
+            publisher_instance_id="mujoco", router_zid="router",
+            coordinator_instance_id="coord", clock=clock,
+        )
+        self.assertFalse(executor._snapshot_ready)
+        self.assertFalse(executor.status.ready)
+
+    def test_mujoco_snapshot_barrier_retries_missing_key(self):
+        clock = _Clock(time.monotonic_ns())
+        now = clock()
+        session = _SnapshotSession({
+            "tianji/session/state": SessionState(
+                1, 1, now, "idle", "startup", "coordinator", None, "coord", "router"
+            ).to_dict(),
+            "tianji/coordinator/at_home": LatchedBool(
+                1, 1, now, True, "coord", "router"
+            ).to_dict(),
+        })
+        executor = MujocoExecutor(
+            session=session, model=_FakeModel(), data=_FakeData(),
+            publisher_instance_id="mujoco", router_zid="router",
+            coordinator_instance_id="coord", clock=clock,
+        )
+        self.assertFalse(executor._snapshot_ready)
+        initial_queries = len(session.queries)
+        clock.value += 2_000_000_000
+        executor.tick(now_ns=clock())
+        self.assertGreater(len(session.queries), initial_queries)
+        self.assertFalse(executor._snapshot_ready)
+    def test_mujoco_snapshot_barrier_unlocks_only_after_three_valid_replies(self):
+        clock = _Clock(time.monotonic_ns())
+        now = clock()
+        session = _SnapshotSession({
+            "tianji/session/state": SessionState(
+                1, 1, now, "idle", "startup", "coordinator", None, "coord", "router"
+            ).to_dict(),
+            "tianji/coordinator/at_home": LatchedBool(
+                1, 1, now, True, "coord", "router"
+            ).to_dict(),
+            "tianji/coordinator/return_complete": LatchedBool(
+                1, 1, now, False, "coord", "router"
+            ).to_dict(),
+        })
+        executor = MujocoExecutor(
+            session=session, model=_FakeModel(), data=_FakeData(),
+            publisher_instance_id="mujoco", router_zid="router",
+            coordinator_instance_id="coord", clock=clock,
+        )
+        self.assertTrue(executor._snapshot_ready)
+        self.assertTrue(executor.status.ready)
+
+    def test_mujoco_snapshot_barrier_rejects_duplicate_key_reply(self):
+        clock = _Clock(time.monotonic_ns())
+        now = clock()
+        state = SessionState(
+            1, 1, now, "idle", "startup", "coordinator", None, "coord", "router"
+        ).to_dict()
+        latch = LatchedBool(1, 1, now, True, "coord", "router").to_dict()
+        session = _SnapshotSession({
+            "tianji/session/state": [state, state],
+            "tianji/coordinator/at_home": latch,
+            "tianji/coordinator/return_complete": latch | {"value": False},
+        })
+        executor = MujocoExecutor(
+            session=session, model=_FakeModel(), data=_FakeData(),
+            publisher_instance_id="mujoco", router_zid="router",
+            coordinator_instance_id="coord", clock=clock,
+        )
+        self.assertFalse(executor._snapshot_ready)
+
+    def test_wuji_real_session_constructor_keeps_subscriptions_and_tokens(self):
+        session = _FakeLiveSession()
+        executor = WujiHandExecutor(
+            mode="retarget", side="right", session=session,
+            router_zid="router", publisher_instance_id="wuji",
+            authorized_producer="source",
+            authorized_publisher_instance_id="source-instance",
+            coordinator_instance_id="coord",
+        )
+        self.assertEqual(len(executor._subscriptions), 3)
+        self.assertEqual(len(executor._live_tokens), 2)
+        executor.close()
+        self.assertEqual(executor._subscriptions, [])
+
+    def test_wuji_accepts_input_only_during_fresh_teleop(self):
+        clock = _Clock(1_000_000_000)
+        executor = WujiHandExecutor(
+            mode="direct", side="right", router_zid="router",
+            publisher_instance_id="wuji", authorized_producer="h5_direct",
+            authorized_publisher_instance_id="h5-instance",
+            coordinator_instance_id="coord", clock=clock,
+        )
+        state = SessionState(
+            1, 1, clock(), "teleop", "start", "coordinator", 1, "coord", "router"
+        )
+        executor.on_session_state(state)
+        command = HandJointCommand(
+            1, 1, clock(), "h5_direct", "right",
+            list(executor.config.joint_names), [0.1] * 20, "h5-instance", "router"
+        )
+        self.assertTrue(executor.on_hand_command(command))
+        executor.tick(now_ns=clock())
+        self.assertNotEqual(executor.position_rad, [0.0] * 20)
+        clock.value += executor.command_timeout_ns + 1
+        executor.tick(now_ns=clock())
+        self.assertFalse(executor.tracking_allowed)
+        self.assertTrue(executor.unhealthy)
+        self.assertEqual(executor._state, "returning")
+
+
     def test_mujoco_applies_both_same_tick_commands_and_publishes_rad_state(self):
         session, model, data = _FakeSession(), _FakeModel(), _FakeData()
         executor = MujocoExecutor(
@@ -181,16 +354,33 @@ class Task5ExecutorContractTest(unittest.TestCase):
                 "coord", "router",
             ), received_ns=10)
         self.assertTrue(readiness.connection_ready(now_ns=10))
+    def test_marvin_readiness_allows_bounded_reconnect_in_returning(self):
+        readiness = MarvinReadiness(router_zid="router")
+        readiness.observe_session_state(
+            SessionState(1, 1, 10, "returning", "disconnect", "coordinator", None, "coord", "router"),
+            received_ns=10,
+        )
+        for side in ("left", "right"):
+            readiness.observe_command(ArmJointCommand(
+                1, 1, 10, "coordinator", side, "returning", None, None,
+                [f"Joint{i}_{'L' if side == 'left' else 'R'}" for i in range(1, 8)],
+                [0.0] * 7, "coord", "router",
+            ), received_ns=10)
+        self.assertTrue(readiness.fault_return_ready(now_ns=10))
 
 
 class _FakeMarvinHardware:
     def __init__(self) -> None:
         self.sent = []
         self.soft_stops = 0
+        self.connect_calls = 0
         self.feedback = MarvinFeedback(
             np.zeros(7), np.zeros(7), (1, 1), (1, 1), (0, 0),
             (1, 1), (10, 10), (10, 10), ("None", "None"),
         )
+    def connect_and_prepare(self, *args, **kwargs):
+        self.connect_calls += 1
+        raise AssertionError("SDK connect must be blocked after SafetyStop")
 
     def send_joint_targets(self, left, right):
         self.sent.append((np.asarray(left).copy(), np.asarray(right).copy()))
@@ -206,11 +396,11 @@ class _FakeMarvinHardware:
 
 
 class MarvinExecutorSafetyTest(unittest.TestCase):
-    def _command(self, side, sequence=1, timestamp=100):
+    def _command(self, side, sequence=1, timestamp=100, value=0.005):
         return ArmJointCommand(
             1, sequence, timestamp, "coordinator", side, "returning", None, None,
             [f"Joint{i}_{'L' if side == 'left' else 'R'}" for i in range(1, 8)],
-            [0.005] * 7, "coord", "router",
+            [value] * 7, "coord", "router",
         )
 
     def test_fault_return_consumes_bounded_returning_command(self):
@@ -243,6 +433,76 @@ class MarvinExecutorSafetyTest(unittest.TestCase):
         self.assertEqual(hardware.sent, [])
         self.assertTrue(executor.safety_locked)
         self.assertIsNotNone(executor.safety_ack)
+    def test_safety_stop_rejects_same_process_reconnect_before_sdk(self):
+        hardware = _FakeMarvinHardware()
+        executor = MarvinExecutor(
+            hardware_session=hardware, publisher_instance_id="marvin", router_zid="router",
+            coordinator_instance_id="coord", run_id="run",
+            safety_supervisor_instance_id="supervisor", clock=lambda: 100,
+        )
+        executor._readiness.fault_return_ready = lambda now_ns: True
+        self.assertTrue(executor.on_safety_stop(SafetyStopRequest(
+            ProtocolEnvelope(1, "supervisor", "router", 1, 100),
+            "run", "operator stop", True,
+        )))
+        self.assertFalse(executor.connect())
+        self.assertEqual(hardware.connect_calls, 0)
+        self.assertEqual(hardware.sent, [])
+
+    def test_marvin_controller_slews_large_bounded_return_target(self):
+        hardware = _FakeMarvinHardware()
+        executor = MarvinExecutor(
+            hardware_session=hardware, publisher_instance_id="marvin", router_zid="router",
+            coordinator_instance_id="coord", clock=lambda: 100,
+        )
+        executor.on_session_state(SessionState(
+            1, 1, 100, "fault", "fault", "coordinator", None, "coord", "router"
+        ))
+        executor.on_arm_command(self._command("left", value=0.2))
+        executor.on_arm_command(self._command("right", value=0.2))
+        executor.tick(now_ns=100)
+        self.assertEqual(len(hardware.sent), 1)
+        np.testing.assert_allclose(
+            hardware.sent[0][0],
+            np.full(7, executor.params["maximum_output_step_deg"]),
+        )
+        self.assertFalse(executor.safety_locked)
+
+    def test_duplicate_feedback_frame_waits_for_controller_timeout(self):
+        base = time.monotonic_ns()
+        clock = _Clock(base)
+        hardware = _FakeMarvinHardware()
+        executor = MarvinExecutor(
+            hardware_session=hardware, publisher_instance_id="marvin", router_zid="router",
+            coordinator_instance_id="coord", clock=clock,
+            params={"feedback_timeout_s": 0.5, "state_timeout_s": 0.1},
+        )
+        self.assertIsNone(executor._check_feedback(hardware.feedback, base))
+        self.assertIsNone(executor._check_feedback(hardware.feedback, base + 1_000_000))
+
+    def test_feedback_does_not_refresh_stale_session_authority(self):
+        base = time.monotonic_ns()
+        clock = _Clock(base)
+        hardware = _FakeMarvinHardware()
+        executor = MarvinExecutor(
+            hardware_session=hardware, publisher_instance_id="marvin", router_zid="router",
+            coordinator_instance_id="coord", clock=clock,
+            params={"feedback_timeout_s": 10.0, "state_timeout_s": 0.1},
+        )
+        executor.on_session_state(SessionState(
+            1, 1, base, "teleop", "start", "coordinator", 1, "coord", "router"
+        ))
+        self.assertIsNone(executor._check_feedback(hardware.feedback, base))
+        received_at = executor._hardware_safety._teleop_state[1]
+        clock.value = base + 200_000_000
+        hardware.feedback = MarvinFeedback(
+            np.zeros(7), np.zeros(7), (1, 1), (1, 1), (0, 0),
+            (2, 2), (10, 10), (10, 10), ("None", "None"),
+        )
+        self.assertIsNone(executor._check_feedback(hardware.feedback, clock(),))
+        self.assertEqual(executor._hardware_safety._teleop_state[1], received_at)
+        decision = executor._hardware_safety.decide(now=clock() / 1e9)
+        self.assertEqual(decision.action, "return_home")
 
 
 if __name__ == "__main__":

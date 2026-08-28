@@ -91,9 +91,11 @@ public:
   /** 发送 20 关节位姿命令（position/velocity=0/effort=0）。 */
   bool send(const float * qpos20, std::string * error);
 
-  /** 取最近一次 joint_states（成功返回 true 并填充 position/velocity/effort）。 */
+  /** 取最近一次 joint_states 及其本机接收时间/递增帧序。 */
   bool latest_states(
-    float position[20], float velocity[20], float effort[20]) const;
+    float position[20], float velocity[20], float effort[20],
+    std::int64_t * received_ns = nullptr,
+    std::uint64_t * serial = nullptr) const;
 
   /** 最近 diagnostics 的在线关节数与 bitmap（位 i = 关节 i 在线）。 */
   uint8_t online_joint_count() const;
@@ -113,12 +115,13 @@ private:
   struct WujiSub * diagnostics_sub_ = nullptr;
   struct WujiSub * states_sub_ = nullptr;
   Options options_{};
-
   mutable std::mutex mu_;
   float last_position_[20]{0.0F};
   float last_velocity_[20]{0.0F};
   float last_effort_[20]{0.0F};
   bool have_states_ = false;
+  std::int64_t states_received_ns_ = 0;
+  std::uint64_t states_serial_ = 0;
   uint8_t online_count_ = 0;
   uint32_t online_mask_ = 0;
 };

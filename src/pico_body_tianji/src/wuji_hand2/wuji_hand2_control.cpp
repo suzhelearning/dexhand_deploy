@@ -39,6 +39,13 @@ uint64_t now_us()
       std::chrono::steady_clock::now().time_since_epoch())
       .count());
 }
+std::int64_t now_ns()
+{
+  return static_cast<std::int64_t>(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 
 /* 外部 XYZ 欧拉角（度）→ R，按“p' = R p”作用于点（列主序存储）。 */
 std::array<float, 9> euler_xyz_degrees(double x_deg, double y_deg, double z_deg)
@@ -383,7 +390,8 @@ bool WujiHand2Device::send(const float * qpos20, std::string * error)
 }
 
 bool WujiHand2Device::latest_states(
-  float position[20], float velocity[20], float effort[20]) const
+  float position[20], float velocity[20], float effort[20],
+  std::int64_t * received_ns, std::uint64_t * serial) const
 {
   std::lock_guard<std::mutex> guard(mu_);
   if (!have_states_) {
@@ -392,6 +400,8 @@ bool WujiHand2Device::latest_states(
   std::memcpy(position, last_position_, sizeof(last_position_));
   std::memcpy(velocity, last_velocity_, sizeof(last_velocity_));
   std::memcpy(effort, last_effort_, sizeof(last_effort_));
+  if (received_ns != nullptr) *received_ns = states_received_ns_;
+  if (serial != nullptr) *serial = states_serial_;
   return true;
 }
 
@@ -484,6 +494,8 @@ void WujiHand2Device::on_joint_states(
   std::memcpy(self->last_position_, position, sizeof(position));
   std::memcpy(self->last_velocity_, velocity, sizeof(velocity));
   std::memcpy(self->last_effort_, effort, sizeof(effort));
+  self->states_received_ns_ = now_ns();
+  ++self->states_serial_;
   self->have_states_ = true;
 }
 

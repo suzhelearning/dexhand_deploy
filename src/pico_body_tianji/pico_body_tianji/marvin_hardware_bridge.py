@@ -745,9 +745,11 @@ def main(args=None) -> int:
         overrides,
     )
     session = open_session()
-    params["router_zid"] = router_zid
     node = None
     try:
+        params["router_zid"] = require_single_router(
+            session, os.environ.get("TIANJI_ROUTER_ZID")
+        )
         node = MarvinHardwareBridge(session, params)
         node.run()
     except KeyboardInterrupt:
@@ -758,6 +760,8 @@ def main(args=None) -> int:
                 node.close_hardware()
             finally:
                 node.close()
+        else:
+            session.close()
     return 0
 
 
