@@ -1,0 +1,7 @@
+source_config: sources/mocap_live.yaml
+arm_producer_config: producers/ik.yaml
+arm_executor_config: executors/mujoco.yaml
+coordinator_config: coordinator/arm.yaml
+required_capability: simulation
+active_sides: [left, right]
+hand_mode: disabled

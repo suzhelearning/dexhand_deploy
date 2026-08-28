@@ -10,14 +10,21 @@ NEW_PROBE="${STAGING_BIN}/tianji_official_ik_probe"
 NEW_WORKER="${STAGING_BIN}/tianji_official_ik_worker"
 NEW_BRIDGE="${STAGING_BIN}/wuji_hand2_bridge"
 RUNTIME_PROGRAMS=(
-  pico_controller_input
-  pico_controller_only_input
-  controller_only_real_diagnostic
-  marvin_hardware_bridge
-  mocap_keyboard_step
+  pico_controller_source
   mocap_live
   mocap_h5_replay
-  mujoco_joint_viewer.py
+  mocap_calibration
+  target_replay
+  joint_replay
+  session_recorder
+  arm_command_coordinator
+  policy_hold_producer
+  mujoco_executor
+  marvin_executor
+  wuji_hand2_executor
+  trace_metrics
+  real_diagnostic
+  h5_wrist_diagnostic
 )
 BACKUP_DIR="${BUNDLE_ROOT}/staging/runtime-backup"
 SDK_SOURCE_ROOT="${TIANJI_OFFICIAL_SDK_ROOT:-/home/ice/TJ_FX_ROBOT_CONTRL_SDK}"
@@ -29,6 +36,7 @@ SOURCE_CONFIG="${BUNDLE_ROOT}/src/pico_body_tianji/config"
 RUNTIME_CONFIG="${RUNTIME_SHARE}/config"
 SOURCE_ASSETS="${BUNDLE_ROOT}/src/pico_body_tianji/assets"
 RUNTIME_ASSETS="${RUNTIME_SHARE}/assets"
+STAGING_PYTHON="${BUNDLE_ROOT}/staging/ik/lib/python3.10/site-packages/pico_body_tianji"
 STRIP_TOOL="${IK_STRIP_TOOL:-/usr/bin/strip}"
 
 for binary in "${NEW_IK}" "${NEW_PROBE}" "${NEW_WORKER}" "${NEW_BRIDGE}"; do
@@ -62,7 +70,19 @@ if ! head -n 1 "${RUNTIME_BIN}/arm_ik_producer" | grep -Fxq '#!/usr/bin/env bash
   printf '%s\n' '错误：runtime arm_ik_producer 入口不是预期的 Bash 包装器，拒绝部署。' >&2
   exit 1
 fi
-
+shopt -s nullglob
+# Remove obsolete runtime entries explicitly, without keeping a compatibility
+# alias in the shipped tree.
+for stale in \
+  "${RUNTIME_BIN}"/pico_controller_* \
+  "${RUNTIME_BIN}"/marvin_hardware_* \
+  "${RUNTIME_BIN}"/mocap_keyboard_* \
+  "${RUNTIME_BIN}"/mujoco_joint_viewer* \
+  "${RUNTIME_BIN}"/controller_* \
+  "${RUNTIME_BIN}"/tianji_kinematic_*; do
+  rm -f -- "${stale}"
+done
+shopt -u nullglob
 mkdir -p "${BACKUP_DIR}"
 for path in \
   "${RUNTIME_BIN}/arm_ik_producer" \
@@ -72,7 +92,6 @@ for path in \
   "${RUNTIME_BIN}/tianji_official_ik_worker.bin" \
   "${RUNTIME_BIN}/wuji_hand2_bridge" \
   "${RUNTIME_BIN}/wuji_hand2_bridge.bin" \
-  "${RUNTIME_BIN}/pico_controller_only_input" \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so" \
   "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
 do
@@ -98,6 +117,12 @@ mkdir -p \
   "${SDK_RUNTIME_ROOT}/CommonConfig" \
   "${RUNTIME_CONFIG}" \
   "${RUNTIME_ASSETS}"
+mkdir -p "${RUNTIME_PYTHON}" "${STAGING_PYTHON}"
+for python_root in "${RUNTIME_PYTHON}" "${STAGING_PYTHON}"; do
+  rsync -a --delete \
+    "${BUNDLE_ROOT}/src/pico_body_tianji/pico_body_tianji/" \
+    "${python_root}/"
+done
 # 允许 TIANJI_OFFICIAL_SDK_ROOT 指向 runtime 自身（自拷贝场景，
 # 例如 SDK 源机器不可用时）；源与目标相同则跳过。
 if [[ "$(realpath "${SDK_LIBRARY}")" != "$(realpath "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so")" ]]; then

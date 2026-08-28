@@ -1,0 +1,3 @@
+rate_hz: 90.0
+pause_republish_hz: 90.0
+source_type: joint_replay

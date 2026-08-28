@@ -18,7 +18,7 @@ from ...protocol.messages import (
     RawMocapLiveSample,
     RawPicoControllerSample,
 )
-from ...zenoh_util import ZenohPub
+from ...zenoh_util import ZenohPub, declare_component_liveliness
 class SequenceAllocator:
     """Monotonic publisher-instance sequence shared by intents and data."""
 
@@ -60,6 +60,9 @@ class TargetPublisher:
         self._allocator = allocator or SequenceAllocator()
         self._sequence = 0
         self._publishers: dict[str, ZenohPub] = {}
+        self._liveliness_token = declare_component_liveliness(
+            session, role="source", logical_id=source, instance_id=publisher_instance_id
+        )
 
     @property
     def sequence(self) -> int:
@@ -282,10 +285,15 @@ class TargetPublisher:
         return skeleton
 
     def close(self) -> None:
+        if self._liveliness_token is not None:
+            try:
+                self._liveliness_token.undeclare()
+            except Exception:
+                pass
+            self._liveliness_token = None
         for publisher in self._publishers.values():
             publisher.close()
         self._publishers.clear()
-
 
 def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)

@@ -250,7 +250,7 @@ class MocapLiveTest(unittest.TestCase):
 
 
 class PicoSourceTest(unittest.TestCase):
-    def test_source_stays_controller_only_and_does_not_read_body(self) -> None:
+    def test_source_uses_controller_api_and_does_not_read_body(self) -> None:
         class SDK:
             def init(self):
                 pass

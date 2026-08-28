@@ -227,15 +227,20 @@ install(DIRECTORY include/ DESTINATION include)
 install(
   PROGRAMS
     scripts/pico_controller_source
-    scripts/marvin_executor
     scripts/mocap_live
     scripts/mocap_h5_replay
     scripts/mocap_calibration
-    scripts/mujoco_joint_viewer.py
+    scripts/target_replay
+    scripts/joint_replay
+    scripts/session_recorder
+    scripts/marvin_executor
     scripts/mujoco_executor
     scripts/wuji_hand2_executor
     scripts/arm_command_coordinator
     scripts/policy_hold_producer
+    scripts/trace_metrics
+    scripts/real_diagnostic
+    scripts/h5_wrist_diagnostic
   DESTINATION lib/${PROJECT_NAME}
 )
 install(

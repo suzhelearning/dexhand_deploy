@@ -19,8 +19,30 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from .protocol.messages import strict_loads
-
 import zenoh
+
+
+from .config_loader import router_endpoint
+
+_LIVELINESS_ROLES = {"source", "producer/arm", "producer/hand", "coordinator/arm", "executor/arm", "executor/hand", "recorder"}
+
+
+def declare_component_liveliness(
+    session: object,
+    *,
+    role: str,
+    logical_id: str,
+    instance_id: str,
+) -> object | None:
+    """Declare the canonical token ``tj/live/<role>/<logical>/<instance>``."""
+    if role not in _LIVELINESS_ROLES:
+        raise ValueError(f"unsupported liveliness role: {role}")
+    if not logical_id or not instance_id or "/" in logical_id or "/" in instance_id:
+        raise ValueError("logical_id and instance_id must be non-empty path components")
+    live = getattr(session, "liveliness", None)
+    if not callable(live):
+        return None
+    return live().declare_token(f"tj/live/{role}/{logical_id}/{instance_id}")
 
 
 # ---------------------------------------------------------------- 时间戳
@@ -50,9 +72,9 @@ def key(name: str) -> str:
 
 def open_session(endpoint: str | None = None) -> zenoh.Session:
     """Open a client session using the single configured router endpoint."""
-    endpoint = endpoint or os.environ.get(
-        "TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447"
-    )
+    endpoint = router_endpoint() if endpoint is None else endpoint.strip()
+    if not endpoint:
+        raise ValueError("router endpoint must not be empty")
     config = zenoh.Config.from_json5(
         json.dumps({"mode": "client", "connect": {"endpoints": [endpoint]}})
     )

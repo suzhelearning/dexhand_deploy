@@ -31,6 +31,7 @@ from ..protocol.messages import (
     strict_loads,
 )
 
+from ..zenoh_util import declare_component_liveliness
 
 @dataclass(frozen=True)
 class ArmRobotConfig:
@@ -142,9 +143,18 @@ class ArmCommandCoordinator:
         self._return_started_ns: int | None = None
         self._return_start_command: dict[str, list[float]] | None = None
         self._safe_command = {"left": list(self.robot.left_home_rad), "right": list(self.robot.right_home_rad)}
-        self._fault_reason: str | None = None
         self._publishers: dict[str, Any] = {}
         self._queryables: list[Any] = []
+        self._liveliness_token = (
+            declare_component_liveliness(
+                session,
+                role="coordinator/arm",
+                logical_id="arm",
+                instance_id=publisher_instance_id,
+            )
+            if session is not None
+            else None
+        )
         if session is not None:
             self._setup_transport(session)
 
@@ -650,6 +660,12 @@ class ArmCommandCoordinator:
             self._enter_fault("malformed arm proposal")
 
     def close(self) -> None:
+        if self._liveliness_token is not None:
+            try:
+                self._liveliness_token.undeclare()
+            except Exception:
+                pass
+            self._liveliness_token = None
         for item in (*self._publishers.values(), *self._queryables):
             try:
                 item.undeclare()

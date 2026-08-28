@@ -1,0 +1,16 @@
+rate: 60.0
+stale_timeout: 0.5
+min_cutoff: 1.2
+beta: 0.45
+translation_gain: [1.0, 1.0, 1.0]
+rotation_gain: 1.0
+workspace_relative_radii_m: [0.42, 0.38, 0.38]
+workspace_soft_zone_ratio: 0.90
+maximum_linear_speed_m_s: 0.36
+maximum_angular_speed_rad_s: 1.55
+maximum_linear_acceleration_m_s2: 3.5
+maximum_angular_acceleration_rad_s2: 9.0
+circle_radius_mm: 100.0
+circle_maximum_speed_mm_s: 50.0
+left_default_elbow_direction: [0.45638698, -0.74604902, -0.48489358]
+right_default_elbow_direction: [0.45638698, 0.74604902, -0.48489358]

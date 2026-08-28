@@ -1,0 +1,8 @@
+source_config: sources/h5_replay.yaml
+arm_producer_config: producers/ik.yaml
+arm_executor_config: executors/marvin.yaml
+coordinator_config: coordinator/arm.yaml
+required_capability: real
+active_sides: [right]
+inactive_sides: [left]
+hand_mode: auto

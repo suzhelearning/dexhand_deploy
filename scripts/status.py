@@ -1,61 +1,63 @@
 #!/usr/bin/env python3
-"""订阅 /pico_body_real/status（裸文本）并逐条打印，保持原输出格式。"""
-
+"""打印 canonical ComponentStatus/SessionState，而不发布任何消息。"""
 from __future__ import annotations
 
-import logging
+import json
 import threading
 
-import zenoh
-
-from pico_body_tianji.zenoh_util import ZenohTextSub, open_session
-
-_LOG = logging.getLogger("pico_body_real_status_monitor")
-
-STATUS_KEY = "pico_body_real/status"
+from pico_body_tianji.protocol import topics
+from pico_body_tianji.zenoh_util import open_session, require_single_router
 
 
 class StatusMonitor:
-    def __init__(self, session: zenoh.Session):
+    def __init__(self, session, router_zid: str):
         self._session = session
-        self._sub = ZenohTextSub(
-            session,
-            STATUS_KEY,
-            self._print_status,
-        )
-        _LOG.info("等待状态消息：%s", STATUS_KEY)
+        self._router_zid = router_zid
+        self._resources = []
+        self._done = threading.Event()
+        for topic in (
+            topics.SESSION_STATE,
+            topics.SOURCE_STATUS,
+            topics.PRODUCER_STATUS,
+            topics.COORDINATOR_STATUS,
+            topics.EXECUTOR_STATUS,
+        ):
+            self._resources.append(session.declare_subscriber(topic, lambda sample, topic=topic: self._print(topic, sample)))
 
-    @staticmethod
-    def _print_status(message: str) -> None:
-        print(message, flush=True)
+    def _print(self, topic: str, sample) -> None:
+        try:
+            value = json.loads(bytes(sample.payload).decode("utf-8"))
+            if value.get("router_zid") != self._router_zid:
+                return
+            print(json.dumps({"topic": topic, "payload": value}, ensure_ascii=False), flush=True)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
 
     def run(self) -> None:
-        # 订阅回调在 Zenoh 内部线程驱动；主线程阻塞等待直到被中断。
-        self._done = threading.Event()
-        try:
-            self._done.wait()
-        except KeyboardInterrupt:
-            pass
+        self._done.wait()
 
     def close(self) -> None:
-        try:
-            self._sub.close()
-        finally:
-            self._session.close()
+        for resource in self._resources:
+            try:
+                resource.undeclare()
+            except Exception:
+                pass
+        self._session.close()
 
 
-def main() -> None:
+def main() -> int:
     session = open_session()
-    monitor = StatusMonitor(session)
     try:
-        monitor.run()
-    finally:
-        monitor.close()
+        router = require_single_router(session)
+        monitor = StatusMonitor(session, router)
+        try:
+            monitor.run()
+        finally:
+            monitor.close()
+    except KeyboardInterrupt:
+        return 0
+    return 0
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    main()
+    raise SystemExit(main())

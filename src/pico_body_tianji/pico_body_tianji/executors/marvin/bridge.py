@@ -54,7 +54,7 @@ def _payload(value: Any) -> Mapping[str, Any]:
 
 
 def _create_official_session() -> MarvinHardwareSession:
-    from ...marvin_hardware_bridge import create_official_marvin_session
+    from .sdk_session import create_official_marvin_session
     return create_official_marvin_session()
 
 

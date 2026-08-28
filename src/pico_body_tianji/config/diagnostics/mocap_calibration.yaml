@@ -1,0 +1,8 @@
+rate_hz: 60.0
+simulation_only: true
+capabilities:
+  - simulation
+active_sides:
+  - right
+motion_profile: keyboard_and_circle
+stale_timeout_s: 0.5

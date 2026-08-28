@@ -1,0 +1,5 @@
+headless: true
+rate_hz: 60.0
+urdf: assets/tianji_wuji2/tianji_wuji2.urdf
+arm_config: robot/arm.yaml
+hand_config: robot/wuji_hand2.yaml

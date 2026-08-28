@@ -1,0 +1,17 @@
+robot_ip: ""
+rate_hz: 90.0
+velocity_ratio: 10
+acceleration_ratio: 10
+host_status_timeout_s: 1.0
+command_timeout_s: 0.15
+state_timeout_s: 1.0
+feedback_timeout_s: 0.15
+maximum_pair_skew_s: 0.03
+maximum_output_step_deg: 0.12308
+maximum_teleop_speed_deg_s: 72.0
+maximum_tracking_error_deg: 8.0
+return_minimum_duration_s: 2.0
+return_max_speed_deg_s: 10.0
+home_tolerance_deg: 1.0
+feedback_hard_limit_padding_deg: 5.0
+arm_config: robot/arm.yaml

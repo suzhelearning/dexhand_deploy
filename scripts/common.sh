@@ -314,49 +314,92 @@ install_teleop_cleanup_traps() {
 find_conflicting_teleop_nodes() {
   local mode="${1:-all}"
   awk -v mode="${mode}" '
+    function role_for(path, parts, n) {
+      n = split(path, parts, "/")
+      if (n < 5 || parts[1] != "tj" || parts[2] != "live") return ""
+      if (parts[3] == "source" && n == 5) return "source"
+      if (parts[3] == "producer" && n == 6 && (parts[4] == "arm" || parts[4] == "hand")) return "producer/" parts[4]
+      if (parts[3] == "coordinator" && n == 6 && parts[4] == "arm") return "coordinator/arm"
+      if (parts[3] == "executor" && n == 6 && (parts[4] == "arm" || parts[4] == "hand")) return "executor/" parts[4]
+      if (parts[3] == "recorder" && n == 5) return "recorder"
+      return ""
+    }
     {
-      host_node = ($0 ~ /^\/(pico_controller_input|pico_controller_only_input|mocap_keyboard_step|mocap_live|mocap_h5_replay|tianji_kinematic_sim)$/)
-      output_node = ($0 ~ /^\/(marvin_hardware_bridge|tianji_world_output_node|tianji_arm_node)$/)
-      if ((mode != "real" && host_node) || output_node) {
-        if (!seen[$0]++) {
-          print $0
-        }
+      role = role_for($0, fields)
+      if (!role) next
+      n = split($0, fields, "/")
+      identity = role "/" fields[n]
+      logical = role "/" fields[4]
+      # One logical component may have only one live instance. Keep the
+      # complete token in the diagnostic so callers cannot collapse domains.
+      if (++instances[logical] > 1) {
+        if (!reported[identity]++) print $0
+      }
+      if (mode == "real" && role == "executor/arm") {
+        real_exec[identity]++
       }
     }
   '
 }
 
+read_router_zid() {
+  local endpoint="${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
+  TIANJI_ROUTER_ENDPOINT="${endpoint}" python - <<'PY'
+import os
+import zenoh
+
+endpoint = os.environ["TIANJI_ROUTER_ENDPOINT"]
+config = zenoh.Config.from_json5(
+    '{"mode":"client","connect":{"endpoints":['
+    + __import__("json").dumps(endpoint)
+    + ']},"scouting":{"multicast":{"enabled":false}}}'
+)
+session = zenoh.open(config)
+try:
+    routers = [str(item) for item in session.info.routers_zid()]
+    if len(routers) != 1 or not routers[0]:
+        raise RuntimeError(f"expected exactly one router ZID, got {len(routers)}")
+    print(routers[0])
+finally:
+    session.close()
+PY
+}
+
 read_teleop_node_list() {
-  if [[ "${PICO_TIANJI_SKIP_ROS_CONFLICT_CHECK:-0}" == "1" ]]; then
-    return 0
-  fi
+  local endpoint="${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
   if [[ -v PICO_TIANJI_NODE_LIST_OVERRIDE ]]; then
     printf '%s\n' "${PICO_TIANJI_NODE_LIST_OVERRIDE}"
     return 0
   fi
-  # Zenoh liveliness 查询 tj/live/*，输出带前导斜杠的节点名（兼容旧检查）。
-  python - <<'PY' 2>/dev/null
+  TIANJI_ROUTER_ENDPOINT="${endpoint}" python - <<'PY'
+import json
+import os
 import time
 import zenoh
 
-names = set()
-session = zenoh.open(zenoh.Config())
+endpoint = os.environ["TIANJI_ROUTER_ENDPOINT"]
+config = zenoh.Config.from_json5(
+    '{"mode":"client","connect":{"endpoints":['
+    + json.dumps(endpoint)
+    + ']},"scouting":{"multicast":{"enabled":false}}}'
+)
+session = zenoh.open(config)
 try:
-    # 不用 callback + “首条回复完成”事件：liveliness GET 可能返回
-    # 多个 token，收到第一条就返回会令真机链路检查随机漏节点。
-    # 分布式发现的单次完整 GET 也可能出现瞬态缺项；连续三次取并集，
-    # 对真机链路采用保守、稳定的完整视图。
-    for attempt in range(3):
-        for reply in session.liveliness().get("tj/live/*", timeout=1.0):
+    routers = [str(item) for item in session.info.routers_zid()]
+    if len(routers) != 1 or not routers[0]:
+        raise RuntimeError(f"expected exactly one router ZID, got {len(routers)}")
+    names = set()
+    for _ in range(3):
+        for reply in session.liveliness().get("tj/live/**", timeout=1.0):
             if reply.ok:
-                name = str(reply.result.key_expr).rsplit("/", 1)[-1]
-                names.add("/" + name)
-        if attempt < 2:
-            time.sleep(0.15)
+                key = str(reply.result.key_expr)
+                if key.startswith("tj/live/"):
+                    names.add(key)
+        time.sleep(0.05)
+    for name in sorted(names):
+        print(name)
 finally:
     session.close()
-for name in sorted(names):
-    print(name)
 PY
 }
 
@@ -364,21 +407,27 @@ assert_no_conflicting_teleop_nodes() {
   local mode="${1:-all}"
   local node_list=""
   local conflicts=""
+  if [[ "${mode}" == "real" && -v PICO_TIANJI_NODE_LIST_OVERRIDE ]]; then
+    printf '%s\n' '拒绝连接真机：真机模式禁止覆盖 live token 列表。' >&2
+    return 1
+  fi
+  if [[ "${mode}" == "real" && "${PICO_TIANJI_SKIP_ROS_CONFLICT_CHECK:-0}" == "1" ]]; then
+    printf '%s\n' '拒绝连接真机：真机模式禁止跳过 live token 检查。' >&2
+    return 1
+  fi
   if [[ "${PICO_TIANJI_SKIP_ROS_CONFLICT_CHECK:-0}" == "1" ]]; then
     return 0
   fi
   if ! node_list="$(read_teleop_node_list)"; then
-    printf '%s\n' \
-      '错误：无法检查遥操作图中的旧控制节点（zenoh liveliness），拒绝启动。' >&2
+    printf '%s\n' '错误：无法检查遥操作 live token，拒绝启动。' >&2
     return 1
   fi
   conflicts="$(find_conflicting_teleop_nodes "${mode}" <<<"${node_list}")"
   if [[ -n "${conflicts}" ]]; then
     printf '%s\n' \
-      '拒绝启动：检测到不受本次任务管理的旧控制节点：' \
-      "${conflicts}" \
-      '请先关闭旧终端、Docker 预览及其他控制程序。' >&2
-      return 1
+      '拒绝启动：同一 logical id 存在多个 live instance：' \
+      "${conflicts}" >&2
+    return 1
   fi
 }
 
@@ -394,135 +443,22 @@ assert_managed_teleop_guard_alive() {
   if [[ -d "${TELEOP_GUARDS_DIR}" ]]; then
     _lock_guard_administration
     if [[ -r "${owner_file}" ]]; then
-      IFS=$'\t' read -r owner_pid owner_ticks owner_mode \
-        < "${owner_file}" || true
+      IFS=$'\t' read -r owner_pid owner_ticks owner_mode < "${owner_file}" || true
     fi
-    if [[ "${owner_mode}" == "${mode}" &&
-          -n "${owner_pid}" &&
-          -n "${owner_ticks}" ]] &&
-       _same_process_is_alive "${owner_pid}" "${owner_ticks}"
-    then
+    if [[ "${owner_mode}" == "${mode}" && -n "${owner_pid}" && -n "${owner_ticks}" ]] &&
+      _same_process_is_alive "${owner_pid}" "${owner_ticks}"; then
       owner_alive=true
     fi
     _unlock_guard_administration
   fi
-
   if [[ "${owner_alive}" != true ]]; then
-    local host_command="pixi run sim"
-    if [[ "${mode}" == "controller-only-simulation" ]]; then
-      host_command="pixi run sim_controller_only"
-    fi
     printf '%s\n' \
       "拒绝连接真机：未检测到新版受管 ${mode} 主机任务。" \
-      "请从同一新版解压包先运行 ${host_command}。" >&2
+      "请先从同一版本运行对应 run_session profile。" >&2
     return 1
   fi
 }
 
-assert_single_simulation_host_chain() {
-  local node_list=""
-  local pico_count=0
-  local ik_count=0
-  if [[ -v PICO_TIANJI_NODE_LIST_OVERRIDE ]]; then
-    printf '%s\n' \
-      '拒绝连接真机：真机模式禁止覆盖 ROS 节点列表。' >&2
-    return 1
-  fi
-  if [[ "${PICO_TIANJI_SKIP_ROS_CONFLICT_CHECK:-0}" == "1" ]]; then
-    printf '%s\n' \
-      '拒绝连接真机：真机模式禁止跳过主机 ROS 链路检查。' >&2
-    return 1
-  fi
-  assert_managed_teleop_guard_alive simulation
-  if ! node_list="$(read_teleop_node_list)"; then
-    printf '%s\n' \
-      '错误：无法检查仿真主机链路，拒绝连接真机。' >&2
-    return 1
-  fi
-  pico_count="$(
-    awk '$0 == "/pico_controller_input" {count++} END {print count + 0}' \
-      <<<"${node_list}"
-  )"
-  ik_count="$(
-    awk '$0 == "/tianji_kinematic_sim" {count++} END {print count + 0}' \
-      <<<"${node_list}"
-  )"
-  if ((pico_count != 1 || ik_count != 1)); then
-    printf '%s\n' \
-      '拒绝连接真机：主机侧必须恰好运行一套 PICO + IK。' \
-      "  当前计数：PICO=${pico_count} IK=${ik_count}" \
-      '请先运行 pixi run sim，并关闭其他旧仿真/遥操作任务。' >&2
-    return 1
-  fi
-}
-
-assert_single_controller_only_simulation_host_chain() {
-  local node_list=""
-  local controller_only_count=0
-  local smpl_count=0
-  local mocap_host_count=0
-  local ik_count=0
-  if [[ -v PICO_TIANJI_NODE_LIST_OVERRIDE ]]; then
-    printf '%s\n' \
-      '拒绝连接真机：真机模式禁止覆盖 ROS 节点列表。' >&2
-    return 1
-  fi
-  if [[ "${PICO_TIANJI_SKIP_ROS_CONFLICT_CHECK:-0}" == "1" ]]; then
-    printf '%s\n' \
-      '拒绝连接真机：真机模式禁止跳过主机 ROS 链路检查。' >&2
-    return 1
-  fi
-  if ! node_list="$(read_teleop_node_list)"; then
-    printf '%s\n' \
-      '错误：无法检查纯手柄仿真主机链路，拒绝连接真机。' >&2
-    return 1
-  fi
-  controller_only_count="$(
-    awk '$0 == "/pico_controller_only_input" {count++} END {print count + 0}' \
-      <<<"${node_list}"
-  )"
-  mocap_host_count="$(
-    awk '$0 == "/mocap_keyboard_step" || $0 == "/mocap_live" || $0 == "/mocap_h5_replay" {count++} END {print count + 0}' \
-      <<<"${node_list}"
-  )"
-  smpl_count="$(
-    awk '$0 == "/pico_controller_input" {count++} END {print count + 0}' \
-      <<<"${node_list}"
-  )"
-  ik_count="$(
-    awk '$0 == "/tianji_kinematic_sim" {count++} END {print count + 0}' \
-      <<<"${node_list}"
-  )"
-  if ((mocap_host_count >= 1)); then
-    # mocap 主机（键盘步进 / 动捕实时位姿 / H5 绝对轨迹）：运行锁为
-    # mocap-replay；输入身份由 host_readiness 分别执行严格契约校验。
-    assert_managed_teleop_guard_alive mocap-replay
-    if ((mocap_host_count != 1 || controller_only_count != 0 ||
-        smpl_count != 0 || ik_count != 1)); then
-      printf '%s\n' \
-        '拒绝连接真机：mocap 主机必须恰好运行一套（步进/实时/H5）+ IK。' \
-        "  当前计数：mocap=${mocap_host_count} 纯手柄=${controller_only_count} SMPL=${smpl_count} IK=${ik_count}" \
-        '请先运行 sim_mocap_step / sim_mocap_live / sim_mocap_h5，并关闭其他仿真任务。' >&2
-      return 1
-    fi
-    return 0
-  fi
-  if ((controller_only_count == 0 && smpl_count == 0)); then
-    printf '%s\n' \
-      '拒绝连接真机：未检测到仿真主机链路。' \
-      '请先运行 sim_mocap_step / sim_mocap_live / sim_mocap_h5（mocap 主机）' \
-      '或 pixi run sim_controller_only（纯手柄主机），并关闭其他仿真任务。' >&2
-    return 1
-  fi
-  if ((controller_only_count != 1 || smpl_count != 0 || ik_count != 1)); then
-    printf '%s\n' \
-      '拒绝连接真机：主机侧必须恰好运行一套纯手柄 + IK。' \
-      "  当前计数：纯手柄=${controller_only_count} SMPL=${smpl_count} IK=${ik_count}" \
-      '请先运行 pixi run sim_controller_only，并关闭其他仿真任务。' >&2
-    return 1
-  fi
-  assert_managed_teleop_guard_alive controller-only-simulation
-}
 
 yaml_params_for() {
   # 用法：yaml_params_for <节点名> <yaml 路径> [urdf_path:=绝对路径 ...]
@@ -555,6 +491,47 @@ for key, value in (section or {}).items():
 for arg in extra:
     print(arg)
 PY
+}
+
+new_instance_id() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen
+  else
+    # uuid4 is generated by the launcher's Python runtime, not by a process
+    # counter; every component receives a unique authority identity.
+    pixi run python -c 'import uuid; print(uuid.uuid4())'
+  fi
+}
+
+router_unavailable_message() {
+  printf '%s\n' \
+    'Zenoh router unavailable; set TIANJI_ROUTER_ENDPOINT and run /home/current/syz/mocap/acquisition: pixi run start-router' >&2
+}
+
+require_router() {
+  local zid
+  if ! zid="$(read_router_zid 2>/dev/null)"; then
+    router_unavailable_message
+    return 1
+  fi
+  [[ -n "${zid}" ]] || {
+    router_unavailable_message
+    return 1
+  }
+  printf '%s\n' "${zid}"
+}
+
+canonical_config() {
+  local relative="$1"
+  local candidate="${BUNDLE_ROOT}/src/pico_body_tianji/config/${relative}"
+  if [[ ! -f "${candidate}" && -n "${PICO_BODY_TIANJI_BUNDLE_ROOT:-}" ]]; then
+    candidate="${PICO_BODY_TIANJI_BUNDLE_ROOT}/runtime/pico_body_tianji/share/pico_body_tianji/config/${relative}"
+  fi
+  if [[ ! -f "${candidate}" ]]; then
+    printf '错误：缺少 canonical config: %s\n' "${relative}" >&2
+    return 1
+  fi
+  printf '%s\n' "${candidate}"
 }
 
 activate_bundle_runtime() {

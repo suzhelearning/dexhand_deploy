@@ -33,7 +33,7 @@ import numpy as np
 
 from ..protocol.messages import SessionState
 from ..sources.common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
-from ..controller_only.mocap_keyboard_step import (
+from .mocap_motion import (
     AXIS_STEPS,
     ArrowKeyParser,
     CircleTrajectorySample,
@@ -41,7 +41,7 @@ from ..controller_only.mocap_keyboard_step import (
     MotiveFrontCircleTrajectory,
     StepAccumulator,
 )
-from ..controller_only.raw_keyboard import X11KeyState, raw_keyboard
+from ..sources.common.keyboard import X11KeyState, raw_keyboard
 from ..sources.common.target_conditioner import TargetConditioningSettings
 from ..sources.common.session_client import SessionClient
 from ..sources.pico_controller.controller_frame import ControllerFrame
@@ -80,9 +80,7 @@ _AXIS_LABELS = {
     "1": "动捕 +x",
     "0": "动捕 -x",
 }
-# 目标整形参数与 mocap 回放/键盘步进一致（1:1 验收/标定模式），
-# 修改时同步 config/mode/controller_only/controller_only_ik.yaml 的
-# mocap_live 段。
+# 目标整形参数与 sources/mocap_live.yaml 一致，用于仿真标定。
 DEFAULT_PARAMETERS = {
     "min_cutoff": 1.2,
     "beta": 0.45,
@@ -833,9 +831,8 @@ class MocapLiveNode:
             "scope": "mocap_live",
             "mapping": "controller_relative_end_pose_conditioned_v1",
             "elbow_constraint": "published_default_zsp_backend_selected",
-            "smpl_used": False,
+            "body_model_used": False,
             "motion_trackers_required": True,
-            "at_safe_home": state == "idle" and at_home,
             "left_rigid_id": self._rigid_ids["left"],
             "right_rigid_id": self._rigid_ids["right"],
             "side": self._side,

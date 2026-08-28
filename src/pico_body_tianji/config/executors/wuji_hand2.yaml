@@ -1,0 +1,4 @@
+mode: retarget
+rate_hz: 60.0
+input_timeout_s: 0.5
+hand_config: robot/wuji_hand2.yaml
