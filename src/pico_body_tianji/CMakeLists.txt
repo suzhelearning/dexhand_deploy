@@ -227,11 +227,13 @@ install(DIRECTORY include/ DESTINATION include)
 install(
   PROGRAMS
     scripts/pico_controller_source
-    scripts/marvin_hardware_bridge
+    scripts/marvin_executor
     scripts/mocap_live
     scripts/mocap_h5_replay
     scripts/mocap_calibration
     scripts/mujoco_joint_viewer.py
+    scripts/mujoco_executor
+    scripts/wuji_hand2_executor
     scripts/arm_command_coordinator
   DESTINATION lib/${PROJECT_NAME}
 )

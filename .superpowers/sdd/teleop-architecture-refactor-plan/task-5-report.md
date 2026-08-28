@@ -1,0 +1,69 @@
+# Task 5 报告：统一 MuJoCo、Marvin、Wuji executor
+
+## 实现
+
+- 新增 `pico_body_tianji.executors.mujoco.MujocoExecutor`：按 arm/Wuji 唯一 config 做 qpos 名称映射与限位 containment 校验，双臂同 tick 接受 canonical rad command，发布 typed arm/hand state 与 executor status，headless control loop 及 SafetyStop 锁存/ack。
+- 新增 `executors.marvin`：`MarvinExecutor`、`MarvinReadiness`、feedback→canonical rad state 适配。连接 gate 区分 source 的 trusted `real` capability 与 arm producer 的 loaded/healthy；fault 只消费 coordinator 新鲜 bounded `returning` command，不再直接跳 Home；feedback stale、state/servo/error、hard limit、tracking error 分支进入 soft-stop。
+- 新增 `config/robot/wuji_hand2.yaml` 与 `WujiHandConfig`，固定 20 joint wire 顺序、rad limits、zero/tolerance；canonical 名称到 legacy URDF `*_finger_*` 名称仅在 adapter 内解析。
+- 新增 Python `WujiHandExecutor`，提供互斥 `direct`/`retarget`，publisher/router/side/sequence/watchdog 校验，invalid input 不刷新 watchdog，return/fault 回零，typed hand state/status，real capability fail-closed 与 SafetyStop same-tick ack/lockout。
+- 将 C++ `wuji_hand2_bridge` 切换到 canonical JSON target/command/state/status/safety topic；direct 模式不声明 command publisher，retarget 模式独占 command publisher；加入 20-joint order/finite/limit、identity、freshness、sequence 与 SafetyStop ack/lockout。
+- 修复旧 Marvin bridge 的 `os` 缺失、`node` 未初始化和 fault-return 直接 Home；旧 readiness connection gate 改为 source 必须 real-capable、producer 只需 loaded/healthy。
+- CMake 安装新增 MuJoCo/Wuji executor wrappers；common source exports 改为 lazy，避免 headless executor 在缺 Pico SDK 时被 optional mapper import 阻塞。
+
+## 实际验证
+
+1. `pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m unittest tests.test_task5_executor_contract'`
+   - 输出：`Ran 8 tests ... OK`
+   - 覆盖双臂同 sequence command、MuJoCo state、Wuji 20-joint config、direct identity/watchdog、retarget 平移不变、Marvin source/producer capability gate、fault-return bounded command、SafetyStop ack/no motion。
+2. `pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m py_compile ...'`
+   - 输出：无错误；覆盖新增 MuJoCo/Marvin/Wuji Python 模块与 CLI。
+3. `pixi run -e ik-build build-ik`
+   - 首次重编暴露 canonical C++ bridge namespace/解析块问题，修复后重新构建成功。
+   - 最终 `pixi run -e ik-build bash -lc 'cmake --build build/ik --target wuji_hand2_bridge -j2'` 输出：`[100%] Built target wuji_hand2_bridge`。
+4. `git diff --check`
+   - 输出为空，检查通过。
+
+## Task 4/Task 3 风险闭合
+
+- Task 4 paired-command baseline：Python MuJoCo/Marvin 按 side 维护 `(instance, sequence)`，左右同 tick sequence 均可接受，不再把第二侧误判 rollback。
+- Task 4 Marvin 构造崩溃：旧入口补齐 `os` 导入并在 finally 前初始化 `node=None`；canonical executor 的 constructor smoke 由 focused tests 覆盖。
+- Task 4 fault-return：canonical/旧 bridge fault 分支只发送 coordinator `mode=returning` 的 bounded command，不合成 direct Home 跳变；缺失/过期 bounded command 时不运动。
+- Task 4 source/producer capability mismatch：Marvin readiness 明确只要求 source `real` capability；producer status 仅要求 ready/healthy，避免把 simulation-only producer 错当 real admission。
+- Task 3 trusted real preflight：Marvin/Wuji real 构造与运行时均要求 `RealCapabilityInput` 或 typed provider，必须满足 speed/yaw/deadman/preflight 全部 predicate；mapping/string 不能伪造 real capability。
+
+## 未完成与 concerns
+
+- 未连接或宣称通过任何实体 Marvin/Wuji；本次只验证 fake hardware/headless 可达路径。急停、servo disable、实体限位、反馈跟踪和设备网络仍需按 Task 9/10 runbook 验收。
+- `run_session` 的 profile authority/token 传递、H5 20-joint real preflight scanner、trusted preflight process provider、full launcher lifecycle 仍由 Task 8/9 接入；本提交的 executor API 已提供 typed input/identity 接口，但没有绕过 launcher 自行生成 authority。
+- C++ Wuji bridge 当前限位常量与 YAML 对齐但尚未在 C++ 侧加载 YAML；Task 8 应将 YAML loader 接入 C++/doctor，确保配置单一事实来源而非保留常量副本。
+- C++ bridge 的 retarget target publisher identity 仍依赖 launcher 传入的 authorized instance；需要 Task 8 profile wiring 明确 source instance 与 hand producer instance 的区分后再进行真实进程验收。
+- 旧 `marvin_hardware_bridge.py`/legacy wrappers 与历史产品入口仍在树中，按计划交给 Task 8/10 clean cutover 删除；本任务没有静默删除跨任务入口。
+- 未运行 project-wide test/full suite、router 进程级 MuJoCo E2E 或物理设备测试；这些不属于本次 focused proof。
+## Round 1 review fixes
+
+- 修复 legacy `HostReadinessGate._base_connection` 被错误删除的问题，并恢复 legacy Marvin 入口的 `router_zid` 注入；新增 canonical `marvin_executor` product wrapper，CMake 不再安装 legacy Marvin wrapper。
+- Marvin `fault_return` 每 tick 先读取并校验最新 feedback，再发送 coordinator bounded returning command；SDK 发送前拒绝 finite 越限和超过 `maximum_output_step_deg` 的跳变，保持 soft-stop 与 fault/timeout 语义分离。
+- MuJoCo 持续刷新 generic status，发布双侧 `HandExecutorStatus`，并把 matching SafetyStop ack 发布到 `tianji/safety/ack/{executor_id}`。
+- Wuji Python 在 returning/fault 先拒绝新输入，强制 authorized publisher instance；SessionState 要求 coordinator identity。C++ Wuji 使用 measured `latest_states()` 发布 hand state，并校验 SessionState coordinator/router/sequence/freshness。
+- round 1 focused 验证：`pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m unittest tests.test_task5_executor_contract'` → `Ran 8 tests ... OK`；`pixi run -e ik-build bash -lc 'cmake --build build/ik --target wuji_hand2_bridge -j2'` → `Built target wuji_hand2_bridge`；新增 Python `py_compile` 与 `git diff --check` 均通过。
+
+仍需明确的 executor-level concern：C++ Wuji 的限位数组与 YAML 数值已对齐，但 C++ 尚未直接加载 YAML；Wuji C++ retarget identity/profile wiring、真实 Zenoh 多进程 headless smoke 和实体设备验收仍未完成，不能宣称物理通过。
+## Round 2 review fixes
+
+- 修复 legacy Marvin `_LOG`/`OUTPUT_STEP_REFERENCE_VELOCITY_RATIO` 缺失、canonical bridge `main()` 与 CMake 安装入口；legacy readiness 的 router 注入和 `_base_connection` 保持可达。
+- Marvin fault-return 保持 feedback-first，并接通 `HardwareSafetyController.observe_command()`、robot hard limits、maximum step 与受控 slew；fault reconnect 使用 fresh bounded returning command，不调用 startup direct Home。
+- MuJoCo 增加 coordinator state/at_home/return_complete query gate；ready 前等待 query replies，control tick 持续刷新 generic status、两侧 `HandExecutorStatus` 与 SafetyStop wire ack。
+- Python Wuji 在 returning/fault 不更新 pending/baseline/watchdog/qpos；强制 authorized publisher UUID，并校验 coordinator identity、state freshness/sequence；retarget 以 producer_hand role/token 发布，direct 只保留 executor role。
+- C++ Wuji 接入 `TIANJI_WUJI_CONFIG` 数组 loader、SafetyStop supervisor/run identity、measured `latest_states()` freshness，measured stale 时锁存 unhealthy/disable；SessionState identity/sequence/freshness、returning/fault input rejection、retarget producer token 与 logical producer/UUID 分离完成。
+- round 2 focused 验证：`pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m py_compile ... && PYTHONPATH=src/pico_body_tianji python -m unittest tests.test_task5_executor_contract && git diff --check'` → `Ran 9 tests ... OK`；`pixi run -e ik-build bash -lc 'cmake --build build/ik --target wuji_hand2_bridge -j2'` → `Built target wuji_hand2_bridge`。
+
+仍未宣称实体设备通过；real launcher/provider、多进程 Zenoh E2E 及物理 feedback/servo 验收仍需后续设备阶段。C++ loader 现要求 launcher 提供 `TIANJI_WUJI_CONFIG`，不会以 fallback 常量伪造配置 authority。
+## Round 3 review fixes
+
+- 补齐 Marvin 每 tick feedback-first 的 `HardwareSafetyController.observe_feedback`、state/command/`decide` 链路，首条输出以 measured baseline 初始化；feedback frame serial 不推进即 fail-closed。fault reconnect 仅在 fresh bounded returning command 下连接，安全锁存不可由同进程 connect 绕过。
+- MuJoCo 增加 per-key coordinator snapshot gate：SessionState/at_home/return_complete 各自等待 query reply 后才 ready，control tick 持续刷新 arm/hand status 与 wire SafetyStop ack。
+- Python Wuji 修正 session/live token 构造与关闭、SessionState coordinator identity/sequence/freshness、idle/returning/fault 输入拒绝，并以 retarget 模式声明 `producer_hand` role/token、direct 模式保持 executor-only。
+- C++ Wuji 使用 `TIANJI_WUJI_CONFIG` loader 而非 hardcoded limits，retarget 输出逐维 finite/limit 复验；SafetyStop 读取 supervisor/run identity并锁存；measured feedback 缺失时 unhealthy/disable；hand status 的 at_zero/tracking_allowed 来自同 tick measured/freshness，logical producer 与 UUID instance 分离。
+- round 3 focused 验证：Python `py_compile` + `tests.test_task5_executor_contract` → `Ran 9 tests ... OK`；C++ `cmake --build build/ik --target wuji_hand2_bridge -j2` → `Built target wuji_hand2_bridge`；`git diff --check` → 空输出。
+
+仍未执行实体设备或完整多进程 Zenoh session 验收；设备/launcher 阶段必须继续使用最新 config、identity 和 preflight，不得以本地 fake 结果代替物理通过。

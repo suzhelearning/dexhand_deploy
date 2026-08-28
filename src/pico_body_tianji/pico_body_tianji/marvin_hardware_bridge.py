@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -41,6 +42,9 @@ from .zenoh_util import (
     require_single_router,
     stamp_now,
 )
+_LOG = logging.getLogger("pico_body_tianji.marvin_hardware_bridge")
+OUTPUT_STEP_REFERENCE_VELOCITY_RATIO = 10
+
 
 DEFAULT_PARAMETERS = {
     "robot_ip": "",
@@ -393,7 +397,21 @@ class MarvinHardwareBridge:
             self._readiness_reason = readiness.reason
             if not readiness.ready:
                 return
-            self._marvin.send_joint_targets(self._left_home, self._right_home)
+            # Fault return consumes only the coordinator's fresh bounded
+            # returning command. Never synthesize a direct Home jump here.
+            commands = getattr(self._readiness, "_commands", {})
+            if set(commands) != {"left", "right"}:
+                self._last_error = "bounded fault-return command missing"
+                return
+            left = commands["left"].value
+            right = commands["right"].value
+            if left.mode != "returning" or right.mode != "returning":
+                self._last_error = "fault-return command must be returning"
+                return
+            self._marvin.send_joint_targets(
+                np.degrees(np.asarray(left.position_rad, dtype=np.float64)),
+                np.degrees(np.asarray(right.position_rad, dtype=np.float64)),
+            )
             self._command_count += 1
             return
         self._observe_tick_timing(time.monotonic())
@@ -727,8 +745,8 @@ def main(args=None) -> int:
         overrides,
     )
     session = open_session()
-    router_zid = require_single_router(session, os.environ.get("TIANJI_ROUTER_ZID"))
     params["router_zid"] = router_zid
+    node = None
     try:
         node = MarvinHardwareBridge(session, params)
         node.run()

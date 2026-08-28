@@ -157,15 +157,17 @@ class HostReadinessGate:
             if command.mode != "idle" or any(abs(x - y) > self._home_tolerance_rad for x, y in zip(command.position_rad, home)):
                 return False
         return True
-
     def _base_connection(self, now_ns: int, required_capability: str) -> HostReadiness:
-        for role in ("source", "producer_arm"):
-            timed = self._components.get(role)
-            if not self._fresh(timed, now_ns):
-                return HostReadiness(False, f"{role} status stale or missing")
-            status = timed.value
-            if not (status.ready and status.healthy and required_capability in status.capabilities):
-                return HostReadiness(False, f"{role} not {required_capability}-capable and healthy")
+        source = self._components.get("source")
+        if not self._fresh(source, now_ns):
+            return HostReadiness(False, "source status stale or missing")
+        if not (source.value.ready and source.value.healthy and required_capability in source.value.capabilities):
+            return HostReadiness(False, f"source not {required_capability}-capable and healthy")
+        producer = self._components.get("producer_arm")
+        if not self._fresh(producer, now_ns):
+            return HostReadiness(False, "producer_arm status stale or missing")
+        if not (producer.value.ready and producer.value.healthy):
+            return HostReadiness(False, "producer_arm not loaded and healthy")
         state = self._session_state
         if not self._fresh(state, now_ns):
             return HostReadiness(False, "coordinator state stale or missing")
@@ -176,6 +178,7 @@ class HostReadinessGate:
         if not self._commands_at_home():
             return HostReadiness(False, "coordinator command is not at Home")
         return HostReadiness(True, "ready")
+
 
     def evaluate_connection(self, *, now_ns: int, required_capability: str = "real") -> HostReadiness:
         decision = self._base_connection(int(now_ns), required_capability)

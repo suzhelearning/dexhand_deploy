@@ -1,0 +1,27 @@
+# Canonical Wuji Hand 2 wire order. Legacy *_finger_* names are resolved only
+# by the MuJoCo/vendor adapter and MUST NOT appear on protocol messages.
+joint_names:
+  - r_thumb_cmc_flex
+  - r_thumb_cmc_abd
+  - r_thumb_mcp
+  - r_thumb_ip
+  - r_index_mcp_flex
+  - r_index_mcp_abd
+  - r_index_pip
+  - r_index_dip
+  - r_middle_mcp_flex
+  - r_middle_mcp_abd
+  - r_middle_pip
+  - r_middle_dip
+  - r_ring_mcp_flex
+  - r_ring_mcp_abd
+  - r_ring_pip
+  - r_ring_dip
+  - r_pinky_mcp_flex
+  - r_pinky_mcp_abd
+  - r_pinky_pip
+  - r_pinky_dip
+lower_limits_rad: [-1.187, -1.484, -1.047, -1.047, -1.047, -0.698, -1.047, -1.047, -1.047, -0.698, -1.047, -1.047, -1.047, -0.698, -1.047, -1.047, -1.047, -0.698, -1.047, -1.047]
+upper_limits_rad: [1.291, 0.698, 1.570, 1.570, 1.570, 0.698, 2.094, 1.570, 1.570, 0.698, 2.094, 1.570, 1.570, 0.698, 2.094, 1.570, 1.570, 0.698, 2.094, 1.570]
+zero_position_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+zero_tolerance_rad: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05]

@@ -1,21 +1,11 @@
-/* wuji_hand2_bridge：Manus 键点 → wuji-sdk retarget → Wuji Hand 2 控制。
+/* Canonical Wuji Hand 2 executor.
  *
- * 数据流（Zenoh，全部无前导斜杠）：
- *   pico_body_sim/{side}_hand/keypoints       ← 主机（H5 回放/动捕）发布
- *       21×3 float32 LE（米，腕部相对，MediaPipe 序）
- *   pico_body_sim/{side}_hand/joint_commands → 本节点发布（retarget 输出，
- *       20×float32 rad，firmware 序；dry-run 与真机一致，供 MuJoCo/诊断用）
- *   pico_body_real/{side}_hand/joint_states  → 本节点发布（真机 joint_states）
- *   pico_body_real/{side}_hand/status        → 本节点发布（JSON 文本）
- *
- * 真机路径（默认）：扫描/连接 wuji2 → 设 effort limit + MIT kp/kd →
- * enable → 等全部在线关节 Enabled → 打开命令通道 → 循环
- * “取最新键点 → retarget → 发送”。无键点帧时保持上一次命令（首帧为零）。
- * --dry-run：跳过硬件，只做 retarget 并发布命令（仿真验收用）。
- *
- * 安全：Ctrl+C 先关闭命令通道再 disable（松开电机）；异常路径同样
- * 保证 disable/disconnect/release。
+ * retarget: tianji/target/hand/{side} -> tianji/command/hand/{side}
+ * direct:   tianji/command/hand/{side} (authorized publisher only)
+ * state/status/safety all use protocol v1 JSON. The executor never publishes
+ * SessionState or an arm/final command authority.
  */
+#include "pico_body_tianji/protocol/json_parser.hpp"
 #include "pico_body_tianji/wuji_hand2/wuji_hand2_control.hpp"
 
 #include <zenoh.hxx>
@@ -24,549 +14,579 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
-#include <cstring>
+#include <cstdlib>
+#include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
-namespace
-{
+namespace pico_body_tianji {
+namespace {
 
-using pico_body_tianji::kWujiJointCount;
-using pico_body_tianji::kWujiKeypointCount;
+using protocol::JsonValue;
+using protocol::StrictJsonParser;
 using pico_body_tianji::WujiHand2Device;
 using pico_body_tianji::WujiRetargeter;
-
-constexpr std::size_t kKeypointBytes = kWujiKeypointCount * 3 * sizeof(float);
-constexpr std::size_t kJointBytes = kWujiJointCount * sizeof(float);
-
+constexpr std::size_t kJointCount = kWujiJointCount;
+constexpr std::size_t kKeypointCount = kWujiKeypointCount;
+constexpr std::int64_t kFreshnessNs = 500000000;
 volatile std::sig_atomic_t g_stop = 0;
-void on_sigint(int)
-{
-  g_stop = 1;
+
+void on_sigint(int) { g_stop = 1; }
+
+std::string env_or(const char *name, const std::string &fallback = {}) {
+  const char *value = std::getenv(name);
+  return value == nullptr ? fallback : std::string(value);
 }
 
-std::string strip_leading_slash(const std::string & ros_topic)
-{
-  return !ros_topic.empty() && ros_topic.front() == '/'
-           ? ros_topic.substr(1)
-           : ros_topic;
+std::int64_t now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-class WujiHand2Bridge
+std::string quote(const std::string &value) {
+  std::ostringstream out;
+  out << '"';
+  for (const char c : value) {
+    if (c == '"' || c == '\\') out << '\\';
+    out << c;
+  }
+  out << '"';
+  return out.str();
+}
+
+template<typename T>
+std::string array_json(const T &values) {
+  std::ostringstream out;
+  out << '[';
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    if (index != 0) out << ',';
+    out << std::setprecision(12) << values[index];
+  }
+  out << ']';
+  return out.str();
+}
+std::array<double, kJointCount> load_yaml_vector(const std::string &path, const std::string &field_name) {
+  std::ifstream input(path);
+  if (!input) throw std::invalid_argument("unable to read Wuji config: " + path);
+  const std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+  const auto start = text.find(field_name + ":");
+  const auto open = start == std::string::npos ? std::string::npos : text.find('[', start);
+  const auto close = open == std::string::npos ? std::string::npos : text.find(']', open);
+  if (open == std::string::npos || close == std::string::npos) throw std::invalid_argument("Wuji config missing " + field_name);
+  std::array<double, kJointCount> values{};
+  std::size_t count = 0;
+  std::size_t cursor = open + 1;
+  while (cursor < close && count < kJointCount) {
+    while (cursor < close && (std::isspace(static_cast<unsigned char>(text[cursor])) || text[cursor] == ',')) ++cursor;
+    if (cursor >= close) break;
+    std::size_t used = 0;
+    const double value = std::stod(text.substr(cursor, close - cursor), &used);
+    if (!std::isfinite(value)) throw std::invalid_argument("Wuji config contains nonfinite value");
+    values[count++] = value;
+    cursor += used;
+  }
+  if (count != kJointCount) throw std::invalid_argument("Wuji config vector must contain 20 values");
+  return values;
+}
+
+std::string side_prefix(const std::string &side) {
+  if (side == "left") return "l_";
+  if (side == "right") return "r_";
+  throw std::invalid_argument("side must be left or right");
+}
+
+struct ParsedTarget {
+  std::string instance;
+  std::string router;
+  std::string source;
+  std::uint64_t sequence{0};
+  std::int64_t timestamp_ns{0};
+  std::array<float, kKeypointCount * 3> keypoints{};
+};
+
+std::array<float, kJointCount> parse_joint_array(
+  const JsonValue &root, const std::string &expected_side,
+  const std::string &expected_producer, const std::string &expected_instance,
+  const std::string &expected_router, const std::string &config_path,
+  std::uint64_t *sequence)
 {
+  protocol::require_exact_fields(root, {
+    "schema_version", "publisher_instance_id", "router_zid", "sequence",
+    "timestamp_ns", "producer", "side", "names", "position_rad"
+  });
+  if (protocol::field(root, "schema_version").as_uint("schema_version") != 1) {
+    throw std::invalid_argument("unsupported hand command schema");
+  }
+  if (protocol::field(root, "publisher_instance_id").as_string("publisher_instance_id") != expected_instance ||
+      protocol::field(root, "router_zid").as_string("router_zid") != expected_router ||
+      protocol::field(root, "producer").as_string("producer") != expected_producer ||
+      protocol::field(root, "side").as_string("side") != expected_side) {
+    throw std::invalid_argument("hand command authority mismatch");
+  }
+  const auto seq = protocol::field(root, "sequence").as_uint("sequence");
+  const auto timestamp = protocol::field(root, "timestamp_ns").as_uint("timestamp_ns");
+  if (timestamp > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::invalid_argument("hand command timestamp outside range");
+  }
+  if (static_cast<std::int64_t>(timestamp) > now_ns() || now_ns() - static_cast<std::int64_t>(timestamp) > kFreshnessNs) {
+    throw std::invalid_argument("hand command is stale");
+  }
+  const auto names = protocol::string_array_field(root, "names", kJointCount);
+  const auto prefix = side_prefix(expected_side);
+  static constexpr std::array<const char *, 20> base_names = {
+    "thumb_cmc_flex", "thumb_cmc_abd", "thumb_mcp", "thumb_ip",
+    "index_mcp_flex", "index_mcp_abd", "index_pip", "index_dip",
+    "middle_mcp_flex", "middle_mcp_abd", "middle_pip", "middle_dip",
+    "ring_mcp_flex", "ring_mcp_abd", "ring_pip", "ring_dip",
+    "pinky_mcp_flex", "pinky_mcp_abd", "pinky_pip", "pinky_dip"};
+  for (std::size_t index = 0; index < kJointCount; ++index) {
+    if (names[index] != prefix + base_names[index]) {
+      throw std::invalid_argument("hand command joint order mismatch");
+    }
+  }
+  const auto position = protocol::vector_field(root, "position_rad", kJointCount);
+  const auto lower = load_yaml_vector(config_path, "lower_limits_rad");
+  const auto upper = load_yaml_vector(config_path, "upper_limits_rad");
+  for (std::size_t index = 0; index < kJointCount; ++index) {
+    if (!std::isfinite(position[index]) || position[index] < lower[index] || position[index] > upper[index]) {
+      throw std::invalid_argument("hand command exceeds finite hard limits");
+    }
+  }
+  std::array<float, kJointCount> result{};
+  for (std::size_t index = 0; index < kJointCount; ++index) {
+    result[index] = static_cast<float>(position[index]);
+  }
+  *sequence = seq;
+  return result;
+}
+
+ParsedTarget parse_target(
+  const std::string &payload, const std::string &expected_side,
+  const std::string &expected_router, const std::string &expected_instance)
+{
+  const auto root = StrictJsonParser::parse(payload);
+  protocol::require_exact_fields(root, {
+    "schema_version", "publisher_instance_id", "router_zid", "sequence",
+    "timestamp_ns", "source_timestamp_ns", "source", "side", "frame_id", "keypoints_m"});
+  if (protocol::field(root, "schema_version").as_uint("schema_version") != 1) {
+    throw std::invalid_argument("unsupported hand target schema");
+  }
+  ParsedTarget result;
+  result.instance = protocol::field(root, "publisher_instance_id").as_string("publisher_instance_id");
+  result.router = protocol::field(root, "router_zid").as_string("router_zid");
+  result.source = protocol::field(root, "source").as_string("source");
+  if (result.router != expected_router || result.instance != expected_instance ||
+      protocol::field(root, "side").as_string("side") != expected_side ||
+      protocol::field(root, "frame_id").as_string("frame_id") != "wrist_relative_mediapipe") {
+    throw std::invalid_argument("hand target identity/frame mismatch");
+  }
+  result.sequence = protocol::field(root, "sequence").as_uint("sequence");
+  const auto timestamp = protocol::field(root, "timestamp_ns").as_uint("timestamp_ns");
+  if (timestamp > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::invalid_argument("hand target timestamp outside range");
+  }
+  result.timestamp_ns = static_cast<std::int64_t>(timestamp);
+  if (result.timestamp_ns > now_ns() || now_ns() - result.timestamp_ns > kFreshnessNs) {
+    throw std::invalid_argument("hand target is stale");
+  }
+  const auto rows = protocol::field(root, "keypoints_m").as_array("keypoints_m");
+  if (rows.size() != kKeypointCount) throw std::invalid_argument("keypoints_m has invalid shape");
+  for (std::size_t row = 0; row < kKeypointCount; ++row) {
+    const auto &values = rows[row].as_array("keypoints_m row");
+    if (values.size() != 3) throw std::invalid_argument("keypoints_m row has invalid shape");
+    for (std::size_t column = 0; column < 3; ++column) {
+      result.keypoints[row * 3 + column] = static_cast<float>(values[column].as_number());
+    }
+  }
+  if (std::abs(result.keypoints[0]) > 1e-8F || std::abs(result.keypoints[1]) > 1e-8F || std::abs(result.keypoints[2]) > 1e-8F) {
+    throw std::invalid_argument("keypoints_m wrist must be zero");
+  }
+  return result;
+}
+
+class WujiHand2Bridge {
 public:
-  struct Params
-  {
-    std::string side = "right";
+  struct Params {
+    std::string side{"right"};
+    std::string mode{"retarget"};
     std::string serial;
     std::string address;
-    bool dry_run = false;
-    float kp = 3.0F;
-    float kd = 0.05F;
-    float effort_limit_amps = 1.5F;
-    float enable_timeout_s = 5.0F;
-    int rate_hz = 100;
-    float hold_timeout_s = 1.0F;
-    float keypoint_timeout_s = 0.5F;
-    float command_slew_rate_rad_s = 1.0F;
-    float tracking_slew_rate_rad_s = 6.0F;
-    float teleop_grace_s = 0.3F;
-    bool log_qpos = false;
-    float rotation_deg[3]{0.0F, 0.0F, 0.0F};
-    std::string keypoints_key = "pico_body_sim/right_hand/keypoints";
-    std::string commands_key = "pico_body_sim/right_hand/joint_commands";
-    std::string states_key = "pico_body_real/right_hand/joint_states";
-    std::string status_key = "pico_body_real/right_hand/status";
-    std::string teleop_state_key = "pico_body/teleop_state";
+    std::string instance;
+    std::string router;
+    std::string authorized_producer;
+    std::string authorized_instance;
+    std::string logical_producer{"wuji_retarget"};
+    std::string run_id;
+    std::string supervisor_instance;
+    std::string coordinator_instance;
+    std::string config_path;
+    bool dry_run{false};
+    int rate_hz{100};
+    float command_slew_rate_rad_s{1.0F};
+    float tracking_slew_rate_rad_s{6.0F};
+    float keypoint_timeout_s{0.5F};
+    float kp{3.0F};
+    float kd{0.05F};
+    float effort_limit_amps{1.5F};
+    float enable_timeout_s{5.0F};
   };
 
-  explicit WujiHand2Bridge(const Params & params) : params_(params) {}
+  WujiHand2Bridge(zenoh::Session &session, Params params)
+  : session_(session), params_(std::move(params)) {}
 
   int run();
 
 private:
-  void on_keypoints(const zenoh::Sample & sample);
-  void on_teleop_state(const zenoh::Sample & sample);
-  void publish_commands(const float qpos[20]);
-  void publish_status(
-    const std::string & phase, bool enabled, double keypoint_age_s,
-    float keypoint_hz, uint8_t online_count, uint32_t online_mask,
-    const std::string & teleop_state, bool tracking_allowed,
-    bool keypoint_timed_out, float command_max_abs);
+  void on_target(const zenoh::Sample &sample);
+  void on_command(const zenoh::Sample &sample);
+  void on_session_state(const zenoh::Sample &sample);
+  void on_safety_stop(const zenoh::Sample &sample);
+  void publish_command(const std::array<float, kJointCount> &values, std::uint64_t sequence);
+  void publish_state(const std::array<float, kJointCount> &values, std::uint64_t sequence);
+  void publish_status(const std::string &error = {});
 
+  zenoh::Session &session_;
   Params params_;
-  zenoh::Session session_{
-    zenoh::Session::open(zenoh::Config::create_default())};
-  std::unique_ptr<zenoh::Publisher> commands_pub_;
-  std::unique_ptr<zenoh::Publisher> states_pub_;
+  std::unique_ptr<zenoh::Publisher> command_pub_;
+  std::unique_ptr<zenoh::Publisher> state_pub_;
   std::unique_ptr<zenoh::Publisher> status_pub_;
-  std::unique_ptr<zenoh::LivelinessToken> liveliness_token_;
-
-  std::mutex kp_mu_;
-  std::array<float, kKeypointBytes / sizeof(float)> latest_kp_{};
-  std::atomic<bool> have_kp_{false};
-  std::chrono::steady_clock::time_point kp_stamp_{};
-  std::chrono::steady_clock::time_point last_kp_received_{};
-  std::atomic<std::uint64_t> kp_frames_{0};
-  std::mutex state_mu_;
-  std::string teleop_state_{"unknown"};
+  std::unique_ptr<zenoh::Publisher> safety_ack_pub_;
+  std::unique_ptr<zenoh::LivelinessToken> live_token_;
+  std::unique_ptr<zenoh::Subscriber<void>> input_sub_;
+  std::unique_ptr<zenoh::Subscriber<void>> state_sub_;
+  std::unique_ptr<zenoh::Subscriber<void>> safety_sub_;
+  std::mutex mutex_;
+  std::array<float, kKeypointCount * 3> keypoints_{};
+  std::array<float, kJointCount> direct_command_{};
+  bool have_target_{false};
+  bool have_direct_{false};
+  std::int64_t input_received_ns_{0};
+  std::uint64_t input_sequence_{0};
+  std::uint64_t last_input_sequence_{0};
+  std::string session_state_{"idle"};
+  bool safety_locked_{false};
+  std::uint64_t last_safety_sequence_{0};
+  std::uint64_t wire_sequence_{0};
+  std::uint64_t status_sequence_{0};
+  std::uint64_t last_session_sequence_{0};
+  std::string last_error_;
+  WujiHand2Device * active_device_{nullptr};
+  std::array<float, kJointCount> measured_{};
+  bool measured_valid_{false};
+  bool tracking_allowed_{false};
 };
 
-int WujiHand2Bridge::run()
-{
-  /* SDK 全局初始化（retarget 会话与设备扫描共用）。 */
-  const WujiInitOptions init_opts{.log_level = 3};
-  if (wuji_init(&init_opts) != WUJI_STATUS_OK) {
-    std::cerr << "wuji_init failed: " << wuji_last_error() << std::endl;
-    return 1;
+void WujiHand2Bridge::on_target(const zenoh::Sample &sample) {
+  try {
+    const auto parsed = parse_target(sample.get_payload().as_string(), params_.side, params_.router, params_.authorized_instance);
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (session_state_ == "returning" || session_state_ == "fault") throw std::invalid_argument("hand target rejected outside teleop");
+    if (parsed.sequence <= last_input_sequence_) throw std::invalid_argument("hand target sequence rollback");
+    keypoints_ = parsed.keypoints;
+    input_received_ns_ = now_ns();
+    input_sequence_ = parsed.sequence;
+    last_input_sequence_ = parsed.sequence;
+    have_target_ = true;
+  } catch (const std::exception &error) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    last_error_ = std::string("target rejected: ") + error.what();
+    have_target_ = false;
   }
+}
 
-  const bool right = params_.side != "left";
-  const int32_t handedness =
-    right ? WUJI_HANDEDNESS_RIGHT : WUJI_HANDEDNESS_LEFT;
-
-  std::string error;
-  WujiRetargeter retargeter(handedness, &error);
-  if (!error.empty()) {
-    std::cerr << "retarget session 创建失败: " << error << std::endl;
-    wuji_shutdown();
-    return 1;
+void WujiHand2Bridge::on_command(const zenoh::Sample &sample) {
+  try {
+    const auto root = StrictJsonParser::parse(sample.get_payload().as_string());
+    std::uint64_t sequence = 0;
+    const auto command = parse_joint_array(root, params_.side, params_.authorized_producer, params_.authorized_instance, params_.router, params_.config_path, &sequence);
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (session_state_ == "returning" || session_state_ == "fault") throw std::invalid_argument("hand command rejected outside teleop");
+    if (sequence <= last_input_sequence_) throw std::invalid_argument("hand command sequence rollback");
+    direct_command_ = command;
+    input_received_ns_ = now_ns();
+    input_sequence_ = sequence;
+    last_input_sequence_ = sequence;
+    have_direct_ = true;
+  } catch (const std::exception &error) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    last_error_ = std::string("command rejected: ") + error.what();
+    have_direct_ = false;
   }
-  retargeter.set_rotation_deg(
-    params_.rotation_deg[0], params_.rotation_deg[1], params_.rotation_deg[2]);
+}
 
-  /* 真机路径。 */
+void WujiHand2Bridge::on_session_state(const zenoh::Sample &sample) {
+  try {
+    const auto root = StrictJsonParser::parse(sample.get_payload().as_string());
+    const auto publisher = protocol::field(root, "publisher_instance_id").as_string("publisher_instance_id");
+    const auto timestamp = protocol::field(root, "timestamp_ns").as_uint("timestamp_ns");
+    const auto sequence = protocol::field(root, "sequence").as_uint("sequence");
+    if (protocol::field(root, "schema_version").as_uint("schema_version") != 1 ||
+        protocol::field(root, "router_zid").as_string("router_zid") != params_.router ||
+        publisher != params_.coordinator_instance ||
+        timestamp > static_cast<std::uint64_t>(now_ns()) ||
+        now_ns() - static_cast<std::int64_t>(timestamp) > kFreshnessNs ||
+        sequence <= last_session_sequence_) {
+      throw std::invalid_argument("session state identity/sequence/freshness mismatch");
+    }
+    last_session_sequence_ = sequence;
+    const auto state = protocol::field(root, "state").as_string("state");
+    if (state != "idle" && state != "teleop" && state != "returning" && state != "fault") throw std::invalid_argument("invalid session state");
+    std::lock_guard<std::mutex> guard(mutex_);
+    session_state_ = state;
+    if (state == "returning" || state == "fault") {
+      have_target_ = false;
+      have_direct_ = false;
+    }
+  } catch (const std::exception &error) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    last_error_ = std::string("session state rejected: ") + error.what();
+  }
+}
+
+void WujiHand2Bridge::on_safety_stop(const zenoh::Sample &sample) {
+  try {
+    const auto root = StrictJsonParser::parse(sample.get_payload().as_string());
+    protocol::require_exact_fields(root, {"schema_version", "publisher_instance_id", "router_zid", "sequence", "timestamp_ns", "run_id", "reason", "latch"});
+    const auto supervisor = protocol::field(root, "publisher_instance_id").as_string("publisher_instance_id");
+    const auto router = protocol::field(root, "router_zid").as_string("router_zid");
+    const auto sequence = protocol::field(root, "sequence").as_uint("sequence");
+    const auto run_id = protocol::field(root, "run_id").as_string("run_id");
+    const auto reason = protocol::field(root, "reason").as_string("reason");
+    if (supervisor != params_.supervisor_instance || router != params_.router || run_id != params_.run_id || !protocol::field(root, "latch").as_bool()) throw std::invalid_argument("safety stop authority mismatch");
+    {
+      std::lock_guard<std::mutex> guard(mutex_);
+      if (sequence <= last_safety_sequence_) throw std::invalid_argument("safety stop sequence rollback");
+      last_safety_sequence_ = sequence;
+      safety_locked_ = true;
+      last_error_ = reason;
+      if (active_device_ != nullptr) active_device_->close();
+    }
+    if (safety_ack_pub_) {
+      const auto timestamp = now_ns();
+      safety_ack_pub_->put(zenoh::Bytes(
+        "{\"schema_version\":1,\"publisher_instance_id\":" + quote(params_.instance) +
+        ",\"router_zid\":" + quote(params_.router) + ",\"sequence\":" +
+        std::to_string(sequence) + ",\"timestamp_ns\":" + std::to_string(timestamp) +
+        ",\"executor_id\":" + quote(params_.instance) + ",\"run_id\":" +
+        quote(params_.run_id) + ",\"latched\":true,\"reason\":" + quote(reason) + "}"));
+    }
+  } catch (const std::exception &error) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    last_error_ = std::string("safety stop rejected: ") + error.what();
+  }
+}
+
+void WujiHand2Bridge::publish_command(const std::array<float, kJointCount> &values, std::uint64_t sequence) {
+  if (!command_pub_) return;
+  static constexpr std::array<const char *, 20> base_names = {
+    "thumb_cmc_flex", "thumb_cmc_abd", "thumb_mcp", "thumb_ip", "index_mcp_flex", "index_mcp_abd", "index_pip", "index_dip", "middle_mcp_flex", "middle_mcp_abd", "middle_pip", "middle_dip", "ring_mcp_flex", "ring_mcp_abd", "ring_pip", "ring_dip", "pinky_mcp_flex", "pinky_mcp_abd", "pinky_pip", "pinky_dip"};
+  const auto prefix = side_prefix(params_.side);
+  std::ostringstream out;
+  out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(params_.instance) << ",\"router_zid\":" << quote(params_.router) << ",\"sequence\":" << sequence << ",\"timestamp_ns\":" << now_ns() << ",\"producer\":" << quote(params_.logical_producer) << ",\"side\":" << quote(params_.side) << ",\"names\":[";
+  for (std::size_t index = 0; index < kJointCount; ++index) { if (index) out << ','; out << quote(prefix + base_names[index]); }
+  out << "],\"position_rad\":" << array_json(values) << '}';
+  command_pub_->put(zenoh::Bytes(out.str()));
+}
+
+void WujiHand2Bridge::publish_state(const std::array<float, kJointCount> &values, std::uint64_t sequence) {
+  if (!state_pub_) return;
+  static constexpr std::array<const char *, 20> base_names = {
+    "thumb_cmc_flex", "thumb_cmc_abd", "thumb_mcp", "thumb_ip", "index_mcp_flex", "index_mcp_abd", "index_pip", "index_dip", "middle_mcp_flex", "middle_mcp_abd", "middle_pip", "middle_dip", "ring_mcp_flex", "ring_mcp_abd", "ring_pip", "ring_dip", "pinky_mcp_flex", "pinky_mcp_abd", "pinky_pip", "pinky_dip"};
+  const auto prefix = side_prefix(params_.side);
+  std::ostringstream out;
+  out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(params_.instance) << ",\"router_zid\":" << quote(params_.router) << ",\"sequence\":" << sequence << ",\"timestamp_ns\":" << now_ns() << ",\"executor\":\"wuji_hand2\",\"side\":" << quote(params_.side) << ",\"names\":[";
+  for (std::size_t index = 0; index < kJointCount; ++index) { if (index) out << ','; out << quote(prefix + base_names[index]); }
+  out << "],\"position_rad\":" << array_json(values) << ",\"velocity_rad_s\":null}";
+  state_pub_->put(zenoh::Bytes(out.str()));
+}
+
+void WujiHand2Bridge::publish_status(const std::string &error) {
+  if (!status_pub_) return;
+  std::lock_guard<std::mutex> guard(mutex_);
+  const auto status_error = error.empty() ? last_error_ : error;
+  const bool healthy = !safety_locked_ && status_error.empty();
+  bool at_zero = measured_valid_;
+  for (const auto value : measured_) at_zero = at_zero && std::isfinite(value) && std::abs(value) <= 0.05F;
+  std::ostringstream out;
+  out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(params_.instance) << ",\"router_zid\":" << quote(params_.router) << ",\"sequence\":" << ++status_sequence_ << ",\"timestamp_ns\":" << now_ns() << ",\"side\":" << quote(params_.side) << ",\"ready\":" << (safety_locked_ ? "false" : "true") << ",\"healthy\":" << (healthy ? "true" : "false") << ",\"at_zero\":" << (at_zero ? "true" : "false") << ",\"tracking_allowed\":" << (tracking_allowed_ && healthy ? "true" : "false") << ",\"error\":" << (status_error.empty() ? "null" : quote(status_error)) << '}';
+  status_pub_->put(zenoh::Bytes(out.str()));
+}
+
+int WujiHand2Bridge::run() {
+  if (params_.instance.empty() || params_.router.empty() || params_.authorized_producer.empty() || params_.authorized_instance.empty()) throw std::invalid_argument("Wuji executor identities are required");
+  if (params_.mode != "direct" && params_.mode != "retarget") throw std::invalid_argument("mode must be direct or retarget");
+  if (params_.rate_hz < 1 || params_.rate_hz > 500) throw std::invalid_argument("rate_hz out of range");
+  const auto hand_key = "tianji/target/hand/" + params_.side;
+  const auto command_key = "tianji/command/hand/" + params_.side;
+  const auto state_key = "tianji/state/hand/" + params_.side;
+  const auto status_key = "tianji/executor/hand/" + params_.side + "/status";
+  const auto state_topic = "tianji/session/state";
+  const auto safety_topic = "tianji/safety/stop";
+  if (params_.mode == "retarget") command_pub_ = std::make_unique<zenoh::Publisher>(session_.declare_publisher(zenoh::KeyExpr(command_key)));
+  state_pub_ = std::make_unique<zenoh::Publisher>(session_.declare_publisher(zenoh::KeyExpr(state_key)));
+  status_pub_ = std::make_unique<zenoh::Publisher>(session_.declare_publisher(zenoh::KeyExpr(status_key)));
+  safety_ack_pub_ = std::make_unique<zenoh::Publisher>(session_.declare_publisher(zenoh::KeyExpr("tianji/safety/ack/" + params_.instance)));
+  state_sub_ = std::make_unique<zenoh::Subscriber<void>>(session_.declare_subscriber(zenoh::KeyExpr(state_topic), [this](const zenoh::Sample &sample) { on_session_state(sample); }, []() {}));
+  safety_sub_ = std::make_unique<zenoh::Subscriber<void>>(session_.declare_subscriber(zenoh::KeyExpr(safety_topic), [this](const zenoh::Sample &sample) { on_safety_stop(sample); }, []() {}));
+  if (params_.mode == "retarget") input_sub_ = std::make_unique<zenoh::Subscriber<void>>(session_.declare_subscriber(zenoh::KeyExpr(hand_key), [this](const zenoh::Sample &sample) { on_target(sample); }, []() {}));
+  else input_sub_ = std::make_unique<zenoh::Subscriber<void>>(session_.declare_subscriber(zenoh::KeyExpr(command_key), [this](const zenoh::Sample &sample) { on_command(sample); }, []() {}));
+  const auto live_key = params_.mode == "retarget"
+    ? "tj/live/producer/hand/" + params_.logical_producer + "/" + params_.instance
+    : "tj/live/executor/hand/" + params_.side + "/" + params_.instance;
+  live_token_ = std::make_unique<zenoh::LivelinessToken>(session_.liveliness_declare_token(zenoh::KeyExpr(live_key)));
+
+  std::unique_ptr<WujiRetargeter> retargeter;
+  if (params_.mode == "retarget") {
+    std::string error;
+    retargeter = std::make_unique<WujiRetargeter>(params_.side == "right" ? WUJI_HANDEDNESS_RIGHT : WUJI_HANDEDNESS_LEFT, &error);
+    if (!error.empty()) throw std::runtime_error("retarget session failed: " + error);
+  }
+  if (params_.dry_run) wuji_init(nullptr);
   std::unique_ptr<WujiHand2Device> device;
   if (!params_.dry_run) {
+    if (wuji_init(nullptr) != WUJI_STATUS_OK) throw std::runtime_error("wuji_init failed");
     device = std::make_unique<WujiHand2Device>();
+    active_device_ = device.get();
     WujiHand2Device::Options options;
-    options.serial = params_.serial;
-    options.address = params_.address;
-    options.kp = params_.kp;
-    options.kd = params_.kd;
-    options.effort_limit_amps = params_.effort_limit_amps;
-    options.enable_timeout_s = params_.enable_timeout_s;
-    if (!device->connect_device(options, &error)) {
-      std::cerr << "连接 Wuji Hand 2 失败: " << error << std::endl;
-      device->close();
-      wuji_shutdown();
-      return 1;
-    }
-    if (!device->enable_and_wait(&error)) {
-      std::cerr << "使能失败: " << error << std::endl;
-      device->close();
-      wuji_shutdown();
-      return 1;
-    }
-    if (!device->open_publisher(&error)) {
-      std::cerr << "打开命令通道失败: " << error << std::endl;
-      device->close();
-      wuji_shutdown();
-      return 1;
-    }
-    printf(
-      "  --- 已使能（在线 %u 关节，mask=0x%08x），命令通道已打开\n",
-      device->online_joint_count(), device->online_mask());
-  } else {
-    printf("  --- dry-run：不连接硬件，仅 retarget 并发布命令。\n");
+    options.serial = params_.serial; options.address = params_.address; options.kp = params_.kp; options.kd = params_.kd; options.effort_limit_amps = params_.effort_limit_amps; options.enable_timeout_s = params_.enable_timeout_s;
+    std::string error;
+    if (!device->connect_device(options, &error) || !device->enable_and_wait(&error) || !device->open_publisher(&error)) throw std::runtime_error("Wuji device setup failed: " + error);
   }
-
-  /* Zenoh 发布/订阅。 */
-  commands_pub_ = std::make_unique<zenoh::Publisher>(
-    session_.declare_publisher(
-      zenoh::KeyExpr(strip_leading_slash(params_.commands_key))));
-  states_pub_ = std::make_unique<zenoh::Publisher>(
-    session_.declare_publisher(
-      zenoh::KeyExpr(strip_leading_slash(params_.states_key))));
-  status_pub_ = std::make_unique<zenoh::Publisher>(
-    session_.declare_publisher(
-      zenoh::KeyExpr(strip_leading_slash(params_.status_key))));
-  liveliness_token_ = std::make_unique<zenoh::LivelinessToken>(
-    session_.liveliness_declare_token(zenoh::KeyExpr("tj/live/wuji_hand2_bridge")));
-  zenoh::Subscriber keypoints_sub = session_.declare_subscriber(
-    zenoh::KeyExpr(strip_leading_slash(params_.keypoints_key)),
-    [this](const zenoh::Sample & sample) { on_keypoints(sample); },
-    []() {});
-  zenoh::Subscriber teleop_state_sub = session_.declare_subscriber(
-    zenoh::KeyExpr(strip_leading_slash(params_.teleop_state_key)),
-    [this](const zenoh::Sample & sample) { on_teleop_state(sample); },
-    []() {});
-
-  publish_status(
-    "zero_hold", !params_.dry_run, 1.0e9, 0.0F,
-    device ? device->online_joint_count() : 0,
-    device ? device->online_mask() : 0,
-    "unknown", false, true, 0.0F);
-  printf(
-    "  --- 桥接运行中（side=%s rate=%dHz dry_run=%s）；订阅 %s\n",
-    params_.side.c_str(), params_.rate_hz, params_.dry_run ? "是" : "否",
-    params_.keypoints_key.c_str());
-  printf(
-    "  --- mediapipe_rotation=(%.1f, %.1f, %.1f) 度\n",
-    params_.rotation_deg[0], params_.rotation_deg[1], params_.rotation_deg[2]);
-
-  const double tick_duration = 1.0 / static_cast<double>(params_.rate_hz);
-  const auto tick_ns =
-    std::chrono::nanoseconds(static_cast<int64_t>(tick_duration * 1.0e9));
+  publish_status();
+  std::array<float, kJointCount> output{};
+  std::array<float, kJointCount> desired{};
+  const auto lower_limits = load_yaml_vector(params_.config_path, "lower_limits_rad");
+  const auto upper_limits = load_yaml_vector(params_.config_path, "upper_limits_rad");
   auto next_tick = std::chrono::steady_clock::now();
-  auto last_status = next_tick;
-
-  float retarget_qpos[20] = {0.0F};
-  float command_qpos[20] = {0.0F};
-  bool have_last_qpos = false;
-  std::string last_control_phase;
-  std::uint64_t command_count = 0;
-  const float max_command_step =
-    params_.command_slew_rate_rad_s / static_cast<float>(params_.rate_hz);
-  const float max_tracking_step =
-    params_.tracking_slew_rate_rad_s / static_cast<float>(params_.rate_hz);
-  auto last_tracking_at = std::chrono::steady_clock::now();
-
   while (!g_stop) {
-    next_tick += tick_ns;
-    const auto now = std::chrono::steady_clock::now();
-    double kp_age_s = 1.0e9;
+    next_tick += std::chrono::nanoseconds(static_cast<std::int64_t>(1.0e9 / params_.rate_hz));
+    bool locked = false, tracking = false;
+    std::string state;
+    std::array<float, kKeypointCount * 3> keypoints{};
     {
-      std::lock_guard<std::mutex> guard(kp_mu_);
-      if (last_kp_received_ != std::chrono::steady_clock::time_point{}) {
-        kp_age_s =
-          std::chrono::duration<double>(now - last_kp_received_).count();
+      std::lock_guard<std::mutex> guard(mutex_);
+      locked = safety_locked_; state = session_state_; keypoints = keypoints_;
+      tracking = !locked && state == "teleop" && now_ns() - input_received_ns_ <= static_cast<std::int64_t>(params_.keypoint_timeout_s * 1.0e9);
+      tracking_allowed_ = tracking;
+      if (params_.mode == "direct" && have_direct_) desired = direct_command_;
+    }
+    if (locked || state == "returning" || state == "fault" || !tracking) desired.fill(0.0F);
+    else if (params_.mode == "retarget") {
+      std::string error;
+      if (!retargeter->step(keypoints.data(), desired.data(), &error)) { desired.fill(0.0F); publish_status(std::string("retarget rejected: ") + error); }
+    }
+    for (std::size_t index = 0; index < kJointCount; ++index) {
+      if (!std::isfinite(desired[index]) || desired[index] < lower_limits[index] || desired[index] > upper_limits[index]) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        desired.fill(0.0F);
+        safety_locked_ = true;
+        tracking_allowed_ = false;
+        last_error_ = "retarget output exceeds Wuji config limits";
+        locked = true;
+        break;
       }
     }
-
-    /* 取最新键点（drain-latest），retarget 结果只缓存，不直接发送。 */
-    {
-      std::lock_guard<std::mutex> guard(kp_mu_);
-      if (have_kp_.load(std::memory_order_relaxed)) {
-        std::string step_error;
-        const bool fresh = retargeter.step(
-          latest_kp_.data(), retarget_qpos, &step_error);
-        if (!fresh) {
-          fprintf(stderr, "retarget step 失败: %s\n", step_error.c_str());
-        } else {
-          have_last_qpos = true;
-          ++kp_frames_;
+    const float step = (tracking ? params_.tracking_slew_rate_rad_s : params_.command_slew_rate_rad_s) / params_.rate_hz;
+    for (std::size_t index = 0; index < kJointCount; ++index) output[index] += std::clamp(desired[index] - output[index], -step, step);
+    if (!locked) {
+      if (device) {
+        std::string error;
+        if (!device->send(output.data(), &error)) {
+          publish_status("device send failed: " + error);
         }
-        have_kp_.store(false, std::memory_order_relaxed);
+        float measured[kJointCount]{};
+        float velocity[kJointCount]{};
+        float effort[kJointCount]{};
+        if (device->latest_states(measured, velocity, effort)) {
+          std::array<float, kJointCount> measured_array{};
+          std::copy(std::begin(measured), std::end(measured), measured_array.begin());
+          publish_state(measured_array, ++wire_sequence_);
+          {
+            std::lock_guard<std::mutex> guard(mutex_);
+            measured_ = measured_array;
+            measured_valid_ = true;
+          }
+        } else {
+          publish_status("measured hand state unavailable");
+          std::lock_guard<std::mutex> guard(mutex_);
+          measured_valid_ = false;
+          tracking_allowed_ = false;
+          safety_locked_ = true;
+          last_error_ = "measured hand state unavailable";
+          device->close();
+        }
+      } else {
+        publish_state(output, ++wire_sequence_);
       }
+      if (params_.mode == "retarget" && tracking) publish_command(output, ++wire_sequence_);
     }
-
-    std::string teleop_state;
-    {
-      std::lock_guard<std::mutex> guard(state_mu_);
-      teleop_state = teleop_state_;
-    }
-    const bool keypoint_timed_out =
-      kp_age_s > static_cast<double>(params_.keypoint_timeout_s);
-    const bool tracking_allowed =
-      teleop_state == "teleop" && have_last_qpos && !keypoint_timed_out;
-    if (tracking_allowed) {
-      last_tracking_at = now;
-    }
-    const double teleop_elapsed_s =
-      std::chrono::duration<double>(now - last_tracking_at).count();
-    /* 短暂离开 teleop（grace 内）保持当前命令：上游状态抖动不再触发
-     * 周期回零；超过 grace 才以回零速率缓速回零。 */
-    const bool holding =
-      !tracking_allowed && teleop_elapsed_s < params_.teleop_grace_s;
-
-    /* teleop 跟踪 retarget；holding 保持；其余缓速回零。 */
-    float command_max_abs = 0.0F;
-    for (std::size_t i = 0; i < kWujiJointCount; ++i) {
-      const float desired = tracking_allowed ? retarget_qpos[i] :
-        (holding ? command_qpos[i] : 0.0F);
-      const float step =
-        tracking_allowed ? max_tracking_step : max_command_step;
-      const float delta = std::clamp(
-        desired - command_qpos[i], -step, step);
-      command_qpos[i] += delta;
-      command_max_abs = std::max(command_max_abs, std::abs(command_qpos[i]));
-    }
-    const std::string control_phase = tracking_allowed ? "tracking" :
-      (holding ? "hold" :
-       (command_max_abs > 1.0e-3F ? "returning_zero" : "zero_hold"));
-    if (control_phase != last_control_phase) {
-      printf(
-        "  --- 手桥 phase=%s teleop_state=%s keypoint_age=%.3fs grace=%.3fs\n",
-        control_phase.c_str(), teleop_state.c_str(), kp_age_s,
-        teleop_elapsed_s);
-      last_control_phase = control_phase;
-    }
-
-    publish_commands(command_qpos);
-    if (device != nullptr) {
-      std::string send_error;
-      if (!device->send(command_qpos, &send_error)) {
-        fprintf(stderr, "发送命令失败: %s\n", send_error.c_str());
-        g_stop = 1;
-      }
-    }
-    ++command_count;
-    if (params_.log_qpos) {
-      std::ostringstream stream;
-      stream << std::fixed << std::setprecision(3) << "[";
-      for (std::size_t i = 0; i < kWujiJointCount; ++i) {
-        stream << (i == 0 ? "" : ",") << command_qpos[i];
-      }
-      stream << "]";
-      printf("  --- qpos: %s\n", stream.str().c_str());
-    }
-
-    /* 真机状态回读。 */
-    if (device != nullptr) {
-      float position[20], velocity[20], effort[20];
-      if (device->latest_states(position, velocity, effort)) {
-        std::vector<std::uint8_t> payload(kJointBytes);
-        std::memcpy(payload.data(), position, kJointBytes);
-        states_pub_->put(std::move(payload));
-      }
-    }
-
-    if (now >= last_status + std::chrono::milliseconds(500)) {
-      const double window = 0.5;
-      const float keypoint_hz =
-        static_cast<float>(kp_frames_.exchange(0) / window);
-      publish_status(
-        control_phase, !params_.dry_run, kp_age_s,
-        keypoint_hz, device ? device->online_joint_count() : 0,
-        device ? device->online_mask() : 0,
-        teleop_state, tracking_allowed, keypoint_timed_out,
-        command_max_abs);
-      last_status = now;
-    }
-
-    const auto target = std::max(next_tick, now);
-    std::this_thread::sleep_until(target);
+    std::this_thread::sleep_until(next_tick);
   }
-
-  printf("  --- 收到停止信号，开始安全关闭...\n");
-  if (device != nullptr) {
-    device->close();
-  }
-  publish_status(
-    "stopped", false, 0.0, 0.0F, 0, 0,
-    "stopped", false, false, 0.0F);
-  wuji_shutdown();
-  printf(
-    "  --- Wuji Hand 2 桥已退出（命令数=%llu）\n",
-    static_cast<unsigned long long>(command_count));
+  if (device) device->close();
+  if (!params_.dry_run) wuji_shutdown();
   return 0;
 }
 
-void WujiHand2Bridge::on_keypoints(const zenoh::Sample & sample)
-{
-  const zenoh::Bytes & payload = sample.get_payload();
-  if (payload.size() != kKeypointBytes) {
-    return;
-  }
-  zenoh::Bytes::Reader reader = payload.reader();
-  std::lock_guard<std::mutex> guard(kp_mu_);
-  const size_t read = reader.read(
-    reinterpret_cast<std::uint8_t *>(latest_kp_.data()), kKeypointBytes);
-  if (read != kKeypointBytes) {
-    return;
-  }
-  kp_stamp_ = std::chrono::steady_clock::now();
-  last_kp_received_ = kp_stamp_;
-  have_kp_.store(true, std::memory_order_relaxed);
-}
-
-void WujiHand2Bridge::on_teleop_state(const zenoh::Sample & sample)
-{
-  const std::string state = sample.get_payload().as_string();
-  if (state.empty()) {
-    return;
-  }
-  std::lock_guard<std::mutex> guard(state_mu_);
-  teleop_state_ = state;
-}
-
-void WujiHand2Bridge::publish_commands(const float qpos[20])
-{
-  std::vector<std::uint8_t> payload(kJointBytes);
-  std::memcpy(payload.data(), qpos, kJointBytes);
-  commands_pub_->put(std::move(payload));
-}
-
-void WujiHand2Bridge::publish_status(
-  const std::string & phase, bool enabled, double keypoint_age_s,
-  float keypoint_hz, uint8_t online_count, uint32_t online_mask,
-  const std::string & teleop_state, bool tracking_allowed,
-  bool keypoint_timed_out, float command_max_abs)
-{
-  std::ostringstream stream;
-  stream << std::fixed << std::setprecision(1);
-  stream << "{\"phase\":\"" << phase
-         << "\",\"enabled\":" << (enabled ? "true" : "false")
-         << ",\"dry_run\":" << (params_.dry_run ? "true" : "false")
-         << ",\"side\":\"" << params_.side << "\""
-         << ",\"rate_hz\":" << params_.rate_hz
-         << ",\"keypoints_age_s\":" << keypoint_age_s
-         << ",\"keypoints_hz\":" << keypoint_hz
-         << ",\"teleop_state\":\"" << teleop_state << "\""
-         << ",\"tracking_allowed\":"
-         << (tracking_allowed ? "true" : "false")
-         << ",\"keypoint_timed_out\":"
-         << (keypoint_timed_out ? "true" : "false")
-         << ",\"command_max_abs_rad\":" << command_max_abs
-         << ",\"joints_online\":" << static_cast<int>(online_count)
-         << ",\"online_mask\":\"0x" << std::hex << std::setw(8)
-         << std::setfill('0') << online_mask << std::dec << "\""
-         << ",\"rotation_deg\":[" << params_.rotation_deg[0] << ","
-         << params_.rotation_deg[1] << "," << params_.rotation_deg[2] << "]}";
-  status_pub_->put(stream.str());
-}
-
 }  // namespace
+void canonical_on_sigint(int signal) { on_sigint(signal); }
+std::string canonical_env_or(const char *name, const std::string &fallback = {}) {
+  return env_or(name, fallback);
+}
+}  // namespace pico_body_tianji
 
-int main(int argc, char ** argv)
-{
-  struct sigaction action;
-  std::memset(&action, 0, sizeof(action));
-  action.sa_handler = on_sigint;
-  sigemptyset(&action.sa_mask);
-  action.sa_flags = 0;
-  if (sigaction(SIGINT, &action, nullptr) != 0) {
-    std::cerr << "sigaction(SIGINT) failed" << std::endl;
-    return 1;
-  }
-
-  WujiHand2Bridge::Params params;
-  bool custom_keys = false;
-  bool explicit_rotation = false;
+int main(int argc, char **argv) {
+  struct sigaction action{};
+  action.sa_handler = pico_body_tianji::canonical_on_sigint;
+  if (sigaction(SIGINT, &action, nullptr) != 0) return 1;
   try {
-    for (int i = 1; i < argc; ++i) {
-      const std::string arg = argv[i];
-      auto require_value = [&]() -> std::string {
-        if (i + 1 >= argc) {
-          throw std::invalid_argument(arg + " 缺少值");
-        }
-        return argv[++i];
-      };
-      if (arg == "--side") {
-        params.side = require_value();
-      } else if (arg == "--serial") {
-        params.serial = require_value();
-      } else if (arg == "--address") {
-        params.address = require_value();
-      } else if (arg == "--kp") {
-        params.kp = std::stof(require_value());
-      } else if (arg == "--kd") {
-        params.kd = std::stof(require_value());
-      } else if (arg == "--effort-limit") {
-        params.effort_limit_amps = std::stof(require_value());
-      } else if (arg == "--enable-timeout") {
-        params.enable_timeout_s = std::stof(require_value());
-      } else if (arg == "--rate") {
-        params.rate_hz = std::stoi(require_value());
-      } else if (arg == "--hold-timeout") {
-        params.hold_timeout_s = std::stof(require_value());
-      } else if (arg == "--keypoint-timeout") {
-        params.keypoint_timeout_s = std::stof(require_value());
-      } else if (arg == "--command-slew-rate") {
-        params.command_slew_rate_rad_s = std::stof(require_value());
-      } else if (arg == "--tracking-slew-rate") {
-        params.tracking_slew_rate_rad_s = std::stof(require_value());
-      } else if (arg == "--teleop-grace-s") {
-        params.teleop_grace_s = std::stof(require_value());
-      } else if (arg == "--rotation-x") {
-        params.rotation_deg[0] = std::stof(require_value());
-        explicit_rotation = true;
-      } else if (arg == "--rotation-y") {
-        params.rotation_deg[1] = std::stof(require_value());
-        explicit_rotation = true;
-      } else if (arg == "--rotation-z") {
-        params.rotation_deg[2] = std::stof(require_value());
-        explicit_rotation = true;
-      } else if (arg == "--keypoints-key") {
-        params.keypoints_key = require_value();
-        custom_keys = true;
-      } else if (arg == "--commands-key") {
-        params.commands_key = require_value();
-        custom_keys = true;
-      } else if (arg == "--states-key") {
-        params.states_key = require_value();
-        custom_keys = true;
-      } else if (arg == "--status-key") {
-        params.status_key = require_value();
-        custom_keys = true;
-      } else if (arg == "--teleop-state-key") {
-        params.teleop_state_key = require_value();
-        custom_keys = true;
-      } else if (arg == "--dry-run") {
-        params.dry_run = true;
-      } else if (arg == "--log-qpos") {
-        params.log_qpos = true;
-      } else if (arg == "-h" || arg == "--help") {
-        printf(
-          "用法: wuji_hand2_bridge [选项]\n"
-          "  --side right|left          手侧（默认 right）\n"
-          "  --kp / --kd / --effort-limit  MIT 增益与电流上限\n"
-          "  --rate N                    命令频率（默认 100 Hz）\n"
-          "  --serial SN / --address HOST:PORT  设备选择\n"
-          "  --dry-run                   不连接硬件（仿真/测试）\n"
-          "  --rotation-x/y/z DEG        mediapipe_rotation\n"
-          "  --keypoints-key / --commands-key / --states-key / --status-key\n"
-          "  --keypoint-timeout S        teleop 键点超时后回零（默认 0.5s）\n"
-          "  --command-slew-rate RAD_S   回零最大速度（默认 1rad/s）\n"
-          "  --tracking-slew-rate RAD_S  跟踪最大速度（默认 6rad/s）\n"
-          "  --teleop-grace-s S          离开 teleop 后保持命令窗口（默认 0.3s）\n"
-          "  --teleop-state-key KEY      idle/teleop/returning 状态话题\n");
-        return 0;
-      } else {
-        std::cerr << "未知参数: " << arg << std::endl;
-        return 2;
-      }
+    pico_body_tianji::WujiHand2Bridge::Params params;
+    for (int index = 1; index < argc; ++index) {
+      const std::string arg = argv[index];
+      const auto value = [&]() -> std::string { if (++index >= argc) throw std::invalid_argument(arg + " needs a value"); return argv[index]; };
+      if (arg == "--side") params.side = value();
+      else if (arg == "--mode") params.mode = value();
+      else if (arg == "--dry-run") params.dry_run = true;
+      else if (arg == "--serial") params.serial = value();
+      else if (arg == "--address") params.address = value();
+      else if (arg == "--rate") params.rate_hz = std::stoi(value());
+      else if (arg == "--keypoint-timeout") params.keypoint_timeout_s = std::stof(value());
+      else if (arg == "--command-slew-rate") params.command_slew_rate_rad_s = std::stof(value());
+      else if (arg == "--tracking-slew-rate") params.tracking_slew_rate_rad_s = std::stof(value());
+      else if (arg == "-h" || arg == "--help") { std::cout << "wuji_hand2_bridge --mode direct|retarget --side left|right [--dry-run]\n"; return 0; }
+      else throw std::invalid_argument("unknown argument: " + arg);
     }
-  } catch (const std::exception & exception) {
-    std::cerr << "参数错误: " << exception.what() << std::endl;
-    return 2;
-  }
-
-  if (params.side != "left" && params.side != "right") {
-    std::cerr << "--side 必须为 left 或 right" << std::endl;
-    return 2;
-  }
-  if (params.rate_hz < 1 || params.rate_hz > 500) {
-    std::cerr << "--rate 超出范围（1..500）" << std::endl;
-    return 2;
-  }
-  if (!(params.keypoint_timeout_s > 0.0F) ||
-      !(params.command_slew_rate_rad_s > 0.0F) ||
-      !(params.tracking_slew_rate_rad_s > 0.0F) ||
-      !(params.teleop_grace_s >= 0.0F)) {
-    std::cerr << "--keypoint-timeout / --command-slew-rate / "
-                 "--tracking-slew-rate 必须为正数，"
-                 "--teleop-grace-s 必须非负"
-              << std::endl;
-    return 2;
-  }
-  /* 未自定义话题时按 side 派生默认值。 */
-  if (!custom_keys) {
-    params.keypoints_key = "pico_body_sim/" + params.side + "_hand/keypoints";
-    params.commands_key = "pico_body_sim/" + params.side + "_hand/joint_commands";
-    params.states_key = "pico_body_real/" + params.side + "_hand/joint_states";
-    params.status_key = "pico_body_real/" + params.side + "_hand/status";
-  }
-  /* Manus 输入按 wuji-retargeting retarget_manus_{left,right}.yaml 的
-   * mediapipe_rotation 默认：右 z=-15°、左 z=+15°；--rotation-* 可覆盖。 */
-  if (!explicit_rotation) {
-    params.rotation_deg[2] = params.side == "right" ? -15.0F : 15.0F;
-  }
-
-  try {
-    WujiHand2Bridge bridge(params);
+    params.instance = pico_body_tianji::canonical_env_or("TIANJI_COMPONENT_INSTANCE_ID");
+    params.router = pico_body_tianji::canonical_env_or("TIANJI_ROUTER_ZID");
+    params.config_path = pico_body_tianji::canonical_env_or("TIANJI_WUJI_CONFIG");
+    params.coordinator_instance = pico_body_tianji::canonical_env_or("TIANJI_COORDINATOR_INSTANCE_ID");
+    params.authorized_producer = pico_body_tianji::canonical_env_or("TIANJI_HAND_PRODUCER_ID");
+    params.authorized_instance = pico_body_tianji::canonical_env_or("TIANJI_HAND_PRODUCER_INSTANCE_ID");
+    params.logical_producer = pico_body_tianji::canonical_env_or("TIANJI_HAND_LOGICAL_PRODUCER_ID", params.mode == "retarget" ? "wuji_retarget" : "h5_direct");
+    params.run_id = pico_body_tianji::canonical_env_or("TIANJI_RUN_ID");
+    params.supervisor_instance = pico_body_tianji::canonical_env_or("TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID");
+    if (params.instance.empty() || params.router.empty() || params.coordinator_instance.empty() || params.config_path.empty() || params.supervisor_instance.empty() || params.run_id.empty()) throw std::invalid_argument("executor, router, coordinator, run and safety identities are required");
+    auto config = zenoh::Config::create_default();
+    config.insert_json5("mode", "\"client\"");
+    config.insert_json5("connect/endpoints", "[\"" + pico_body_tianji::canonical_env_or("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447") + "\"]");
+    zenoh::Session session = zenoh::Session::open(std::move(config));
+    const auto routers = session.get_routers_z_id();
+    if (routers.size() != 1 || routers.front().to_string() != params.router) throw std::runtime_error("expected exactly one router ZID");
+    if (params.authorized_producer.empty() || params.authorized_instance.empty()) throw std::invalid_argument("hand producer identity is required");
+    pico_body_tianji::WujiHand2Bridge bridge(session, std::move(params));
     return bridge.run();
-  } catch (const std::exception & exception) {
-    std::cerr << "wuji_hand2_bridge 失败: " << exception.what() << std::endl;
+  } catch (const std::exception &error) {
+    std::cerr << "wuji_hand2_bridge failed: " << error.what() << std::endl;
     return 1;
   }
 }
