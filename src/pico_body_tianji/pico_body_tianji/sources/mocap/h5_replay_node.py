@@ -43,6 +43,7 @@ from .h5 import (
     MocapRecording,
     compose_pose,
     invert_pose,
+    load_mocap_h5,
     synthetic_reference_pose,
 )
 from ...protocol.messages import ArmSolvedPose, HAND_JOINT_NAMES, ProtocolError
@@ -160,18 +161,32 @@ def validate_h5_hand_real_preflight(
     lower_limits_rad: np.ndarray | None = None,
     upper_limits_rad: np.ndarray | None = None,
 ) -> tuple[bool, str]:
-    """Validate every direct hand frame; never forward-fill real input."""
+    """Validate every direct hand frame against immutable Wuji limits.
+
+    Optional limits are retained only to make an attempted configuration
+    override explicit; values other than the compiled Wuji beta1 authority
+    are rejected rather than trusted.
+    """
     values = np.asarray(joints_rad, dtype=np.float64)
     if values.ndim != 2 or values.shape[1] != 20:
         return False, "wuji2_joints must have shape (N,20)"
     if values.shape[0] == 0 or not np.isfinite(values).all():
         return False, "wuji2_joints must contain finite frames"
-    lower = _HAND_LOWER_RAD if lower_limits_rad is None else np.asarray(lower_limits_rad, dtype=np.float64)
-    upper = _HAND_UPPER_RAD if upper_limits_rad is None else np.asarray(upper_limits_rad, dtype=np.float64)
-    if lower.shape != (20,) or upper.shape != (20,) or not np.isfinite(lower).all() or not np.isfinite(upper).all():
-        return False, "hand limits must be finite 20-vectors"
-    if np.any(lower >= upper):
-        return False, "hand lower limits must be below upper limits"
+    if lower_limits_rad is not None or upper_limits_rad is not None:
+        try:
+            lower_candidate = np.asarray(lower_limits_rad, dtype=np.float64)
+            upper_candidate = np.asarray(upper_limits_rad, dtype=np.float64)
+        except (TypeError, ValueError):
+            return False, "hand limits cannot override Wuji authority"
+        if (
+            lower_candidate.shape != (20,)
+            or upper_candidate.shape != (20,)
+            or not np.allclose(lower_candidate, _HAND_LOWER_RAD, rtol=0.0, atol=1.0e-12)
+            or not np.allclose(upper_candidate, _HAND_UPPER_RAD, rtol=0.0, atol=1.0e-12)
+        ):
+            return False, "hand limits cannot override Wuji authority"
+    lower = _HAND_LOWER_RAD
+    upper = _HAND_UPPER_RAD
     if np.any(values < lower) or np.any(values > upper):
         return False, "wuji2_joints contains values outside hand limits"
     return True, ""
@@ -251,7 +266,7 @@ class MocapH5ReplayNode:
         rate: float = 60.0,
         deadman: X11KeyState | None | object = _CREATE_DEADMAN,
         start_keyboard: bool = True,
-        real_capability: RealCapabilityInput | dict[str, Any] | Any | None = None,
+        real_capability: RealCapabilityInput | Any | None = None,
     ) -> None:
         if not np.isfinite(speed) or speed <= 0.0:
             raise ValueError("speed 必须为正有限数值")
@@ -262,6 +277,11 @@ class MocapH5ReplayNode:
         for field in ("h5_real_preflight_passed", "hand_real_preflight_passed", "real_mode"):
             if not isinstance(params.get(field), bool):
                 raise ValueError(f"{field} must be a YAML boolean")
+        if params["h5_real_preflight_passed"] or params["hand_real_preflight_passed"]:
+            raise ValueError(
+                "H5/hand preflight cannot be supplied by YAML; "
+                "use typed runtime preflight"
+            )
         if not expected_producer_logical_id or not expected_producer_instance_id:
             raise ValueError(
                 "expected producer logical and instance identities are required"
@@ -270,24 +290,21 @@ class MocapH5ReplayNode:
         self._real_capability = real_capability
         if self._real_mode and real_capability is None:
             raise ValueError("real mode requires typed real_capability input")
-        self._external_h5_preflight_ok = params["h5_real_preflight_passed"]
-        self._external_hand_preflight_ok = params["hand_real_preflight_passed"]
+        if real_capability is not None and not (
+            isinstance(real_capability, RealCapabilityInput)
+            or callable(real_capability)
+        ):
+            raise ValueError(
+                "real_capability must be typed runtime input, not YAML mapping"
+            )
         direct_joints = recording.hands["right"].wuji2_joints
         self._h5_joint_preflight_ok = True
         self._h5_joint_preflight_reason = ""
         if direct_joints is not None:
             self._h5_joint_preflight_ok, self._h5_joint_preflight_reason = (
-                validate_h5_hand_real_preflight(
-                    direct_joints,
-                    lower_limits_rad=params.get("hand_lower_limits_rad"),
-                    upper_limits_rad=params.get("hand_upper_limits_rad"),
-                )
+                validate_h5_hand_real_preflight(direct_joints)
             )
-        self._real_preflight_ok = (
-            self._external_h5_preflight_ok
-            and self._external_hand_preflight_ok
-            and self._h5_joint_preflight_ok
-        )
+        self._real_preflight_ok = self._h5_joint_preflight_ok
         if isinstance(right_rigid_id, int):
             if right_rigid_id <= 0:
                 raise ValueError("right_rigid_id 必须为正整数或刚体名")
@@ -572,7 +589,7 @@ class MocapH5ReplayNode:
             return False, "typed real capability input missing"
         try:
             capability = parse_real_capability(self._real_capability)
-        except (TypeError, ValueError) as exc:
+        except Exception as exc:
             return False, str(exc)
         if float(capability.speed) != self._speed:
             return False, "real capability speed does not match configured speed"
@@ -584,6 +601,8 @@ class MocapH5ReplayNode:
             return False, self._h5_joint_preflight_reason or "H5/hand preflight failed"
         if self._deadman is None:
             return False, "deadman unavailable"
+        if self._deadman_error is not None:
+            return False, f"deadman read failed: {self._deadman_error}"
         return True, None
 
     def _on_motive_frame(self, frame: dict[str, Any]) -> None:
@@ -744,7 +763,7 @@ class MocapH5ReplayNode:
             return False
         try:
             pressed = bool(self._deadman.is_pressed())
-        except RuntimeError as exc:
+        except Exception as exc:
             message = str(exc)
             if message != self._deadman_error:
                 self._deadman_error = message
@@ -1378,6 +1397,11 @@ class MocapH5ReplayNode:
             self._publish_state("teleop")
             if self._phase == "approaching":
                 pressed = self._read_deadman()
+                if self._real_mode and self._deadman_error is not None:
+                    self._last_error = f"deadman read failed: {self._deadman_error}"
+                    self._begin_return(exit_after_return=False)
+                    self._publish_state("returning")
+                    return True
                 if pressed:
                     if not self._map_right_pose(self._frame_zero_pose):
                         return True
@@ -1398,6 +1422,11 @@ class MocapH5ReplayNode:
 
             if self._phase == "ready":
                 self._deadman_pressed = self._read_deadman()
+                if self._real_mode and self._deadman_error is not None:
+                    self._last_error = f"deadman read failed: {self._deadman_error}"
+                    self._begin_return(exit_after_return=False)
+                    self._publish_state("returning")
+                    return True
                 self._publish_cached_targets()
                 return True
 
@@ -1408,6 +1437,11 @@ class MocapH5ReplayNode:
                     self._begin_return(exit_after_return=False)
                     return True
                 pressed = self._read_deadman()
+                if self._real_mode and self._deadman_error is not None:
+                    self._last_error = f"deadman read failed: {self._deadman_error}"
+                    self._begin_return(exit_after_return=False)
+                    self._publish_state("returning")
+                    return True
                 elapsed_hold_s = clock.update(now, pressed)
                 source_elapsed_s = min(
                     self._trajectory.duration_s,

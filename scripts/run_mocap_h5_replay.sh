@@ -291,7 +291,7 @@ if [[ "${WITH_MUJOCO}" == true ]]; then
   viewer_arguments=(--urdf "${VIEWER_URDF_PATH}")
   if [[ "${SHOW_FRAME_ZERO_SKELETON}" == true ]]; then
     viewer_arguments+=(
-      --frame0-skeleton-topic /pico_body_sim/frame0_hand_skeleton
+      --frame0-skeleton-topic tianji/diagnostics/h5/frame0_hand_skeleton
     )
   fi
   if [[ "${WITH_HAND_COMMAND_VIEW}" == true ]]; then

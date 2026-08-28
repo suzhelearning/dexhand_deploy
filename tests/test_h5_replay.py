@@ -123,14 +123,23 @@ class H5CanonicalLifecycleTest(unittest.TestCase):
                     "coordinator-instance", "router-zid",
                 ).to_dict()).encode())
                 node._on_motive_frame({
+                    "schema_version": 1,
                     "frame_number": 1,
+                    "motive_timestamp": 1.0,
+                    "publisher_received_time_ns": 1,
+                    "coordinate_system": "motive_x_forward_z_up_right_handed",
+                    "unit": "meter",
+                    "publisher_dropped_frames": 0,
+                    "markers": [],
                     "rigid_bodies": [{
-                        "id": 7, "tracking_valid": True,
+                        "id": 7,
+                        "tracking_valid": True,
                         "position": [0.0, 0.0, 0.0],
                         "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+                        "mean_error": 0.0,
                     }],
                 })
-                node._on_rigid_body_names({"7": "tianji_wrist"})
+                node._on_rigid_body_names({"names": {"7": "tianji_wrist"}})
                 node._on_key("s")
                 self.assertEqual(node._phase, "start_pending")
                 self.assertNotIn(topics.arm_target("right"), session.publishers)

@@ -186,3 +186,50 @@ git diff --check
 ```
 
 `tests/test_pico_link_probe.py` 已按批准 clean-cutover 删除；其旧 `full_body` imports 在本轮前即不可解析，不保留兼容 alias。未完成/风险：未运行 full suite、真实 Zenoh router、多进程 launcher、C++/Task 4-8 consumer 与实体设备验收；现有 wrapper 仍含后续 Task 8 的旧 runtime 启动段，需后续统一 session launcher 做最终 clean cutover。当前状态仍为 DONE_WITH_CONCERNS。
+## Fix round 5（最终 source 契约修复）
+
+本轮先按要求新增行为测试并确认 RED：
+
+```text
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_task3_round4
+Ran 17 tests ... FAILED (failures=6, errors=4)
+```
+
+RED 具体暴露 H5 `load_mocap_h5` 未导入、PICO `self.start()` 缺失、完整 Motive envelope 被拒绝、非单位 Home 朝向右乘、deadman 错误仍可声明 real、H5 limits 可被覆盖、YAML capability 可自报、SessionClient 旧 query 误标 invalid 以及 calibration `SessionState` 未导入。
+
+已完成修复：
+
+- 恢复 H5 `load_mocap_h5` import，恢复 PICO 正式 `start()`（SessionClient subscriber/query + 初始 status），补充两条入口 smoke。
+- Motive parser 按 acquisition NatNet envelope 的完整顶层/marker/rigid-body schema 严格校验；拒绝错误 schema、bool/string/float rigid id、重复 canonical id/name、非 finite/非单位 quaternion；H5 与 calibration 只使用 typed `MotiveFrame`。
+- live orientation 使用 world→Base 共轭后的 Base delta 左乘 Home，增加非单位 Home、非交换轴测试。
+- real admission 只接收 typed `RealCapabilityInput`/provider；YAML preflight 与 capability 不再生效；H5 direct 全量 20-joint finite/固定 Wuji beta1 limits 扫描不可被配置覆盖；deadman 任意读取异常锁存错误并 bounded return。
+- SessionClient 将 subscriber 领先的旧 query 视为该 channel 已完成而不 invalid；维持 foreign/multiple authority fail-closed，使用全局 `(publisher_instance, sequence)` baseline，reconnect 清理 identity/baseline/invalid 后重新 query。
+- calibration callback 导入 `SessionState` 并只消费 typed Motive；Frame0 viewer 默认和 H5 wrapper 均切换 canonical `tianji/diagnostics/h5/frame0_hand_skeleton`；测试入口纳入新增 H5 regression。
+- 新增 `tests/test_mocap_h5_replay.py`，保留 geometry/deadman/direct/terminal/viewer 回归；修正 diagnostics typed frame fixture。
+
+Fix round 5 focused GREEN：
+
+```text
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest \
+  tests.test_task3_round4 tests.test_canonical_sources tests.test_h5_replay \
+  tests.test_mocap_h5_replay tests.test_mocap_h5 tests.test_mocap_keyboard_step
+Ran 77 tests in 0.207s
+OK
+
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m py_compile \
+  src/pico_body_tianji/pico_body_tianji/sources/common/real_admission.py \
+  src/pico_body_tianji/pico_body_tianji/sources/common/session_client.py \
+  src/pico_body_tianji/pico_body_tianji/sources/mocap/motive.py \
+  src/pico_body_tianji/pico_body_tianji/sources/mocap/live_node.py \
+  src/pico_body_tianji/pico_body_tianji/sources/mocap/h5_replay_node.py \
+  src/pico_body_tianji/pico_body_tianji/sources/pico_controller/node.py \
+  src/pico_body_tianji/pico_body_tianji/diagnostics/mocap_calibration_node.py \
+  src/pico_body_tianji/scripts/mujoco_joint_viewer.py \
+  tests/test_task3_round4.py tests/test_mocap_h5_replay.py
+# 无输出，退出码 0
+
+git diff --check
+# 无输出，退出码 0
+```
+
+仍未完成/不在本轮范围：真实 Zenoh router 多进程 query/reconnect、Task 4 coordinator/IK producer、Task 5 executor/实体设备、Task 8 统一 launcher/runtime clean-cutover；历史 full H5 1035 行测试未原样恢复，但 geometry/deadman/direct/terminal/viewer 关键回归已迁移至 `tests/test_mocap_h5_replay.py`。本轮未运行 formatter、lint、full suite、跨语言构建或物理验收。

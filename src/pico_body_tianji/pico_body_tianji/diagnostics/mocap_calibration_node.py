@@ -31,6 +31,7 @@ import time
 
 import numpy as np
 
+from ..protocol.messages import SessionState
 from ..sources.common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
 from ..controller_only.mocap_keyboard_step import (
     AXIS_STEPS,
@@ -344,31 +345,10 @@ class MocapLiveNode:
                 RIGID_BODY_NAMES_KEY,
             )
         return None
-
-    def _side_pose(self, frame: MotiveFrame | dict, side: str) -> np.ndarray | None:
-        """取 typed MotiveFrame 的单侧位姿（字典仅供旧单元夹具使用）。"""
+    def _side_pose(self, frame: MotiveFrame, side: str) -> np.ndarray | None:
+        """取已严格校验的 typed MotiveFrame 单侧位姿。"""
         rigid_id = self._resolve_rigid_id(side)
-        if isinstance(frame, MotiveFrame):
-            return None if rigid_id is None else frame.rigid_pose(rigid_id)
-        if not isinstance(frame, dict) or rigid_id is None:
-            return None
-        for body in frame.get("rigid_bodies", []):
-            if not isinstance(body, dict) or body.get("id") != rigid_id:
-                continue
-            if body.get("tracking_valid") is not True:
-                return None
-            values = np.asarray(
-                list(body.get("position", ())) + list(body.get("quaternion_xyzw", ())),
-                dtype=np.float64,
-            )
-            if values.shape != (7,) or not np.isfinite(values).all():
-                return None
-            norm = float(np.linalg.norm(values[3:]))
-            if not 0.999 <= norm <= 1.001:
-                return None
-            values[3:] /= norm
-            return values
-        return None
+        return None if rigid_id is None else frame.rigid_pose(rigid_id)
 
     # raw 模式终端无 echo；按键事件实时回显到 stdout。
     _ECHO_SYMBOLS = {
@@ -814,7 +794,7 @@ class MocapLiveNode:
         age_s = None if frame is None else max(0.0, now - received_at)
         frame_fresh = age_s is not None and age_s <= _FRAME_STALE_S
         frame_number = (
-            frame.get("frame_number") if isinstance(frame, dict) else None
+            frame.frame_number if isinstance(frame, MotiveFrame) else None
         )
         tracking: dict[str, bool] = {}
         motive_pose: dict[str, dict[str, object]] = {}

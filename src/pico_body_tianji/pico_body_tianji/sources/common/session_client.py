@@ -74,12 +74,9 @@ class SessionClient:
         self._at_home: LatchedBool | None = None
         self._return_complete: LatchedBool | None = None
         self._coordinator_identity: str | None = None
-        # Coordinator sequence is publisher-instance global, not per topic.
-        # A control tick may publish state and both latches with one sequence,
-        # so the same sequence is accepted once per channel but never rolls
-        # back globally.
-        self._coordinator_sequence_baseline = -1
-        self._accepted_coordinator_messages: set[tuple[str, int]] = set()
+        # Authority ordering is global across state and both latch keys.
+        self._coordinator_sequence_baseline: tuple[str, int] | None = None
+        self._accepted_coordinator_messages: set[tuple[str, str, int]] = set()
         self._pending_action: str | None = None
         self._pending_intent_sequence: int | None = None
         self._pending_deadline = 0.0
@@ -196,7 +193,7 @@ class SessionClient:
             self._at_home = None
             self._return_complete = None
             self._coordinator_identity = None
-            self._coordinator_sequence_baseline = -1
+            self._coordinator_sequence_baseline = None
             self._accepted_coordinator_messages.clear()
             self._query_complete = {
                 "state": False,
@@ -337,12 +334,13 @@ class SessionClient:
         elif self._coordinator_identity != instance:
             self._invalid_coordinator = True
             return False
-        if sequence < self._coordinator_sequence_baseline:
+        baseline = self._coordinator_sequence_baseline
+        if baseline is not None and sequence < baseline[1]:
             return False
-        if sequence > self._coordinator_sequence_baseline:
-            self._coordinator_sequence_baseline = sequence
+        if baseline is None or sequence > baseline[1]:
+            self._coordinator_sequence_baseline = (instance, sequence)
             self._accepted_coordinator_messages.clear()
-        token = (f"{origin}:{channel}", sequence)
+        token = (origin, channel, sequence)
         if token in self._accepted_coordinator_messages:
             return False
         self._accepted_coordinator_messages.add(token)
@@ -375,8 +373,12 @@ class SessionClient:
                     self._pending_action = None
                     self._pending_intent_sequence = None
                 self._state_event.set()
+            # A query snapshot can legitimately be older than a subscriber
+            # event received after declaration.  It still completes this
+            # channel; only an actual authority/parse error invalidates it.
+            query_valid = not self._invalid_coordinator
         if query_channel is not None:
-            self._mark_query(query_channel, success=accepted)
+            self._mark_query(query_channel, success=query_valid)
         return accepted
 
     def _on_latched_payload(
@@ -405,8 +407,9 @@ class SessionClient:
                     self._at_home = latch
                 else:
                     self._return_complete = latch
+            query_valid = not self._invalid_coordinator
         if query_channel is not None:
-            self._mark_query(query_channel, success=accepted)
+            self._mark_query(query_channel, success=query_valid)
         return accepted
 
     def _authorized_state(self, state: str, action: str) -> bool:

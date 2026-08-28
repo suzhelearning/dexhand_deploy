@@ -121,6 +121,7 @@ class PicoControllerSource:
         self._return_deadline = 0.0
         self._return_timed_out = False
         self._closed = False
+        self._started = False
     @property
     def phase(self) -> str:
         return self._phase
@@ -267,9 +268,16 @@ class PicoControllerSource:
             },
         )
 
+    def start(self) -> None:
+        """Declare coordinator subscribers before entering the control loop."""
+        if getattr(self, "_started", False):
+            raise RuntimeError("PicoControllerSource already started")
+        self._session_client.start()
+        self._started = True
+        self._publish_status()
+
     def run(self) -> int:
         self.start()
-        interval = 1.0 / self._rate
         next_tick = time.monotonic()
         while not self._closed:
             now = time.monotonic()

@@ -62,14 +62,19 @@ class RealCapabilityInput:
 
 
 def parse_real_capability(value: Any) -> RealCapabilityInput:
-    """Parse a capability or provider result without coercion."""
+    """Parse only a typed runtime preflight result, never YAML data.
+
+    Launch configuration may request real mode, but it cannot manufacture the
+    safety result.  A provider callback is allowed for live re-evaluation and
+    must return the typed dataclass on every sample.
+    """
     if callable(value):
         value = value()
     if isinstance(value, RealCapabilityInput):
         return value
-    if isinstance(value, Mapping):
-        return RealCapabilityInput.from_mapping(value)
-    raise ValueError("real capability must be RealCapabilityInput or mapping")
+    raise ValueError(
+        "real capability must be a RealCapabilityInput or a provider returning one"
+    )
 
 
 __all__ = ["RealCapabilityInput", "parse_real_capability"]

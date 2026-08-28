@@ -6,6 +6,7 @@ import unittest
 
 import numpy as np
 
+from pico_body_tianji.sources.mocap.motive import MotiveFrameSource
 from pico_body_tianji.sources.pico_controller.controller_frame import ControllerFrame
 from pico_body_tianji.sources.common.target_mapper import EndEffectorTargetMapper
 from pico_body_tianji.controller_only.mocap_keyboard_step import (
@@ -589,17 +590,27 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
     def test_status_contains_live_motive_pose_and_valid_idle_state(self) -> None:
         node = self._node()
         node._frame_lock = threading.Lock()
-        node._latest_frame = {
-            "frame_number": 42,
-            "rigid_bodies": [
-                {
-                    "id": 10,
-                    "position": [0.41, -0.12, 0.28],
-                    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
-                    "tracking_valid": True,
-                }
-            ],
-        }
+        node._latest_frame = MotiveFrameSource().parse(
+            {
+                "schema_version": 1,
+                "frame_number": 42,
+                "motive_timestamp": 42.0,
+                "publisher_received_time_ns": 42,
+                "coordinate_system": "motive_x_forward_z_up_right_handed",
+                "unit": "meter",
+                "publisher_dropped_frames": 0,
+                "markers": [],
+                "rigid_bodies": [
+                    {
+                        "id": 10,
+                        "position": [0.41, -0.12, 0.28],
+                        "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+                        "mean_error": 0.0,
+                        "tracking_valid": True,
+                    }
+                ],
+            }
+        )
         node._latest_received_monotonic = time.monotonic()
         node._rigid_body_names = {}
         node._missing_rigid_warned = set()

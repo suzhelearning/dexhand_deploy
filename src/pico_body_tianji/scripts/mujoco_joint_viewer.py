@@ -751,8 +751,8 @@ def _parse_args():
                 "help": "JointState JSON 输入话题",
             },
             "--frame0-skeleton-topic": {
-                "default": "",
-                "help": "frame0 手部 21 点/20 骨段目标话题；空值禁用",
+                "default": topics.FRAME0_HAND_SKELETON,
+                "help": "canonical frame0 手部 21 点/20 骨段目标话题；空值禁用",
             },
             "--hand-commands-topic": {
                 "default": "",

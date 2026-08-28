@@ -160,6 +160,11 @@ class MocapLiveNode:
         for field in ("real_preflight_passed", "real_mode"):
             if not isinstance(params[field], bool):
                 raise ValueError(f"{field} must be a YAML boolean")
+        if params["real_preflight_passed"]:
+            raise ValueError(
+                "real_preflight_passed cannot be supplied by YAML; "
+                "use typed runtime preflight"
+            )
         self._real_mode = params["real_mode"]
         self._speed = float(params["speed"])
         self._yaw_deg = float(params["yaw_deg"])
@@ -167,10 +172,15 @@ class MocapLiveNode:
             raise ValueError("speed must be positive and finite")
         if not np.isfinite(self._yaw_deg):
             raise ValueError("yaw_deg must be finite")
-        if real_capability is None:
-            real_capability = params.get("real_capability")
         if self._real_mode and real_capability is None:
             raise ValueError("real mode requires typed real_capability input")
+        if real_capability is not None and not (
+            isinstance(real_capability, RealCapabilityInput)
+            or callable(real_capability)
+        ):
+            raise ValueError(
+                "real_capability must be typed runtime input, not YAML mapping"
+            )
         self._real_capability = real_capability
         self._real_capability_error: str | None = None
         if set(active_sides) not in ({"left"}, {"right"}, {"left", "right"}):
@@ -369,7 +379,7 @@ class MocapLiveNode:
             )
             position = home[:3] + world_to_base @ (current[:3] - reference[:3])
             orientation = (
-                Rotation.from_quat(home[3:]) * delta_base
+                delta_base * Rotation.from_quat(home[3:])
             ).as_quat()
             poses[side] = np.concatenate((position, orientation))
         return self._mapper.map_absolute_tcp_poses(poses["left"], poses["right"])
@@ -381,7 +391,7 @@ class MocapLiveNode:
             return False, "typed real capability input missing"
         try:
             capability = parse_real_capability(self._real_capability)
-        except (TypeError, ValueError) as exc:
+        except Exception as exc:
             return False, str(exc)
         if float(capability.speed) != self._speed:
             return False, "real capability speed does not match configured speed"
