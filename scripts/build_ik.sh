@@ -28,11 +28,13 @@ ik_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_kinematic_sim"
 probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_probe"
 worker_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_worker"
 qp_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/pinocchio_qp_ik_probe"
+wuji_bridge_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/wuji_hand2_bridge"
 for binary in \
   "${ik_binary}" \
   "${probe_binary}" \
   "${worker_binary}" \
-  "${qp_probe_binary}"
+  "${qp_probe_binary}" \
+  "${wuji_bridge_binary}"
 do
   if [[ ! -x "${binary}" ]]; then
     printf '错误：编译产物不存在：%s\n' "${binary}" >&2
@@ -63,7 +65,11 @@ runtime_glibcxx_max="$(
     sort -V |
     tail -n 1
 )"
-for binary in "${ik_binary}" "${probe_binary}" "${worker_binary}"; do
+for binary in \
+  "${ik_binary}" \
+  "${probe_binary}" \
+  "${worker_binary}" \
+  "${wuji_bridge_binary}"; do
   needed_glibc="$(
     objdump -T "${binary}" |
       grep '\*UND\*' |
@@ -112,7 +118,4 @@ if ! nm -C "${ik_binary}" | grep -F 'PinocchioQpArmIk' >/dev/null; then
   exit 1
 fi
 
-printf 'IK 编译完成：%s\n' "${ik_binary}"
-printf '官方 IK probe：%s\n' "${probe_binary}"
-printf '官方 IK worker：%s\n' "${worker_binary}"
-printf 'Pinocchio QP probe：%s\n' "${qp_probe_binary}"
+printf 'wuji2 手桥：%s\n' "${wuji_bridge_binary}"

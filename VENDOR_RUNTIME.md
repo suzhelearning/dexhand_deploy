@@ -9,6 +9,14 @@
 - 已在真机通过 `DEMO_PYTHON/showcase_position.py` 验证的
   `SDK_PYTHON/fx_robot.py`、`DCSS` 和同目录 `libMarvinSDK.so`。
 
+Wuji Hand 2 使用固定版本 wuji-sdk C 库：`vendor/wuji-sdk/`。
+来源仓库 `/home/current/syz/wuji-sdk`，commit `4b4e59c`，release
+`v2026.8.17`（#21）；vendor 内容来自该 release 的 x86_64-linux-gnu
+C SDK tarball（`include/wuji_sdk.h` + `lib/libwuji_sdk_c.so`），随包
+SHA256 校验。手部真机桥
+`wuji_hand2_bridge` 直接链接该库；`vendor/wuji-sdk` 由打包脚本固定
+版本，目标机依赖系统自带的 `libudev.so.1` / `libcap.so.2`。
+
 项目内 `vendor/marvin_sdk` 是从
 `/home/boen/tianji/TJ_FX_ROBOT_CONTRL_SDK-master/SDK_PYTHON` 原样固定
 的已验证控制 SDK，同时供 ROS 安装与 Pixi 包使用。也可在打包时通过

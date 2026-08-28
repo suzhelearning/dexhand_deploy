@@ -69,6 +69,8 @@ SOLVED_POSE_KEY = "pico_body_sim/right_arm/solved_pose"
 MOCAP_FRAME_KEY = "mocap/hands/frame"
 RIGID_BODY_NAMES_KEY = "mocap/rigid_body_names"
 FRAME_ZERO_SKELETON_KEY = "pico_body_sim/frame0_hand_skeleton"
+HAND_KEYPOINTS_KEY = "pico_body_sim/right_hand/keypoints"
+HAND_JOINT_COMMANDS_KEY = "pico_body_sim/right_hand/joint_commands"
 
 _S_DEBOUNCE_S = 0.5
 _SOLVED_STALE_S = 0.5
@@ -119,9 +121,10 @@ DEFAULT_PARAMETERS = {
     "right_tcp_to_mount_quaternion_xyzw": [
         0.7071067811865476, 0.7071067811865476, 0.0, 0.0
     ],
-    # H5 Manus wrist(H) -> wuji2 r_wrist(B)：两者原点都是 wrist。
-    # H +x 指尖、+y 手背、+z 小拇指侧；
-    # B -z 指尖、-y 手背、+x 拇指侧。
+    # H5 wrist quaternion 是采集端已标定的 wrist 局部系 W；21 点几何验证：
+    # W +x=指尖，W +y=手背，W +z=小指。axis_transform 只把 Manus
+    # 节点偏移表达进 W，不能再次乘进 wrist pose，否则会多转 90°。
+    # wuji B: -z=指尖，-y=手背，+x=拇指，因此 W->B xyzw 如下。
     "right_h5_wrist_to_wuji2_wrist_translation_m": [0.0, 0.0, 0.0],
     "right_h5_wrist_to_wuji2_wrist_quaternion_xyzw": [
         0.7071067811865476, 0.0, -0.7071067811865476, 0.0
@@ -246,6 +249,17 @@ class MocapH5ReplayNode:
             ],
             yaw_deg,
         )
+        # v5 可选字段：离线 retarget 的 20 关节角。存在则回放直通
+        # 驱动手（跳过 keypoints → 运行时 retarget 桥），不存在照旧。
+        offline_joints = recording.hands["right"].wuji2_joints
+        self._hand_joint_commands_payload = (
+            self._build_hand_joint_commands_payload(offline_joints)
+        )
+        self._hand_keypoints_payload = (
+            None
+            if self._hand_joint_commands_payload is not None
+            else self._build_hand_keypoints_payload()
+        )
         h5_wrist_to_wuji2_wrist = _configured_pose(
             params, "right_h5_wrist_to_wuji2_wrist"
         )
@@ -298,6 +312,26 @@ class MocapH5ReplayNode:
             ),
         )
         tianji_config = load_tianji_config()
+        self._tianji_config = tianji_config
+        self._mocap_to_robot = np.asarray(
+            tianji_config.mocap_to_robot, dtype=np.float64
+        )
+        self._world_to_right_chest = np.asarray(
+            tianji_config.get_world_to_chest_rotation("right"),
+            dtype=np.float64,
+        )
+        self._left_robot_home_tcp_pose = np.concatenate((
+            np.asarray(tianji_config.init_pos["left"], dtype=np.float64),
+            np.asarray(tianji_config.init_quat["left"], dtype=np.float64),
+        ))
+        self._right_robot_home_tcp_pose = np.concatenate((
+            np.asarray(tianji_config.init_pos["right"], dtype=np.float64),
+            np.asarray(tianji_config.init_quat["right"], dtype=np.float64),
+        ))
+        self._right_robot_home_wrist_pose = compose_pose(
+            self._right_robot_home_tcp_pose,
+            self._tcp_to_wrist_pose,
+        )
         self._mapper = ControllerOnlyTeleopMapper(
             tianji_config,
             rate=rate,
@@ -357,6 +391,13 @@ class MocapH5ReplayNode:
         self._status_pub = ZenohPub(session, key("/pico_body/status"))
         self._frame_zero_skeleton_pub = ZenohPub(
             session, FRAME_ZERO_SKELETON_KEY
+        )
+        self._keypoints_pub = ZenohPub(session, HAND_KEYPOINTS_KEY)
+        # 直通模式（H5 带离线 retarget 关节角）才需要发布 joint_commands。
+        self._joint_commands_pub = (
+            ZenohPub(session, HAND_JOINT_COMMANDS_KEY)
+            if self._hand_joint_commands_payload is not None
+            else None
         )
         self._live = LiveToken(session, "mocap_h5_replay")
 
@@ -598,6 +639,7 @@ class MocapH5ReplayNode:
             "frame0_wuji2_wrist_pose_motive": (
                 target_wrist_motive.tolist()
             ),
+            "tcp_to_wrist_pose_xyzw": self._tcp_to_wrist_pose.tolist(),
             "transform_contract": (
                 "world axes use mocap_to_robot; tianji_wrist locates "
                 "r_mount; Manus wrist maps directly to r_wrist"
@@ -850,12 +892,40 @@ class MocapH5ReplayNode:
                 np.asarray(h5_wrist_pose, dtype=np.float64),
                 self._h5_wrist_to_wuji2_wrist_pose,
             )
-            virtual_tcp_pose = compose_pose(
-                desired_wrist_pose,
+            # 平移以 s 时 live wrist Home 为原点；姿态使用绝对
+            # Motive→robot world→right_chest 映射，不再使用 Home 相对旋转。
+            delta_motive = (
+                desired_wrist_pose[:3]
+                - self._right_wrist_home_pose[:3]
+            )
+            target_wrist_position_chest = (
+                self._right_robot_home_wrist_pose[:3]
+                + self._world_to_right_chest
+                @ (self._mocap_to_robot @ delta_motive)
+            )
+            target_wrist_rotation_world = (
+                self._mocap_to_robot
+                @ Rotation.from_quat(
+                    desired_wrist_pose[3:]
+                ).as_matrix()
+            )
+            target_wrist_rotation_chest = (
+                self._world_to_right_chest
+                @ target_wrist_rotation_world
+            )
+            target_wrist_pose_chest = np.concatenate((
+                target_wrist_position_chest,
+                Rotation.from_matrix(
+                    target_wrist_rotation_chest
+                ).as_quat(),
+            ))
+            target_tcp_pose_chest = compose_pose(
+                target_wrist_pose_chest,
                 self._wrist_to_tcp_pose,
             )
-            targets = self._mapper.map_frame(
-                self._frame(virtual_tcp_pose)
+            targets = self._mapper.map_absolute_poses(
+                self._left_robot_home_tcp_pose,
+                target_tcp_pose_chest,
             )
         except Exception as exc:
             self._last_error = str(exc)
@@ -928,6 +998,80 @@ class MocapH5ReplayNode:
             },
         }
 
+    def _build_hand_joint_commands_payload(
+        self, offline_joints: np.ndarray | None
+    ) -> np.ndarray | None:
+        """预计算离线 retarget 的 20 关节角负载（float32 LE）。
+
+        关节序与 wuji2 组合 URDF 一致（docs/mocap_h5_v40_format.md
+        §3.5）。非有限帧用最近有效帧前向填充；全部无效返回 None
+        （调用方跳过发布，与键点负载策略一致）。
+        """
+        if offline_joints is None:
+            return None
+        finite = np.isfinite(offline_joints).all(axis=1)
+        filled = offline_joints.copy()
+        last: np.ndarray | None = None
+        for index, is_valid in enumerate(finite):
+            if is_valid:
+                last = offline_joints[index]
+            elif last is not None:
+                filled[index] = last
+        if last is None:
+            return None
+        return filled.astype("<f4")
+
+    def _build_hand_keypoints_payload(self) -> np.ndarray | None:
+        """预计算右手 21×3 键点负载（float32 LE，腕部相对，Motive 系 + yaw）。
+
+        无效帧（NaN）用最近有效帧前向填充；全部无效返回 None（调用方跳过发布）。
+        负载直接喂给 wuji_hand2_bridge 的 retarget 会话。
+        """
+        keypoints = self._recording.hands["right"].keypoints_world
+        finite = np.isfinite(keypoints).all(axis=(1, 2))
+        filled = keypoints.copy()
+        last: np.ndarray | None = None
+        for index, is_valid in enumerate(finite):
+            if is_valid:
+                last = keypoints[index]
+            elif last is not None:
+                filled[index] = last
+        if last is None:
+            return None
+        rotation = Rotation.from_rotvec(
+            np.array([0.0, 0.0, np.deg2rad(float(self._yaw_deg))])
+        ).as_matrix()
+        rotated = filled @ rotation.T
+        relative = rotated - rotated[:, 0:1, :]
+        return relative.astype("<f4")
+
+    def _publish_hand_joint_commands(self) -> None:
+        """直通模式：直接发布离线 retarget 的 20 关节角给 viewer/真机。"""
+        payload = getattr(self, "_hand_joint_commands_payload", None)
+        publisher = getattr(self, "_joint_commands_pub", None)
+        if payload is None or publisher is None:
+            return
+        trajectory = getattr(self, "_trajectory", None)
+        start_frame = (
+            trajectory.start_frame_index if trajectory is not None else 0
+        )
+        frame_index = max(self._current_source_frame, start_frame)
+        publisher.put_bytes(payload[frame_index].tobytes())
+
+    def _publish_hand_keypoints(self) -> None:
+        payload = getattr(self, "_hand_keypoints_payload", None)
+        publisher = getattr(self, "_keypoints_pub", None)
+        if payload is None or publisher is None:
+            return
+        trajectory = getattr(self, "_trajectory", None)
+        start_frame = (
+            trajectory.start_frame_index if trajectory is not None else 0
+        )
+        frame_index = max(self._current_source_frame, start_frame)
+        publisher.put_bytes(
+            payload[frame_index].tobytes()
+        )
+
     def _publish_cached_targets(self) -> None:
         targets = self._cached_targets
         if targets is None:
@@ -942,6 +1086,11 @@ class MocapH5ReplayNode:
                 stamp,
             )
         )
+        if getattr(self, "_hand_joint_commands_payload", None) is not None:
+            # v5 直通模式：H5 自带离线 retarget 关节角，直接驱动手。
+            self._publish_hand_joint_commands()
+        else:
+            self._publish_hand_keypoints()
 
     def _motive_tracking_status(self, now: float) -> dict[str, Any]:
         frame = self._latest_motive_frame
@@ -1297,7 +1446,9 @@ class MocapH5ReplayNode:
                 self._elbow_pub,
                 self._state_pub,
                 self._status_pub,
+                self._keypoints_pub,
                 self._frame_zero_skeleton_pub,
+                *(p for p in (self._joint_commands_pub,) if p is not None),
             ):
                 resource.close()
         finally:

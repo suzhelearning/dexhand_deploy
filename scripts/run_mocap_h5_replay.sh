@@ -26,8 +26,11 @@ YAW_DEG=0.0
 RIGHT_RIGID_ID=tianji_wrist
 CONNECT_ENDPOINT=""
 SHOW_FRAME_ZERO_SKELETON=false
+WITH_HAND_RETARGET=false
+WITH_HAND_COMMAND_VIEW=false
 MUJOCO_PID=""
 SIM_PID=""
+HAND_BRIDGE_PID=""
 
 usage() {
   cat <<'EOF'
@@ -43,13 +46,18 @@ usage() {
 模式：
   --mujoco-only           启动 IK、MuJoCo 和 H5 回放（默认）
   --topics-only           只启动 IK 与 H5 回放
-  --wuji2                MuJoCo 使用带 wuji2 右手与双坐标轴的组合 URDF
+  --wuji2                MuJoCo 使用 tianji+wuji2 双手组合 URDF（tianji_wuji2.urdf）
   --speed N               按住 Enter 时的源轨迹倍速（默认 1.0）
   --yaw-deg N             轨迹绕 Motive 竖直轴(+Z)的朝向修正（默认 0）
   --right-rigid-id ID     天机右末端刚体 id/名称（默认 tianji_wrist）
   --connect-endpoint EP   可选 Zenoh Router 端点（默认 scouting）
   --frame0-skeleton      MuJoCo 显示 H5 frame0 的 21 点/20 骨段目标骨架；
                           自动启用 --wuji2，按 s 前预览、按 s 后冻结
+  --complete-wuji2-replay 完整仿真回放：wuji2、frame0 骨架、
+                          dry retarget 桥及同窗手指动画
+  --complete-wuji2-real-preview
+                          完整真机预览：wuji2、frame0 骨架、同窗手指动画；
+                          不启动 dry 桥，命令来自外部 wuji_hand2_real
   --validate-only         只检查并汇总 H5，不启动 IK、不运动
   -h, --help
 
@@ -115,6 +123,20 @@ while (($#)); do
       SHOW_FRAME_ZERO_SKELETON=true
       WITH_WUJI2=true
       ;;
+    --complete-wuji2-replay)
+      WITH_MUJOCO=true
+      WITH_WUJI2=true
+      SHOW_FRAME_ZERO_SKELETON=true
+      WITH_HAND_RETARGET=true
+      WITH_HAND_COMMAND_VIEW=true
+      ;;
+    --complete-wuji2-real-preview)
+      WITH_MUJOCO=true
+      WITH_WUJI2=true
+      SHOW_FRAME_ZERO_SKELETON=true
+      WITH_HAND_RETARGET=false
+      WITH_HAND_COMMAND_VIEW=true
+      ;;
     --validate-only)
       VALIDATE_ONLY=true
       ;;
@@ -156,6 +178,24 @@ if [[ ! -f "${H5_PATH}" ]]; then
   exit 2
 fi
 
+# v5 可选字段探测：H5 带 hands/right/wuji2_joints 时进入直通模式
+# （节点直接发布离线 retarget 关节角，不启动 dry 桥避免双发布）。
+OFFLINE_RETARGET_JOINTS=false
+if python - "${H5_PATH}" <<'PY'
+import h5py
+import sys
+
+try:
+    with h5py.File(sys.argv[1], "r") as f:
+        group = f.get("hands/right")
+        sys.exit(0 if group is not None and "wuji2_joints" in group else 1)
+except Exception:
+    sys.exit(1)
+PY
+then
+  OFFLINE_RETARGET_JOINTS=true
+fi
+
 activate_bundle_runtime
 
 node_arguments=(
@@ -167,6 +207,11 @@ node_arguments=(
   --rate 60
   --connect-endpoint "${CONNECT_ENDPOINT}"
 )
+
+if [[ "${WITH_HAND_COMMAND_VIEW}" == true && "${WITH_MUJOCO}" != true ]]; then
+  printf '%s\n' '错误：完整 wuji2 回放模式需要 MuJoCo，不能与 --topics-only 组合。' >&2
+  exit 2
+fi
 
 if [[ "${VALIDATE_ONLY}" == true ]]; then
   exec python -m \
@@ -197,9 +242,10 @@ PARAMETERS="${PROJECT_PREFIX}/share/pico_body_tianji/config/mode/controller_only
 IK_URDF_PATH="${PROJECT_PREFIX}/share/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
 VIEWER_URDF_PATH="${PROJECT_PREFIX}/share/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4_mujoco.urdf"
 if [[ "${WITH_WUJI2}" == true ]]; then
-  VIEWER_URDF_PATH="${PROJECT_PREFIX}/share/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4_wuji2.urdf"
+  VIEWER_URDF_PATH="${PROJECT_PREFIX}/share/pico_body_tianji/assets/tianji_wuji2/tianji_wuji2.urdf"
 fi
 MUJOCO_VIEWER="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/mujoco_joint_viewer.py"
+HAND_BRIDGE="${PROJECT_PREFIX}/lib/pico_body_tianji/wuji_hand2_bridge"
 
 for required in \
   "${SIM_NODE}" \
@@ -216,11 +262,32 @@ do
   fi
 done
 
+if [[ "${WITH_HAND_RETARGET}" == true ]]; then
+  if [[ "${OFFLINE_RETARGET_JOINTS}" == true ]]; then
+    printf '%s\n' \
+      '检测到 hands/right/wuji2_joints：直通离线 retarget 关节角，' \
+      '跳过 dry 手桥（避免双发布冲突）。'
+  else
+    if [[ ! -x "${HAND_BRIDGE}" ]]; then
+      printf '错误：完整回放缺少 wuji_hand2_bridge：%s；请重新 build/deploy。\n'       "${HAND_BRIDGE}" >&2
+      exit 1
+    fi
+    setsid "${HAND_BRIDGE}" --dry-run --rate 100 --side right &
+    HAND_BRIDGE_PID=$!
+    register_teleop_process_group     "${HAND_BRIDGE_PID}" wuji-hand2-dry-retarget 10
+  fi
+fi
+
 if [[ "${WITH_MUJOCO}" == true ]]; then
   viewer_arguments=(--urdf "${VIEWER_URDF_PATH}")
   if [[ "${SHOW_FRAME_ZERO_SKELETON}" == true ]]; then
     viewer_arguments+=(
       --frame0-skeleton-topic /pico_body_sim/frame0_hand_skeleton
+    )
+  fi
+  if [[ "${WITH_HAND_COMMAND_VIEW}" == true ]]; then
+    viewer_arguments+=(
+      --hand-commands-topic /pico_body_sim/right_hand/joint_commands
     )
   fi
   setsid python "${MUJOCO_VIEWER}" "${viewer_arguments[@]}" &
@@ -244,7 +311,8 @@ printf '%s\n' \
   "  H5=${H5_PATH}" \
   "  speed=${SPEED}  yaw_deg=${YAW_DEG}" \
   "  Router=${CONNECT_ENDPOINT:-<scouting>}  MuJoCo=${WITH_MUJOCO}" \
-  "  Wuji2=${WITH_WUJI2}  Frame0Skeleton=${SHOW_FRAME_ZERO_SKELETON}" \
+  "  Wuji2=${WITH_WUJI2}  Frame0Skeleton=${SHOW_FRAME_ZERO_SKELETON}  HandRetarget=${WITH_HAND_RETARGET}  HandCommandView=${WITH_HAND_COMMAND_VIEW}" \
+  "  离线 retarget 直通=${OFFLINE_RETARGET_JOINTS}(H5 带 wuji2_joints 时跳过 retarget 桥)" \
   '  s 读取 marker -> Enter 保压接近绝对 frame0 -> r -> Enter 回放。' \
   '  任意活动阶段 s 回 Home；q 回 Home 后退出；左臂保持 Home。' \
   '该任务不会连接 Marvin 控制器。'

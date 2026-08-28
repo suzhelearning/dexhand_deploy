@@ -5,6 +5,9 @@ project(pico_body_tianji)
 #   vendor/zenoh/include        zenoh-c 头文件
 #   vendor/zenoh/lib            libzenohc.so
 #   vendor/zenoh-cpp/include    zenoh-cpp（header-only）
+# wuji-sdk（C SDK v2026.8.17）vendored 于 vendor/wuji-sdk：
+#   vendor/wuji-sdk/include/wuji_sdk.h
+#   vendor/wuji-sdk/lib/libwuji_sdk_c.so
 get_filename_component(
   ZENOH_ROOT
   "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/zenoh"
@@ -15,11 +18,19 @@ get_filename_component(
   "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/zenoh-cpp"
   REALPATH
 )
+get_filename_component(
+  WUJI_SDK_ROOT
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/wuji-sdk"
+  REALPATH
+)
 if(NOT EXISTS "${ZENOH_ROOT}/lib/libzenohc.so")
   message(FATAL_ERROR "缺少 vendor/zenoh/lib/libzenohc.so（zenoh-c 1.10.0 standalone 包）")
 endif()
 if(NOT EXISTS "${ZENOH_CPP_ROOT}/include/zenoh.hxx")
   message(FATAL_ERROR "缺少 vendor/zenoh-cpp/include（zenoh-cpp 1.10.0 头文件）")
+endif()
+if(NOT EXISTS "${WUJI_SDK_ROOT}/lib/libwuji_sdk_c.so")
+  message(FATAL_ERROR "缺少 vendor/wuji-sdk/lib/libwuji_sdk_c.so（wuji-sdk C v2026.8.17）")
 endif()
 
 find_package(Eigen3 REQUIRED)
@@ -131,6 +142,11 @@ target_link_libraries(tianji_official_ik_worker tianji_official_native)
 target_link_libraries(pinocchio_qp_ik_probe arm_ik)
 # 便携 runtime 层为 glibc 2.35：把 glibc 2.38 的 __isoc23_strtol
 # 引用改接到 shim（见 glibc_isoc23_strtol_shim.cpp）。
+target_sources(tianji_kinematic_sim PRIVATE src/tianji_official/glibc_isoc23_strtol_shim.cpp)
+target_link_libraries(tianji_kinematic_sim arm_ik "${ZENOH_ROOT}/lib/libzenohc.so")
+target_link_options(
+  tianji_kinematic_sim PRIVATE "-Wl,--wrap=__isoc23_strtol"
+)
 target_link_options(
   tianji_official_ik_probe PRIVATE "-Wl,--wrap=__isoc23_strtol"
 )
@@ -145,6 +161,43 @@ set_target_properties(
     INSTALL_RPATH ""
 )
 
+# wuji-sdk 桥：只链接 zenoh-c 与 wuji-sdk C 库，不依赖 Pinocchio。
+add_library(
+  wuji_hand2
+  src/wuji_hand2/wuji_hand2_control.cpp
+)
+target_compile_features(wuji_hand2 PUBLIC cxx_std_17)
+target_compile_options(wuji_hand2 PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(
+  wuji_hand2 PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    "${WUJI_SDK_ROOT}/include"
+)
+
+add_executable(
+  wuji_hand2_bridge src/wuji_hand2/wuji_hand2_bridge_node.cpp
+)
+target_compile_features(wuji_hand2_bridge PUBLIC cxx_std_17)
+target_compile_options(wuji_hand2_bridge PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(
+  wuji_hand2_bridge PRIVATE
+    "${ZENOH_CPP_ROOT}/include"
+    "${ZENOH_ROOT}/include"
+    "${WUJI_SDK_ROOT}/include"
+)
+target_compile_definitions(wuji_hand2_bridge PRIVATE ZENOHCXX_ZENOHC)
+target_sources(wuji_hand2_bridge PRIVATE src/tianji_official/glibc_isoc23_strtol_shim.cpp)
+target_link_libraries(
+  wuji_hand2_bridge
+  wuji_hand2
+  "${ZENOH_ROOT}/lib/libzenohc.so"
+  "${WUJI_SDK_ROOT}/lib/libwuji_sdk_c.so"
+)
+target_link_options(
+  wuji_hand2_bridge PRIVATE "-Wl,--wrap=__isoc23_strtol"
+)
+
 install(
   TARGETS
     arm_ik
@@ -153,6 +206,8 @@ install(
     tianji_official_ik_probe
     tianji_official_ik_worker
     pinocchio_qp_ik_probe
+    wuji_hand2
+    wuji_hand2_bridge
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

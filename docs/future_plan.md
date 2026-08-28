@@ -62,9 +62,11 @@ rigid 经 GL/GO 定位 marker，再通过安装链定位 `r_mount` 和
   `[0,0,0.0000081995,0.99999999997]`；
 - TCP→r_mount：`[0,0,0.008]m` /
   `[0.70710678,0.70710678,0,0]`；
-- H5 Manus wrist→wuji2 r_wrist：`[0,0,0]m`，
-  旋转 `[[0,0,-1],[0,-1,0],[-1,0,0]]`（det=+1），四元数
-  `[0.70710678,0,-0.70710678,0]`；
+- H5 wrist(W)→wuji2 r_wrist(B)：`[0,0,0]m`；frame0 21 点反算确认
+  W 已是标定 wrist frame（+x 指尖、+y 手背、+z 小指），axis_transform
+  只用于骨架节点偏移，不应再次乘入 wrist pose。最终旋转
+  `[[0,0,-1],[0,-1,0],[-1,0,0]]`（det=+1），四元数
+  `[0.70710678,0,-0.70710678,0]`；重复乘 A 会多转 90°；
 - `mocap_to_robot` 为单位世界轴映射；
 - 组合 URDF 物理链为 TCP→marker(tianji/center/wuji2 三 frame)
   →wuji2 `r_mount`→`r_wrist`→fingers；
@@ -94,8 +96,9 @@ rigid 经 GL/GO 定位 marker，再通过安装链定位 `r_mount` 和
 ### P0：运行 wrist 对齐后的完整仿真验收
 
 ```bash
-pixi run sim_mocap_h5 -- /path/to/take.h5 --wuji2 \
-  --speed 0.1 --yaw-deg 0 --right-rigid-id <实际ID>
+pixi run sim_mocap_h5 -- /path/to/take.h5 \
+  --complete-wuji2-replay --speed 0.1 --yaw-deg 0 \
+  --right-rigid-id <实际ID>
 ```
 
 操作：s → Enter 保压到绝对 frame0 → 松开 → r → Enter 回放 → s 回 Home。
@@ -114,6 +117,13 @@ bash scripts/calibrate_wrist_offset.sh left --user shd
 
 ### P2：真机验收（有实体机器人时）
 
+完整 Tianji + Wuji2 Hand 在采集系统单 PC 运行三终端：enp129s0
+固定为 192.168.1.165/24，经同一控制交换机连接 Tianji .190、左手 .110、
+右手 .111。主机传 `--complete-wuji2-real-preview`（不启动 dry hand bridge），
+再分别启动 `real_mocap_h5 -- --confirm-real` 与
+`wuji_hand2_real -- --confirm-real --side right --keypoint-timeout 0.5 --command-slew-rate 1.0`。
+手桥由本机 `pico_body/teleop_state` 门控，idle/returning/键点超时均缓速回零。
+
 ```bash
 # 终端 1
 pixi run sim_mocap_h5 -- /path/to/new_take.h5 \
@@ -125,6 +135,17 @@ pixi run real_mocap_h5 -- --confirm-real
 等待桥输出“真机链路已就绪”（phase=armed_idle）后：s 读取 marker；
 Enter 短按/保压接近绝对 frame0；稳定后松开，按 r，再分段推进轨迹。
 桥默认 10% 速度/加速度，首次验收**不要**调高 ratio。
+
+### P3：wuji2 手部控制（wuji-sdk C++ 桥）
+
+- [x] vendor wuji-sdk C（v2026.8.17）→ `vendor/wuji-sdk`，doctor 校验：
+- [x] `wuji_hand2_bridge`（C++）：键点→retarget→MIT 命令发送（真机/`--dry-run`）；
+- [x] H5 回放节点发布 `pico_body_sim/right_hand/keypoints`（腕部相对 63×f32）；
+- [x] `sim_mocap_h5_replay --hand-commands` 在 MuJoCo 中驱动手指；
+- [ ] Manus 键点帧的 mediapipe_rotation 校准（默认右 z=-15°，用
+      `wuji_hand2_dry --log-qpos` + MuJoCo 骨架对合验证）；
+- [ ] multijoint online mask 与单指故障的 warm-start 时机验证；
+- [ ] 左右手双 wuji2 同时遥操作（话题侧派生已支持，运行锁需双实例）。
 
 ### P3：工程性收尾
 
@@ -177,5 +198,7 @@ Enter 短按/保压接近绝对 frame0；稳定后松开，按 r，再分段推�
 | 真机桥就绪契约 | `src/pico_body_tianji/pico_body_tianji/host_readiness.py` |
 | 真机桥 | `.../marvin_hardware_bridge.py` |
 | 运行入口 | `scripts/run_mocap_h5_replay.sh`（sim）、`scripts/run_mocap_h5_real.sh`（real） |
+| wuji2 手桥 | `src/pico_body_tianji/src/wuji_hand2/`（C++），`scripts/run_wuji_hand2_{dry,real}.sh` |
+| wuji-sdk 厂商库 | `vendor/wuji-sdk/`（source `/home/current/syz/wuji-sdk` commit `4b4e59c`，release v2026.8.17 #21，x86_64-linux-gnu） |
 | 采集/标定（外部仓库） | `/home/current/syz/mocap/acquisition/`（`scripts/calibrate_wrist_offset.sh`） |
 | 测试 | `tests/test_mocap_h5*.py`、`tests/test_mocap_keyboard_step.py`、`tests/e2e_mocap_keyboard_step.py` |

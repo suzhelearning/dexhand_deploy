@@ -37,7 +37,8 @@ python -m unittest \
   tests.test_controller_only_real_profile \
   tests.test_mocap_h5 \
   tests.test_mocap_h5_replay \
-  tests.test_mocap_h5_wrist_replay
+  tests.test_mocap_h5_wrist_replay \
+  tests.e2e_wuji_hand2_dry
 
 # 优先用 staging 调试版；未构建时退回 runtime 部署的 .bin。
 IK_NODE="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_kinematic_sim"

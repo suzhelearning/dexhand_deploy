@@ -87,6 +87,10 @@ class ZenohPub:
     def put_text(self, text: Any) -> None:
         self._pub.put(str(text).encode("utf-8"))
 
+    def put_bytes(self, payload: bytes) -> None:
+        """发布裸二进制负载（如 float32 数组）。"""
+        self._pub.put(payload)
+
     def close(self) -> None:
         try:
             self._pub.undeclare()

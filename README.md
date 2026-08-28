@@ -8,9 +8,10 @@
 - Marvin SDK 真机关节位置遥操作；
 - 真机状态监控和安全停机。
 
-运行时不需要 Docker、不要求预装任何机器人中间件，也不需要现场编译。本包不包含
-Wuji 手部资产或描述包；只保留 PICO 输入和天机坐标转换所需的最小
-白名单模块。
+运行时不需要 Docker、不要求预装任何机器人中间件，也不需要现场编译。本包包含
+Wuji Hand 2（wuji2）手部资产与**固定版本的 wuji-sdk C 库**
+（`vendor/wuji-sdk`，v2026.8.17，随包校验）；机器人侧只保留 PICO
+输入、天机坐标转换与 wuji2 手部控制所需的最小模块。
 
 ![PICO 到 Marvin 天机双臂遥操作数据流](docs/data_flow.svg)
 
@@ -584,6 +585,8 @@ key，不发布控制命令；结束后会打印输入速度/加速度、椭球�
 | `pixi run real_mocap_live -- --confirm-real` | 复用 Motive 定零键盘步进仿真，启动真机桥 | **是** |
 | `pixi run real_mocap_h5 -- --confirm-real` | 复用低速 H5 + IK 主机，启动真机安全桥 | **是** |
 | `pixi run real_controller_only -- --confirm-real` | 复用纯手柄仿真，启动真机桥 | **是** |
+| `pixi run wuji_hand2_dry` | wuji2 手桥 dry-run：键点→retarget→发布命令（不连接手） | 否 |
+| `pixi run wuji_hand2_real -- --confirm-real` | 键点→retarget→Wuji Hand 2 关节控制 | **是** |
 
 `doctor`、`test`、`pico-probe`、`status`、`controller-only-joints` 和
 `controller-only-real-diagnostic` 是检查/观测工具，不是新的运行模式。
@@ -754,9 +757,11 @@ Visuals 外参：GL `[1,-4,2]mm`、GO Pitch/Yaw/Roll `[-1,10,0]deg`，
 `[0,0,0.008]m` / `[0.70710678,0.70710678,0,0]`；所有 wrist 外参均
 由这条物理链派生。
 
-H5 Manus wrist 直接映射到 wuji2 `r_wrist`。旋转为
-`[[0,0,-1],[0,-1,0],[-1,0,0]]`（Manus→r_wrist，det=+1）：
-Manus `+x/+y/+z` 分别对应 r_wrist `-z/-y/-x`；四元数为
+H5 的 wrist quaternion 是采集端已标定的 wrist 局部系 `W`；实际
+frame0 21 点几何验证 `W +x` 指向指尖、`W +y` 指向手背、`W +z`
+指向小指。采集端 `axis_transform` 只用于将 Manus 节点偏移表达进 W，
+不能再次乘入 wrist pose。最终 `W→wuji2 r_wrist(B)` 为
+`[[0,0,-1],[0,-1,0],[-1,0,0]]`（det=+1），四元数
 `[0.70710678,0,-0.70710678,0]`。marker 局部外参与世界轴转换是
 两件事，不得混用。
 首次修改运行文件后需重新执行 `pixi run -e ik-build deploy-ik`。
@@ -813,6 +818,183 @@ pixi run sim_mocap_live -- --right-rigid-id right_arm
 # 真机（先起上面的 sim 主机，再确认硬件安全后）
 pixi run real_mocap_live -- --confirm-real
 ```
+
+## Wuji Hand 2（wuji2）手部控制（wuji_hand2_dry / wuji_hand2_real）
+
+加载组合 URDF 后（`sim_mocap_h5 -- --wuji2`），H5 回放节点同时发布
+右手 Manus 键点（`pico_body_sim/right_hand/keypoints`，21×3 float32，
+腕部相对，米）。`wuji_hand2_bridge`（C++，wuji-sdk C API）订阅键点，
+经 session 内建 retarget 得到 20 关节角（firmware 序 == 组合 URDF
+关节序），再以 MIT 阻抗命令驱动 Wuji Hand 2：
+
+```bash
+# 推荐：单终端完整 P0 回放（frame0 骨架 + IK + wuji retarget + 手指动画）
+pixi run sim_mocap_h5 -- /path/to/take.h5 \
+  --complete-wuji2-replay --speed 0.1 --yaw-deg 0 --right-rigid-id 3
+
+# 等价的分进程调试模式：
+# 终端 1：H5 主机
+pixi run sim_mocap_h5 -- /path/to/take.h5 --wuji2 --frame0-skeleton
+# 终端 2：仿真 retarget（不连接手）
+pixi run wuji_hand2_dry -- --rate 100
+
+# 真机：确认手部供电/网线/急停后
+pixi run wuji_hand2_real -- --confirm-real
+```
+
+完整模式的 MuJoCo 窗口只显示两套 wrist 坐标轴，各自使用本地
+X/Y/Z 的红/绿/蓝：
+
+| 坐标轴 | 样式 | 含义 |
+|---|---|---|
+| Manus wrist W | 180mm、细、半透明浅 RGB | 固定在 H5 frame0，使用原始 `wrist_quaternion_xyzw` |
+| 当前 FK Wuji r_wrist B | 115mm、粗、纯 RGB | 从机器人当前关节状态实时 FK，随机械臂移动 |
+
+W 与 B 的轴定义不同：`W +X ↔ B -Z`、`W +Y ↔ B -Y`、
+`W +Z ↔ B -X`，因此不要求同色轴同向。到达 frame0 时检查两个原点
+重合，并按该跨颜色/反方向关系检查方向。转换后的目标 B 不再绘制第三套轴，
+仅用于每 0.5s 的数值诊断：
+`frame0 r_wrist 目标↔FK[IK target/solved]：位置误差=...mm 姿态误差=...°`。
+
+键点来源是 H5 主机的 teleop 阶段（approaching/ready/replaying），
+无键点帧时桥保持上一次命令（首帧零位）。mediapipe_rotation 默认取
+wuji-retargeting 的 Manus 配置（右 z=-15°、左 z=+15°），可用
+`--rotation-x/y/z` 覆盖；首次真机前建议 `wuji_hand2_dry` + `--log-qpos`
+确认数值合理。桥发布：
+
+| 话题 | 内容 |
+|---|---|
+| `pico_body_sim/{side}_hand/keypoints` | 主机 → 桥（63×float32 键点） |
+| `pico_body_sim/{side}_hand/joint_commands` | 桥 → MuJoCo/诊断（20×float32 rad） |
+| `pico_body_real/{side}_hand/joint_states` | 桥 → 回读（20×float32 rad） |
+| `pico_body_real/{side}_hand/status` | JSON 状态（phase/enabled/joints_online/…） |
+
+### 右手-only H5 回放（sim_mocap_h5_replay + --hand-only-replay）
+
+不启动 IK、Tianji 双臂保持 Home 时,可直接回放 H5 驱动 Wuji2 右手。
+`sim_mocap_h5_replay` 发布 Manus 右手键点并声明
+`tj/live/wuji_hand_replay`;手部命令仍由
+`wuji_hand2_{dry,real}` retarget 后发布到
+`pico_body_sim/right_hand/joint_commands`,viewer 消费并动画。
+
+```bash
+# 终端 1:MuJoCo 窗口(暂停;Space 开始/暂停,末帧 Space 从头播放)
+pixi run sim_mocap_h5_replay -- /path/to/take.h5 \
+  --hand-commands --paused --speed 0.5
+
+# 终端 2 预检(不连接、不使能硬件;只检查发布端)
+pixi run wuji_hand2_real -- --readiness-only --hand-only-replay --side right
+
+# 终端 2 仿真 retarget(不连接手)
+pixi run wuji_hand2_dry -- --side right \
+  --teleop-state-key pico_body_sim/right_hand/teleop_state
+
+# 终端 2 真机(当前仅右手;跳过 IK 主机链检查,改用 wuji_hand_replay)
+pixi run wuji_hand2_real -- --confirm-real --hand-only-replay --side right \
+  --rate 100 --keypoint-timeout 0.5 --command-slew-rate 1.0 \
+  --tracking-slew-rate 6.0 --teleop-grace-s 0.3 \
+  --teleop-state-key pico_body_sim/right_hand/teleop_state
+```
+
+**状态门控隔离**:`sim_mocap_h5_replay` 把 teleop_state 发布到
+`pico_body_sim/right_hand/teleop_state`(专属 key),而
+`pico_body/teleop_state`(全局 key)同时被 PICO 输入链、H5 主机、
+`controller_only_trace` 等广播 —— 桥若订全局 key 会收到多发布者
+交替状态,出现"跟一下→回零→再跟"的周期卡顿。H5 回放链必须显式
+传 `--teleop-state-key` 绑定专属 key。
+
+**状态抖动与平滑**:`--teleop-grace-s`(默认 0.3s)定义离开 teleop
+后的命令保持窗口:窗口内恢复 teleop 命令零扰动;超窗才以
+`--command-slew-rate`(默认 1 rad/s)回零。`--tracking-slew-rate`
+(默认 6 rad/s)只用于跟踪段的爬升上限,与回零速率解耦 —— 快速手部
+动作不再被 1 rad/s 削成等速斜坡。桥日志 phase 区分
+`tracking / hold / returning_zero / zero_hold`。
+```
+
+`--hand-only-replay` 只接受 `tj/live/wuji_hand_replay` 发布端,不接受
+普通 IK 主机链;缺少发布端时 runner 拒绝连接。回放暂停或到末帧时,
+桥保持 `returning_zero` 缓速回零,键点恢复后重新跟踪。
+
+### 单 PC 真机控制网络（推荐）
+
+采集系统 PC 同时运行 Motive/H5、IK、MuJoCo、Tianji 真机桥和 Wuji
+真机桥。两个有线口职责固定：
+
+```text
+采集/控制 PC
+├─ enp127s0：Motive/动捕网（保持当前配置）
+└─ enp129s0：192.168.1.165/24，控制交换机，无 gateway
+      ├─ Tianji          192.168.1.190
+      ├─ Wuji2 Hand Left 192.168.1.110
+      └─ Wuji2 Hand Right192.168.1.111
+```
+
+当前固化设备身份：
+
+| 设备 | IP | 序列号 |
+|---|---|---|
+| Wuji2 Right | `192.168.1.111` | `WH2KA01260814006` |
+| Wuji2 Left | `192.168.1.110` | 尚未固化，运行时必须显式 `--serial` |
+
+右手 runner 在未传 `--serial/--address` 时自动使用
+`WH2KA01260814006`；显式设备选择始终优先。
+
+不再使用 Wuji2 专用 PC，不做 IP forwarding、NAT、Linux bridge 或跨 PC
+Zenoh。控制交换机只承载厂商设备流量，Wi-Fi 继续承担默认路由/互联网。
+持久化配置：
+
+```bash
+sudo nmcli con add type ethernet ifname enp129s0 con-name robot-control-lan \
+  ipv4.method manual ipv4.addresses 192.168.1.165/24 \
+  ipv4.never-default yes ipv6.method disabled
+sudo nmcli con up robot-control-lan
+
+ip -4 addr show dev enp129s0
+ip route get 192.168.1.190
+ip route get 192.168.1.110
+ip route get 192.168.1.111
+ping -I enp129s0 192.168.1.190
+ping -I enp129s0 192.168.1.110
+ping -I enp129s0 192.168.1.111
+```
+
+三台设备的路由结果都必须是 `dev enp129s0 src 192.168.1.165`，且该连接
+不得产生 default route。Zenoh 控制话题全部在本机用默认 scouting；现有
+Router 继续只负责 Motive/Manus 数据，无需放行远程 `pico_body/**`。
+
+### Tianji + Wuji2 Hand 完整真机 H5 回放
+
+完整真机必须使用外部手桥预览模式，**不要**使用
+`--complete-wuji2-replay`（后者会启动 dry 桥，与真机桥双发布冲突）。
+
+```bash
+# 终端 1：Motive/H5/IK/MuJoCo 主机；viewer 手指命令来自外部真机手桥
+pixi run sim_mocap_h5 -- /path/to/take.h5 \
+  --complete-wuji2-real-preview --speed 0.1 --yaw-deg 0 \
+  --right-rigid-id 3
+
+# 终端 2：Tianji/Marvin 双臂真机桥（首次固定 10% 速度/加速度）
+pixi run real_mocap_h5 -- --confirm-real
+
+# 终端 3：Wuji2 Hand 真机桥
+pixi run wuji_hand2_real -- --confirm-real \
+  --side right --serial WH2KA01260814006 \
+  --rate 100 --keypoint-timeout 0.5 --command-slew-rate 1.0 \
+  --tracking-slew-rate 6.0 --teleop-grace-s 0.3
+# 无 SN 时可用：--address 192.168.1.111:50001（端口以 SDK scan 为准）
+```
+
+启动顺序：先终端 1，确认 Motive ID/IK/Home；再终端 2 等
+`phase=armed_idle`；最后终端 3。手桥在 `idle/unknown` 保持零位，只有
+`teleop` 且键点新鲜时才跟踪。终端 1 操作 `s → Enter → r → Enter`；
+按 `s` 回 Home 时手桥进入 `returning_zero`，按 1rad/s 缓速回零。
+键点超过 0.5s 未更新同样自动回零。终端 3 status 包含
+`teleop_state`、`tracking_allowed`、`keypoint_timed_out` 和
+`command_max_abs_rad`。
+
+安全退出：先在终端 1 按 `s`，确认机械臂 Home 且手桥
+`phase=zero_hold`；再终端 3 Ctrl+C（disable 手），终端 2 Ctrl+C
+看到 `Robot released`，最后终端 1 按 `q`。
 
 ### 正面圆轨迹录制与坐标对齐对比
 

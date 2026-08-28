@@ -8,6 +8,7 @@ RUNTIME_BIN="${BUNDLE_ROOT}/runtime/pico_body_tianji/lib/pico_body_tianji"
 NEW_IK="${STAGING_BIN}/tianji_kinematic_sim"
 NEW_PROBE="${STAGING_BIN}/tianji_official_ik_probe"
 NEW_WORKER="${STAGING_BIN}/tianji_official_ik_worker"
+NEW_BRIDGE="${STAGING_BIN}/wuji_hand2_bridge"
 RUNTIME_PROGRAMS=(
   pico_controller_input
   pico_controller_only_input
@@ -30,7 +31,7 @@ SOURCE_ASSETS="${BUNDLE_ROOT}/src/pico_body_tianji/assets"
 RUNTIME_ASSETS="${RUNTIME_SHARE}/assets"
 STRIP_TOOL="${IK_STRIP_TOOL:-/usr/bin/strip}"
 
-for binary in "${NEW_IK}" "${NEW_PROBE}" "${NEW_WORKER}"; do
+for binary in "${NEW_IK}" "${NEW_PROBE}" "${NEW_WORKER}" "${NEW_BRIDGE}"; do
   if [[ ! -x "${binary}" ]]; then
     printf '错误：请先执行 pixi run -e ik-build build-ik；缺少 %s\n' \
       "${binary}" >&2
@@ -70,6 +71,8 @@ for path in \
   "${RUNTIME_BIN}/tianji_official_ik_probe.bin" \
   "${RUNTIME_BIN}/tianji_official_ik_worker" \
   "${RUNTIME_BIN}/tianji_official_ik_worker.bin" \
+  "${RUNTIME_BIN}/wuji_hand2_bridge" \
+  "${RUNTIME_BIN}/wuji_hand2_bridge.bin" \
   "${RUNTIME_BIN}/pico_controller_only_input" \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so" \
   "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
@@ -112,6 +115,7 @@ fi
 install -m 0755 "${NEW_IK}" "${RUNTIME_BIN}/tianji_kinematic_sim.bin.new"
 install -m 0755 "${NEW_PROBE}" "${RUNTIME_BIN}/tianji_official_ik_probe.bin.new"
 install -m 0755 "${NEW_WORKER}" "${RUNTIME_BIN}/tianji_official_ik_worker.bin.new"
+install -m 0755 "${NEW_BRIDGE}" "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new"
 # staging 保留 RelWithDebInfo 完整调试符号；runtime 只部署去除
 # DWARF 调试段的运行版，避免将数十 MB 的调试信息提交到 Git。
 "${STRIP_TOOL}" --strip-debug \
@@ -120,6 +124,8 @@ install -m 0755 "${NEW_WORKER}" "${RUNTIME_BIN}/tianji_official_ik_worker.bin.ne
   "${RUNTIME_BIN}/tianji_official_ik_probe.bin.new"
 "${STRIP_TOOL}" --strip-debug \
   "${RUNTIME_BIN}/tianji_official_ik_worker.bin.new"
+"${STRIP_TOOL}" --strip-debug \
+  "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new"
 mv -f -- \
   "${RUNTIME_BIN}/tianji_kinematic_sim.bin.new" \
   "${RUNTIME_BIN}/tianji_kinematic_sim.bin"
@@ -129,6 +135,9 @@ mv -f -- \
 mv -f -- \
   "${RUNTIME_BIN}/tianji_official_ik_worker.bin.new" \
   "${RUNTIME_BIN}/tianji_official_ik_worker.bin"
+mv -f -- \
+  "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new" \
+  "${RUNTIME_BIN}/wuji_hand2_bridge.bin"
 install -m 0755 \
   "${BUNDLE_ROOT}/scripts/runtime_tianji_kinematic_sim.sh" \
   "${RUNTIME_BIN}/tianji_kinematic_sim"
@@ -138,6 +147,9 @@ install -m 0755 \
 install -m 0755 \
   "${BUNDLE_ROOT}/scripts/runtime_tianji_official_ik_worker.sh" \
   "${RUNTIME_BIN}/tianji_official_ik_worker"
+install -m 0755 \
+  "${BUNDLE_ROOT}/scripts/runtime_wuji_hand2_bridge.sh" \
+  "${RUNTIME_BIN}/wuji_hand2_bridge"
 for program in "${RUNTIME_PROGRAMS[@]}"; do
   install -m 0755 "${STAGING_BIN}/${program}" "${RUNTIME_BIN}/${program}"
 done
@@ -182,5 +194,6 @@ printf '%s\n' \
   "runtime ELF 已移除 DWARF 调试信息；staging 仍保留调试版" \
   "官方 probe：${RUNTIME_BIN}/tianji_official_ik_probe" \
   "官方 SDK：${SDK_RUNTIME_ROOT}" \
+  "wuji2 手桥：${RUNTIME_BIN}/wuji_hand2_bridge" \
   "配置已同步：${SOURCE_CONFIG} -> ${RUNTIME_CONFIG}" \
   "资产已同步：${SOURCE_ASSETS} -> ${RUNTIME_ASSETS}"

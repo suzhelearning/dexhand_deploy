@@ -21,6 +21,7 @@ from pico_body_tianji.controller_only.mocap_h5 import (
     compose_pose,
     invert_pose,
 )
+from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
 from pico_body_tianji.controller_only.mocap_h5_replay_node import (
     DEFAULT_PARAMETERS,
     MocapH5ReplayNode,
@@ -37,12 +38,16 @@ class _FakePub:
     def __init__(self) -> None:
         self.json_values: list[dict] = []
         self.text_values: list[str] = []
+        self.bytes_values: list[bytes] = []
 
     def put_json(self, value: dict) -> None:
         self.json_values.append(value)
 
     def put_text(self, value: str) -> None:
         self.text_values.append(value)
+
+    def put_bytes(self, value: bytes) -> None:
+        self.bytes_values.append(value)
 
 
 class _FakeDeadman:
@@ -83,10 +88,27 @@ class _FakeMapper:
             right_default_elbow_direction=np.array([0.0, 1.0, 0.0]),
         )
 
+    def map_absolute_poses(self, left_pose, right_pose):
+        self.map_count += 1
+        frame = SimpleNamespace(
+            left_pose=np.asarray(left_pose, dtype=np.float64).copy(),
+            right_pose=np.asarray(right_pose, dtype=np.float64).copy(),
+        )
+        self.mapped_frames.append(frame)
+        return SimpleNamespace(
+            left_pose=frame.left_pose,
+            right_pose=frame.right_pose,
+            left_conditioning=_FakeDiagnostics(),
+            right_conditioning=_FakeDiagnostics(),
+            left_default_elbow_direction=np.array([0.0, -1.0, 0.0]),
+            right_default_elbow_direction=np.array([0.0, 1.0, 0.0]),
+        )
+
 
 class _FakeTrajectory:
     duration_s = 0.5
     interpolated_frame_count = 1
+    start_frame_index = 0
 
     def sample(self, elapsed_s: float) -> HandTrajectorySample:
         elapsed = min(float(elapsed_s), self.duration_s)
@@ -155,6 +177,17 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         )
         node._tcp_to_wrist_pose = desired_tcp_to_wrist
         node._wrist_to_tcp_pose = invert_pose(desired_tcp_to_wrist)
+        node._mocap_to_robot = np.eye(3)
+        node._world_to_right_chest = np.eye(3)
+        node._left_robot_home_tcp_pose = np.array(
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        )
+        node._right_robot_home_tcp_pose = np.array(
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        )
+        node._right_robot_home_wrist_pose = np.array(
+            [1.1, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]
+        )
         node._right_rigid_id = "tianji_wrist"
         node._rigid_body_names = {7: "tianji_wrist"}
         node._latest_motive_frame = {
@@ -200,6 +233,8 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         node._state_pub = _FakePub()
         node._status_pub = _FakePub()
         node._frame_zero_skeleton_pub = _FakePub()
+        node._keypoints_pub = _FakePub()
+        node._hand_keypoints_payload = np.zeros((4, 21, 3), dtype=np.float32)
         node._stop_event = threading.Event()
         node._recording = SimpleNamespace(
             path="/chosen/trajectory.h5",
@@ -208,6 +243,28 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         )
         node._yaw_deg = 0.0
         return node
+
+    def test_build_hand_joint_commands_payload(self) -> None:
+        node = object.__new__(MocapH5ReplayNode)
+        # 无离线关节 → None
+        self.assertIsNone(node._build_hand_joint_commands_payload(None))
+        # 正常数据 → float32 LE (N,20)
+        joints = np.linspace(0.0, 1.0, 200).reshape(10, 20)
+        payload = node._build_hand_joint_commands_payload(joints)
+        self.assertEqual(payload.shape, (10, 20))
+        self.assertEqual(payload.dtype, np.dtype("<f4"))
+        np.testing.assert_allclose(payload, joints, atol=1e-6)
+        # 非有限帧用最近有效帧前向填充
+        broken = joints.copy()
+        broken[3] = np.nan
+        payload = node._build_hand_joint_commands_payload(broken)
+        np.testing.assert_allclose(payload[3], payload[2])
+        # 全部无效 → None
+        self.assertIsNone(
+            node._build_hand_joint_commands_payload(
+                np.full((10, 20), np.nan)
+            )
+        )
 
     def test_default_rigid_pose_derives_mount_and_wrist(self) -> None:
         rigid_to_marker = _configured_pose(
@@ -286,6 +343,7 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         node._right_wrist_home_pose = np.array(
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         )
+        node._right_robot_home_wrist_pose = node._right_wrist_home_pose.copy()
         node._virtual_tcp_home_pose = node._right_wrist_home_pose.copy()
         self.assertTrue(node._map_right_pose(node._frame_zero_pose))
         desired_wrist = compose_pose(
@@ -344,14 +402,18 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         # Enter 保压接近 H5 绝对 wrist frame0；虚拟 TCP=0.2-0.05。
         node._deadman.pressed = True
         node._tick(10.0)
+        node._solved_pose = node._cached_targets.right_pose.copy()
+        node._solved_received_at = 10.1
         node._tick(10.1)
+        node._solved_received_at = 10.2
+        node._tick(10.2)
         self.assertEqual(node._phase, "ready")
-        self.assertEqual(node._mapper.map_count, 2)
+        self.assertEqual(node._mapper.map_count, 3)
         np.testing.assert_allclose(
             node._mapper.mapped_frames[-1].right_pose,
             [0.15, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
         )
-        self.assertEqual(len(node._pose_pub.json_values), 2)
+        self.assertEqual(len(node._pose_pub.json_values), 3)
 
         # r 前必须松开 Enter。
         node._on_key("r")
@@ -380,25 +442,31 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         node._deadman.pressed = True
         node._solved_received_at = start + 20.0
         node._tick(start + 20.0)
+        # 第一帧到末点后 target 已更新，solved 下一周期才跟上。
         node._tick(start + 20.25)
         self.assertEqual(node._phase, "replaying")
         self.assertTrue(node._source_complete)
-        self.assertEqual(node._final_stable_ticks, 1)
+        self.assertEqual(node._final_stable_ticks, 0)
+        node._solved_pose = node._cached_targets.right_pose.copy()
+        node._solved_received_at = start + 20.5
         node._tick(start + 20.5)
+        self.assertEqual(node._final_stable_ticks, 1)
+        node._solved_received_at = start + 20.75
+        node._tick(start + 20.75)
         self.assertEqual(node._phase, "completed")
         self.assertAlmostEqual(node._current_source_elapsed_s, 0.5)
         map_count_at_completion = node._mapper.map_count
-        node._tick(start + 20.75)
+        node._tick(start + 21.0)
         self.assertEqual(node._mapper.map_count, map_count_at_completion)
 
         node._last_s_at = -float("inf")
         node._on_key("s")
         self.assertEqual(node._phase, "returning")
-        node._tick(start + 21.0)
+        node._tick(start + 21.25)
         self.assertEqual(node._phase, "returning")
         node._return_complete = True
         node._at_home = True
-        node._tick(start + 21.1)
+        node._tick(start + 21.35)
         self.assertEqual(node._phase, "armed")
 
     def test_s_requires_released_enter_before_alignment(self) -> None:
@@ -516,6 +584,96 @@ class MocapH5ReplayStateMachineTest(unittest.TestCase):
         node._at_home = True
         self.assertFalse(node._tick(time.monotonic()))
 
+    def test_hand_keypoints_payload_wrist_relative_and_forward_fill(self) -> None:
+        node = object.__new__(MocapH5ReplayNode)
+        keypoints = np.zeros((5, 21, 3), dtype=np.float64)
+        keypoints[0] = np.ones((21, 3)) * 1.0
+        keypoints[1] = np.ones((21, 3)) * 2.0
+        keypoints[2, :, :] = np.nan
+        keypoints[3] = np.ones((21, 3)) * 3.0
+        keypoints[4, :, :] = np.nan
+        node._recording = SimpleNamespace(
+            hands={"right": SimpleNamespace(keypoints_world=keypoints)}
+        )
+        node._yaw_deg = 0.0
+        payload = node._build_hand_keypoints_payload()
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload.shape, (5, 21, 3))
+        self.assertEqual(payload.dtype, np.dtype("<f4"))
+        np.testing.assert_allclose(payload[:, 0, :], 0.0, atol=1.0e-7)
+        np.testing.assert_allclose(payload[2], payload[1], atol=1.0e-6)
+        np.testing.assert_allclose(payload[4], payload[3], atol=1.0e-6)
+
+    def test_teleop_tick_publishes_hand_keypoints(self) -> None:
+        node = self._node()
+        node._hand_keypoints_payload = np.zeros((4, 21, 3), dtype=np.float32)
+        node._hand_keypoints_payload[1, 1:, :] = 0.5
+        node._current_source_frame = 1
+        node._cached_targets = SimpleNamespace(
+            right_pose=np.array([0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+            right_default_elbow_direction=np.array([0.0, 1.0, 0.0]),
+            right_conditioning=_FakeDiagnostics(),
+        )
+        node._publish_cached_targets()
+        self.assertEqual(len(node._keypoints_pub.bytes_values), 1)
+        payload = np.frombuffer(
+            node._keypoints_pub.bytes_values[-1], dtype=np.float32
+        ).reshape(21, 3)
+        np.testing.assert_allclose(payload[0, :], 0.0, atol=1.0e-7)
+        np.testing.assert_allclose(payload[1:, :], 0.5, atol=1.0e-6)
+
+
+class TianjiWuji2AssetTest(unittest.TestCase):
+    """tianji_wuji2.urdf（本机新组合资产）的 MuJoCo 加载契约。"""
+
+    def test_tianji_wuji2_urdf_loads_and_keeps_visual(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        urdf = (
+            root
+            / "src/pico_body_tianji/assets/tianji_wuji2"
+            / "tianji_wuji2.urdf"
+        )
+        self.assertTrue(urdf.is_file())
+        xml, assets = portable_mujoco_urdf(urdf)
+        # 薄壳 TCP 轴 mesh 被替换为球，不再进入 assets。
+        self.assertNotIn("TCP_Link_L.STL", assets)
+        self.assertGreaterEqual(len(assets), 60)
+        model = mujoco.MjModel.from_xml_string(xml, assets)
+        # 双臂 14 关节。
+        for name in urdf_joint_names():
+            self.assertGreaterEqual(
+                mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name), 0
+            )
+        # wuji2 双手 40 关节（tianji_wuji2 命名，小指无 _finger_ 后缀）。
+        hand_joints = []
+        for side in ("r", "l"):
+            for finger in (
+                "thumb_cmc_flex", "thumb_cmc_abd", "thumb_mcp", "thumb_ip",
+                "index_finger_mcp_flex", "index_finger_mcp_abd",
+                "index_finger_pip", "index_finger_dip",
+                "middle_finger_mcp_flex", "middle_finger_mcp_abd",
+                "middle_finger_pip", "middle_finger_dip",
+                "ring_finger_mcp_flex", "ring_finger_mcp_abd",
+                "ring_finger_pip", "ring_finger_dip",
+                "pinky_mcp_flex", "pinky_mcp_abd", "pinky_pip", "pinky_dip",
+            ):
+                hand_joints.append(f"{side}_{finger}")
+        for name in hand_joints:
+            self.assertGreaterEqual(
+                mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name), 0
+            )
+        # 视觉保留（axis 几何 + 骨架注入前的原生视觉）。
+        self.assertGreater(model.ngeom, 100)
+        # wrist replay 依赖的轴几何存在。
+        for geom in (
+            "r_wrist_axis_0", "r_wrist_axis_2",
+            "TCP_Link_R_axis_0", "TCP_Link_R_axis_2",
+            "marker_mocap_r_axis_0", "l_wrist_axis_0",
+        ):
+            self.assertGreaterEqual(
+                mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom), 0
+            )
+
 
 class _FakeSubscriberHandle:
     def undeclare(self) -> None:
@@ -547,13 +705,41 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def test_wuji_hand_command_mirror_updates_new_urdf(self) -> None:
+        viewer = self._viewer_module()
+        root = Path(__file__).resolve().parents[1]
+        urdf = (
+            root
+            / "src/pico_body_tianji/assets/tianji_wuji2"
+            / "tianji_wuji2.urdf"
+        )
+        xml, assets = portable_mujoco_urdf(urdf)
+        model = mujoco.MjModel.from_xml_string(xml, assets)
+        data = mujoco.MjData(model)
+        session = _FakeZenohSession()
+        mirror = viewer.WujiHandCommandMirror(
+            session, model, "/pico_body_sim/right_hand/joint_commands"
+        )
+        qpos = np.linspace(-0.4, 0.7, 20, dtype=np.float32)
+        session.handler(SimpleNamespace(payload=qpos.tobytes()))
+        self.assertEqual(mirror.apply_latest(data), 20)
+        self.assertTrue(mirror.received_once)
+        for index, name in enumerate(viewer._WUJI2_RIGHT_JOINT_NAMES):
+            joint_id = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_JOINT, name
+            )
+            self.assertGreaterEqual(joint_id, 0)
+            address = model.jnt_qposadr[joint_id]
+            self.assertAlmostEqual(float(data.qpos[address]), float(qpos[index]))
+        mirror.close()
+
     def test_motive_frame_zero_uses_fixed_world_axes_and_home_origin(self) -> None:
         viewer = self._viewer_module()
         root = Path(__file__).resolve().parents[1]
         urdf = (
             root
-            / "src/pico_body_tianji/assets/marvin_m6_ccs/urdf"
-            / "marvin_m6_s_ccs_696_v4_wuji2.urdf"
+            / "src/pico_body_tianji/assets/tianji_wuji2"
+            / "tianji_wuji2.urdf"
         )
         xml, assets = portable_mujoco_urdf(urdf)
         model = mujoco.MjModel.from_xml_string(
@@ -567,6 +753,19 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
             model,
             "/pico_body_sim/frame0_hand_skeleton",
         )
+        # 最新双手 URDF 的静态调试轴全部隐藏，只保留动态 Manus/r_wrist。
+        for prefix in (
+            "TCP_Link_L_axis_", "TCP_Link_R_axis_",
+            "marker_mocap_l_axis_", "marker_mocap_r_axis_",
+            "l_mount_axis_", "r_mount_axis_",
+            "l_wrist_axis_", "r_wrist_axis_",
+        ):
+            for index in range(3):
+                geom_id = mujoco.mj_name2id(
+                    model, mujoco.mjtObj.mjOBJ_GEOM, f"{prefix}{index}"
+                )
+                self.assertGreaterEqual(geom_id, 0)
+                self.assertEqual(float(model.geom_rgba[geom_id, 3]), 0.0)
         config = skeleton._tianji_config
         home = np.concatenate(
             (
@@ -583,7 +782,7 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
             )
         mujoco.mj_forward(model, data)
 
-        wrist_position_sim, _wrist_rotation_sim = (
+        wrist_position_sim, wrist_rotation_sim = (
             viewer._frame_from_axis_geoms(
                 data,
                 skeleton._wrist_axis_x_geom_id,
@@ -623,6 +822,13 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
             @ rotation_sim_from_motive.T
             + wrist_position_sim
         )
+        # 构造一个映射后恰好等于模型 FK r_wrist 的 frame0 目标姿态。
+        target_rotation_motive = (
+            rotation_sim_from_motive.T @ wrist_rotation_sim
+        )
+        target_quaternion_motive = Rotation.from_matrix(
+            target_rotation_motive
+        ).as_quat()
         payload = {
             "frozen": False,
             "source_frame_index": 0,
@@ -635,10 +841,64 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
                 *wrist_position_motive.tolist(),
                 *wrist_quaternion_motive.tolist(),
             ],
+            "frame0_wuji2_wrist_pose_motive": [
+                *wrist_position_motive.tolist(),
+                *target_quaternion_motive.tolist(),
+            ],
+            "tcp_to_wrist_pose_xyzw": [
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0
+            ],
         }
         skeleton._on_skeleton(payload)
         self.assertTrue(skeleton.apply_latest(model, data))
         mujoco.mj_forward(model, data)
+
+        # 动态 r_wrist 三轴共用 FK 原点，方向与 X/Z 恢复的右手系一致。
+        dynamic_directions = []
+        for axis_index, geom_id in enumerate(skeleton._wrist_axis_ids):
+            direction = data.geom_xmat[geom_id].reshape(3, 3)[:, 2]
+            dynamic_directions.append(direction)
+            origin = (
+                data.geom_xpos[geom_id]
+                - model.geom_size[geom_id, 1] * direction
+            )
+            np.testing.assert_allclose(
+                origin, wrist_position_sim, atol=1.0e-8
+            )
+            np.testing.assert_allclose(
+                direction, wrist_rotation_sim[:, axis_index], atol=1.0e-8
+            )
+        np.testing.assert_allclose(
+            np.cross(dynamic_directions[0], dynamic_directions[1]),
+            dynamic_directions[2],
+            atol=1.0e-8,
+        )
+
+        # 原始 Manus W 轴单独显示：方向来自 H5 wrist quaternion。
+        manus_rotation_sim = (
+            rotation_sim_from_motive
+            @ Rotation.from_quat(wrist_quaternion_motive).as_matrix()
+        )
+        for axis_index, geom_id in enumerate(skeleton._manus_axis_ids):
+            direction = data.geom_xmat[geom_id].reshape(3, 3)[:, 2]
+            origin = (
+                data.geom_xpos[geom_id]
+                - model.geom_size[geom_id, 1] * direction
+            )
+            np.testing.assert_allclose(
+                origin, wrist_position_sim, atol=1.0e-8
+            )
+            np.testing.assert_allclose(
+                direction, manus_rotation_sim[:, axis_index], atol=1.0e-8
+            )
+
+        # 转换后的目标 Wuji B 不再画第三套轴，只用于数值误差。
+        np.testing.assert_allclose(
+            skeleton._target_origin_mj, wrist_position_sim, atol=1.0e-8
+        )
+        np.testing.assert_allclose(
+            skeleton._target_rotation_mj, wrist_rotation_sim, atol=1.0e-8
+        )
 
         self.assertEqual(len(skeleton._point_geom_ids), 21)
         self.assertEqual(len(skeleton._bone_geom_ids), 20)
@@ -665,6 +925,59 @@ class FrameZeroHandSkeletonViewerTest(unittest.TestCase):
             delta / np.linalg.norm(delta),
             atol=1.0e-8,
         )
+        # 收到真实 IK target/solved 后，目标轴改为控制器实际目标，
+        # 不再使用独立 Motive 映射。10mm + 0.1rad 差应被准确报告。
+        skeleton._solved_tcp_pose_chest = np.array(
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        )
+        skeleton._target_tcp_pose_chest = np.array([
+            0.01, 0.0, 0.0,
+            *Rotation.from_rotvec([0.0, 0.0, 0.1]).as_quat(),
+        ])
+        skeleton._tcp_to_wrist_pose = np.array(
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        )
+        self.assertTrue(skeleton.update_fk_axes(model, data))
+        mujoco.mj_forward(model, data)
+        self.assertAlmostEqual(skeleton.last_position_error_mm, 10.0, places=6)
+        self.assertAlmostEqual(
+            skeleton.last_rotation_error_deg,
+            np.rad2deg(0.1),
+            places=6,
+        )
+
+        # 后续单独验证 FK 刷新：冻结当前目标，避免使用刻意构造的
+        # stale solved pose 重算 chest→MuJoCo 对齐。
+        skeleton._target_tcp_pose_chest = None
+        skeleton._solved_tcp_pose_chest = None
+        # 手臂关节改变后，当前 FK 轴必须逐帧刷新；目标轴保持不动，
+        # 且误差诊断从 0 增大。
+        joint_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_JOINT, "Joint1_R"
+        )
+        data.qpos[model.jnt_qposadr[joint_id]] += 0.05
+        mujoco.mj_forward(model, data)
+        self.assertTrue(skeleton.update_fk_axes(model, data))
+        mujoco.mj_forward(model, data)
+        self.assertGreater(skeleton.last_position_error_mm, 0.1)
+        self.assertGreater(skeleton.last_rotation_error_deg, 0.1)
+        new_wrist_origin, new_wrist_rotation = viewer._frame_from_axis_geoms(
+            data,
+            skeleton._wrist_axis_x_geom_id,
+            skeleton._wrist_axis_z_geom_id,
+            0.045,
+        )
+        for axis_index, geom_id in enumerate(skeleton._wrist_axis_ids):
+            direction = data.geom_xmat[geom_id].reshape(3, 3)[:, 2]
+            origin = (
+                data.geom_xpos[geom_id]
+                - model.geom_size[geom_id, 1] * direction
+            )
+            np.testing.assert_allclose(origin, new_wrist_origin, atol=1.0e-8)
+            np.testing.assert_allclose(
+                direction, new_wrist_rotation[:, axis_index], atol=1.0e-8
+            )
+
         skeleton.close()
 
 

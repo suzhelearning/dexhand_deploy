@@ -85,6 +85,34 @@ class ControllerOnlyTeleopMapper:
             conditioner.reset()
         return self._controller.initialize(frame.virtual_trackers())
 
+    def map_absolute_poses(
+        self, left_pose: np.ndarray, right_pose: np.ndarray,
+    ) -> ControllerOnlyTargets:
+        """直接整形 chest 系绝对 TCP 位姿，不经过手柄 Home 相对映射。"""
+        poses = {}
+        conditioning = {}
+        for side, pose in (("left", left_pose), ("right", right_pose)):
+            values = np.asarray(pose, dtype=np.float64)
+            if values.shape != (7,) or not np.isfinite(values).all():
+                raise ValueError(f"{side} absolute pose 必须是有限 7 向量")
+            position, quaternion, diagnostics = self._conditioners[
+                side
+            ].condition(values[:3], values[3:])
+            poses[side] = np.concatenate((position, quaternion))
+            conditioning[side] = diagnostics
+        return ControllerOnlyTargets(
+            left_pose=poses["left"],
+            right_pose=poses["right"],
+            left_default_elbow_direction=(
+                self._default_elbow_directions["left"].copy()
+            ),
+            right_default_elbow_direction=(
+                self._default_elbow_directions["right"].copy()
+            ),
+            left_conditioning=conditioning["left"],
+            right_conditioning=conditioning["right"],
+        )
+
     def map_frame(self, frame: ControllerFrame) -> ControllerOnlyTargets:
         virtual_trackers = frame.virtual_trackers()
         poses = {}

@@ -67,8 +67,9 @@ mocap_h5_replay:
     # Tianji TCP(T) -> beta1 r_mount(M)，含 8mm marker 刚体。
     right_tcp_to_mount_translation_m: [0.0, 0.0, 0.008]
     right_tcp_to_mount_quaternion_xyzw: [0.7071067811865476, 0.7071067811865476, 0.0, 0.0]
-    # H5 Manus wrist(H) -> wuji2 r_wrist(B)：两者原点都是 wrist。
-    # H +x 指尖、+y 手背、+z 小拇指侧；B -z 指尖、-y 手背、+x 拇指侧。
+    # H5 wrist quaternion 已是标定后的 W：+x 指尖、+y 手背、+z 小指。
+    # axis_transform 只用于节点偏移，不应再次乘进 wrist pose。
+    # wuji B: -z 指尖、-y 手背、+x 拇指；W->B 如下。
     right_h5_wrist_to_wuji2_wrist_translation_m: [0.0, 0.0, 0.0]
     right_h5_wrist_to_wuji2_wrist_quaternion_xyzw: [0.7071067811865476, 0.0, -0.7071067811865476, 0.0]
     approach_position_tolerance_m: 0.002

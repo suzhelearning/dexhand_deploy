@@ -34,6 +34,7 @@ from pico_body_tianji.controller_only.mocap_h5_replay_node import (
 )
 from pico_body_tianji.joint_state_model import urdf_joint_names
 from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
+from pico_body_tianji.zenoh_util import LiveToken
 from tianji_world_output.config_loader import get_config
 
 from mujoco_joint_viewer import (
@@ -60,6 +61,66 @@ _DEFAULT_CONFIG = (
 # 顺序与 urdf_joint_names() 一致：左臂 Joint1-7，右臂 Joint1-7。
 _LEFT_HOME_KEY = "left_home_deg"
 _RIGHT_HOME_KEY = "right_home_deg"
+
+# firmware 序 20 关节名（tianji_wuji2.urdf 的 revolute 声明顺序）。
+# 旧 hand2_beta1 资产的小指带 "_finger_" 后缀，作为别名兼容。
+WUJI2_HAND_JOINT_NAMES = [
+    "r_thumb_cmc_flex", "r_thumb_cmc_abd", "r_thumb_mcp", "r_thumb_ip",
+    "r_index_finger_mcp_flex", "r_index_finger_mcp_abd",
+    "r_index_finger_pip", "r_index_finger_dip",
+    "r_middle_finger_mcp_flex", "r_middle_finger_mcp_abd",
+    "r_middle_finger_pip", "r_middle_finger_dip",
+    "r_ring_finger_mcp_flex", "r_ring_finger_mcp_abd",
+    "r_ring_finger_pip", "r_ring_finger_dip",
+    "r_pinky_mcp_flex", "r_pinky_mcp_abd",
+    "r_pinky_pip", "r_pinky_dip",
+]
+WUJI2_HAND_JOINT_ALIASES = {
+    "r_pinky_mcp_flex": "r_pinky_finger_mcp_flex",
+    "r_pinky_mcp_abd": "r_pinky_finger_mcp_abd",
+    "r_pinky_pip": "r_pinky_finger_pip",
+    "r_pinky_dip": "r_pinky_finger_dip",
+}
+
+HAND_COMMANDS_KEY = "pico_body_sim/right_hand/joint_commands"
+HAND_KEYPOINTS_KEY = "pico_body_sim/right_hand/keypoints"
+TELEOP_STATE_KEY = "pico_body_sim/right_hand/teleop_state"
+
+
+class _HandCommandCache:
+    """订阅桥发布的 20 关节命令，保留最新帧。"""
+
+    def __init__(self) -> None:
+        self._latest: np.ndarray | None = None
+
+    def on_sample(self, sample) -> None:
+        data = bytes(sample.payload)
+        if len(data) == 20 * 4:
+            self._latest = np.frombuffer(data, dtype=np.float32).copy()
+
+    def get(self) -> np.ndarray | None:
+        return self._latest
+
+
+def _hand_joint_qpos_ids(model) -> list[int]:
+    """按 firmware 序解析 URDF 关节在 MuJoCo 模型中的 qpos 偏移。"""
+    ids = []
+    for name in WUJI2_HAND_JOINT_NAMES:
+        candidate = name
+        if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name) < 0:
+            candidate = WUJI2_HAND_JOINT_ALIASES.get(name, "")
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, candidate)
+        if joint_id < 0:
+            raise ValueError(f"组合 URDF 缺少手部关节: {name}")
+        ids.append(model.jnt_qposadr[joint_id])
+    return ids
+
+
+def _apply_hand_commands(model, data, qpos_ids, commands) -> None:
+    if commands is None:
+        return
+    for qpos_index, value in zip(qpos_ids, commands):
+        data.qpos[qpos_index] = float(value)
 
 
 def _load_home_joints(config_path: Path | None) -> np.ndarray:
@@ -182,6 +243,15 @@ def _parser() -> argparse.ArgumentParser:
         help="绕 Motive 竖直轴(+Z)旋转整条手部轨迹",
     )
     parser.add_argument(
+        "--hand-commands",
+        action="store_true",
+        help=(
+            "订阅 wuji_hand2_bridge 的 retarget 输出"
+            "（pico_body_sim/right_hand/joint_commands）并驱动手部关节；"
+            "自动启用 --wuji2 合并 URDF"
+        ),
+    )
+    parser.add_argument(
         "--right-arm-pose",
         type=str,
         default=None,
@@ -240,9 +310,7 @@ def main(argv: list[str] | None = None) -> int:
 
     root = Path(__file__).resolve().parents[3]
     default_urdf = (
-        root
-        / "src/pico_body_tianji/assets/marvin_m6_ccs/urdf"
-        / "marvin_m6_s_ccs_696_v4_wuji2.urdf"
+        root / "src/pico_body_tianji/assets/tianji_wuji2" / "tianji_wuji2.urdf"
     )
     urdf_path = args.urdf or default_urdf
     xml, assets = portable_mujoco_urdf(urdf_path)
@@ -263,6 +331,49 @@ def main(argv: list[str] | None = None) -> int:
         )
     mujoco.mj_forward(model, data)
 
+    # 可选：订阅 wuji_hand2_bridge 的 retarget 命令并驱动手指关节；
+    # 同时把当前帧手腕相对键点发布给桥（仿真验收链路无需主机节点）。
+    hand_cache = None
+    hand_qpos_ids = []
+    hand_session = None
+    hand_keypoints_pub = None
+    hand_state_pub = None
+    hand_live = None
+    last_hand_state = None
+    if args.hand_commands:
+        import zenoh
+
+        hand_cache = _HandCommandCache()
+        hand_qpos_ids = _hand_joint_qpos_ids(model)
+        hand_session = zenoh.open(zenoh.Config())
+        hand_session.declare_subscriber(
+            HAND_COMMANDS_KEY, hand_cache.on_sample
+        )
+        hand_keypoints_pub = hand_session.declare_publisher(
+            HAND_KEYPOINTS_KEY
+        )
+        hand_state_pub = hand_session.declare_publisher(TELEOP_STATE_KEY)
+        hand_live = LiveToken(hand_session, "wuji_hand_replay")
+        _LOG.info(
+            "已订阅手部命令: %s（等 wuji_hand2_bridge 发布 retarget 输出）",
+            HAND_COMMANDS_KEY,
+        )
+
+    def publish_frame_keypoints(frame_index: int) -> None:
+        if hand_keypoints_pub is None:
+            return
+        frame_points = points_motive[frame_index]
+        relative = frame_points - frame_points[0]
+        hand_keypoints_pub.put(relative.astype("<f4").tobytes())
+
+    def publish_hand_state(state: str) -> None:
+        nonlocal last_hand_state
+        if hand_state_pub is None or state == last_hand_state:
+            return
+        hand_state_pub.put(state.encode("utf-8"))
+        last_hand_state = state
+        _LOG.info("右手回放 teleop_state=%s", state)
+
     point_geom_ids = [
         mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
                           f"frame0_kp_{index:02d}")
@@ -275,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     manus_axis_ids = [
         mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
-                          f"ax_manus_{index}")
+                          f"ax_manus_wrist_{index}")
         for index in range(3)
     ]
     wrist_axis_ids = [
@@ -297,11 +408,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         model.geom_sameframe[geom_id] = 0
         model.geom_rgba[geom_id, 3] = 0.0
-    # 隐藏 URDF 自带的 TCP/marker/r_wrist 轴，只保留两套动态轴。
+    # 隐藏全部 URDF 静态调试轴，只保留三套动态轴。
     for prefix in (
-        "TCP_Link_R_axis_",
-        "marker_mocap_axis_",
-        "r_wrist_axis_",
+        "TCP_Link_L_axis_", "TCP_Link_R_axis_",
+        "marker_mocap_axis_", "marker_mocap_l_axis_", "marker_mocap_r_axis_",
+        "l_mount_axis_", "r_mount_axis_",
+        "l_wrist_axis_", "r_wrist_axis_",
     ):
         for index in range(3):
             geom_id = mujoco.mj_name2id(
@@ -446,74 +558,56 @@ def main(argv: list[str] | None = None) -> int:
     def apply_frame_axes(frame_index: int, points_mj: np.ndarray) -> None:
         wrist_origin = points_mj[0]
         quat = hand.wrist[frame_index, 3:7].copy()
-        if not np.isfinite(quat).all():
+        if not np.isfinite(quat).all() or np.linalg.norm(quat) < 1.0e-9:
             return
-        quat_norm = float(np.linalg.norm(quat))
-        if quat_norm < 1.0e-9:
-            return
-        quat /= quat_norm
-        x, y, z, w = quat
-        R_manus_motive = np.array(
-            [
-                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-                [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-            ]
+        quat /= np.linalg.norm(quat)
+        R_manus_sim = (
+            rotation_sim_from_motive @ Rotation.from_quat(quat).as_matrix()
         )
-        R_manus_sim = rotation_sim_from_motive @ R_manus_motive
-        _draw_axis(
-            model, manus_axis_ids[0], wrist_origin,
-            R_manus_sim[:, 0], 0.16, np.array([1.0, 0.0, 0.0, 0.95]),
+        manus_colors = (
+            np.array([1.0, 0.35, 0.35, 0.62]),
+            np.array([0.35, 1.0, 0.35, 0.62]),
+            np.array([0.35, 0.55, 1.0, 0.62]),
         )
-        _draw_axis(
-            model, manus_axis_ids[1], wrist_origin,
-            R_manus_sim[:, 1], 0.16, np.array([0.0, 1.0, 0.0, 0.95]),
+        actual_colors = (
+            np.array([1.0, 0.0, 0.0, 1.0]),
+            np.array([0.0, 1.0, 0.0, 1.0]),
+            np.array([0.0, 0.0, 1.0, 1.0]),
         )
-        _draw_axis(
-            model, manus_axis_ids[2], wrist_origin,
-            R_manus_sim[:, 2], 0.16, np.array([0.0, 0.0, 1.0, 0.95]),
-        )
-        # r_wrist 轴：组合 URDF 自带 r_wrist_axis_* 的 FK geom。
-        wrist_origin_fk = np.zeros(3)
-        wrist_axes_fk = np.zeros((3, 3))
-        for axis_index, fk_id in enumerate(wrist_axis_fk_ids):
-            unit = data.geom_xmat[fk_id].reshape(3, 3)[:, 2].copy()
-            unit /= np.linalg.norm(unit) + 1.0e-12
-            wrist_origin_fk += (
-                data.geom_xpos[fk_id] - (0.045 * unit)
+        for i in range(3):
+            _draw_axis(
+                model, manus_axis_ids[i], wrist_origin,
+                R_manus_sim[:, i], 0.18, manus_colors[i],
             )
-            wrist_axes_fk[:, axis_index] = unit
-        wrist_origin_fk /= 3.0
-        wrist_x = wrist_axes_fk[:, 0].copy()
-        wrist_x /= np.linalg.norm(wrist_x) + 1.0e-12
-        wrist_y_candidate = wrist_axes_fk[:, 1]
-        wrist_y = (
-            wrist_y_candidate
-            - np.dot(wrist_y_candidate, wrist_x) * wrist_x
+        wrist_origin_fk, wrist_rotation_fk = _frame_from_axis_geoms(
+            data, wrist_axis_x, wrist_axis_z, 0.045
         )
-        wrist_y /= np.linalg.norm(wrist_y) + 1.0e-12
-        wrist_z = np.cross(wrist_x, wrist_y)
-        wrist_z /= np.linalg.norm(wrist_z) + 1.0e-12
-        _draw_axis(
-            model, wrist_axis_ids[0], wrist_origin_fk,
-            wrist_x, 0.12, np.array([1.0, 0.0, 0.0, 0.95]),
-        )
-        _draw_axis(
-            model, wrist_axis_ids[1], wrist_origin_fk,
-            wrist_y, 0.12, np.array([0.0, 1.0, 0.0, 0.95]),
-        )
-        _draw_axis(
-            model, wrist_axis_ids[2], wrist_origin_fk,
-            wrist_z, 0.12, np.array([0.0, 0.0, 1.0, 0.95]),
-        )
+        for i in range(3):
+            _draw_axis(
+                model, wrist_axis_ids[i], wrist_origin_fk,
+                wrist_rotation_fk[:, i], 0.115, actual_colors[i],
+            )
 
     if args.headless:
+        publish_hand_state("teleop")
         for frame_index in range(start_index, end_index + 1):
             frame_points = pose_at(frame_index)
             _update_skeleton(model, data, point_geom_ids, bone_geom_ids,
                              frame_points)
             apply_frame_axes(frame_index, frame_points)
+            publish_frame_keypoints(frame_index)
+            if hand_cache is not None:
+                _apply_hand_commands(
+                    model, data, hand_qpos_ids, hand_cache.get()
+                )
             mujoco.mj_forward(model, data)
+        publish_hand_state("returning")
+        time.sleep(2.0)
+        publish_hand_state("idle")
+        if hand_live is not None:
+            hand_live.close()
+        if hand_session is not None:
+            hand_session.close()
         _LOG.info("无窗口回放完成：%d 帧", end_index - start_index + 1)
         return 0
 
@@ -525,6 +619,7 @@ def main(argv: list[str] | None = None) -> int:
         if keycode == 32:
             if finished:
                 controls["restart"] = True
+                controls["paused"] = False
                 finished = False
                 _LOG.info("已到末帧：重新从首帧播放")
             else:
@@ -532,6 +627,7 @@ def main(argv: list[str] | None = None) -> int:
                 _LOG.info("%s", "暂停" if controls["paused"] else "继续")
         elif keycode == 82:
             controls["restart"] = True
+            controls["paused"] = False
             finished = False
             _LOG.info("从首帧重新开始")
 
@@ -541,6 +637,7 @@ def main(argv: list[str] | None = None) -> int:
     last_wall = time.monotonic()
     last_frame = -1
     last_log_at = time.monotonic()
+    publish_hand_state("idle" if controls["paused"] else "teleop")
     _LOG.info(
         "开始数据回放：Space 暂停/继续（已到末帧时重新播放），R 从首帧重播，"
         "关闭窗口退出；loop=%s，speed=%g",
@@ -579,6 +676,11 @@ def main(argv: list[str] | None = None) -> int:
                     finished = True
                     controls["paused"] = True
                     _LOG.info("已播放到末帧，暂停；按 Space 重新从头播放")
+                desired_hand_state = (
+                    "returning" if finished else
+                    ("idle" if controls["paused"] else "teleop")
+                )
+                publish_hand_state(desired_hand_state)
                 progress = elapsed_s / max(duration_s, 1.0e-9)
                 frame_index = start_index + int(
                     progress * (end_index - start_index)
@@ -586,16 +688,24 @@ def main(argv: list[str] | None = None) -> int:
                 frame_index = int(
                     np.clip(frame_index, start_index, end_index)
                 )
-                if frame_index != last_frame:
-                    with viewer.lock():
+                frame_changed = frame_index != last_frame
+                with viewer.lock():
+                    if frame_changed:
                         frame_points = pose_at(frame_index)
                         _update_skeleton(
                             model, data, point_geom_ids, bone_geom_ids,
                             frame_points,
                         )
                         apply_frame_axes(frame_index, frame_points)
+                        publish_frame_keypoints(frame_index)
+                        last_frame = frame_index
+                    if hand_cache is not None:
+                        _apply_hand_commands(
+                            model, data, hand_qpos_ids,
+                            hand_cache.get(),
+                        )
+                    if frame_changed or hand_cache is not None:
                         mujoco.mj_forward(model, data)
-                    last_frame = frame_index
                 if time.monotonic() - last_log_at >= 2.0:
                     last_log_at = time.monotonic()
                     _LOG.info(
@@ -609,6 +719,15 @@ def main(argv: list[str] | None = None) -> int:
                 time.sleep(1.0 / 120.0)
     except KeyboardInterrupt:
         pass
+    finally:
+        publish_hand_state("returning")
+        # 给手桥斜坡回零留出时间；真机退出仍需观察 zero_hold。
+        time.sleep(1.5 if hand_state_pub is not None else 0.0)
+        publish_hand_state("idle")
+        if hand_live is not None:
+            hand_live.close()
+        if hand_session is not None:
+            hand_session.close()
     return 0
 
 

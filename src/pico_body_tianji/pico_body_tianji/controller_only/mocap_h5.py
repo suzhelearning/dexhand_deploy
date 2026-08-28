@@ -64,6 +64,7 @@ class HandRecording:
     valid: np.ndarray  # (N,) bool；False 表示该帧手腕缺失
     wrist: np.ndarray  # (N,7) float64 [x,y,z,qx,qy,qz,qw]
     keypoints_world: np.ndarray  # (N,21,3) float64，MediaPipe 顺序
+    wuji2_joints: np.ndarray | None = None  # (N,20) float64 rad，离线 retarget；可选
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class MocapRecording:
             per_side[side] = {
                 "valid_frames": int(valid.sum()),
                 "valid_ratio": float(valid.mean()),
+                "wuji2_joints": self.hands[side].wuji2_joints is not None,
             }
         return {
             "path": str(self.path),
@@ -228,6 +230,20 @@ def load_mocap_h5(path: str | Path) -> MocapRecording:
                     f"{group_name}/valid 形状 {flagged.shape} "
                     f"与时间轴 {expected} 不符"
                 )
+            # 可选字段（v5 扩展）：离线 retarget 的 20 关节角。
+            # 采集端不写；处理团队从 keypoints_world 转换后填入。
+            # 存在时必须形状匹配 (N,20)；数值有限性由消费端前向填充。
+            wuji2_joints = None
+            if "wuji2_joints" in group:
+                joints = np.asarray(
+                    group["wuji2_joints"][:], dtype=np.float64
+                )
+                if joints.shape != (time_ns.size, 20):
+                    raise ValueError(
+                        f"{group_name}/wuji2_joints 形状 {joints.shape} "
+                        f"与时间轴 {expected}×(20) 不符"
+                    )
+                wuji2_joints = joints
             # 防御性清洗：数值非有限或四元数未归一化的帧按无效处理。
             quaternion_norm = np.linalg.norm(quaternion, axis=1)
             root_error = np.linalg.norm(
@@ -247,6 +263,7 @@ def load_mocap_h5(path: str | Path) -> MocapRecording:
                 valid=valid,
                 wrist=wrist,
                 keypoints_world=keypoints,
+                wuji2_joints=wuji2_joints,
             )
 
     return MocapRecording(

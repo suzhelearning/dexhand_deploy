@@ -38,6 +38,8 @@ sim_mocap_step = { cmd = "bash scripts/run_mocap_step.sh --mujoco-only", descrip
 sim_mocap_live = { cmd = "bash scripts/run_mocap_live.sh --mujoco-only", description = "Motive tianji_wrist 定零 + 连续键盘位置步进 + 实时位姿显示（默认右臂 10mm/键，Zenoh）" }
 sim_mocap_h5 = { cmd = "bash scripts/run_mocap_h5_replay.sh --mujoco-only", description = "从 Motive tianji_wrist 实测 Home 移动到 HDF5 Manus 右腕绝对轨迹的 Enter 保压回放（右臂，Zenoh）" }
 sim_mocap_h5_replay = { cmd = "bash scripts/run_mocap_h5_wrist_replay.sh", description = "机械臂+wuji2 H5 数据回放（Home 静止；tianji_wrist 仅定位动捕原点；无 IK）" }
+wuji_hand2_dry = { cmd = "bash scripts/run_wuji_hand2_dry.sh", description = "wuji2 手桥 dry-run：键点→retarget→发布命令，不连接硬件（配合 sim_mocap_h5 仿真验收）" }
+wuji_hand2_real = { cmd = "bash scripts/run_wuji_hand2_real.sh", depends-on = ["doctor"], description = "wuji2 手桥真机：键点→retarget→Wuji Hand 2 关节控制（必须 --confirm-real）" }
 sim = { cmd = "bash scripts/run_sim.sh --both", depends-on = ["doctor"] }
 
 # C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。

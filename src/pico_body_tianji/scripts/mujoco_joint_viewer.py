@@ -13,7 +13,9 @@ import numpy as np
 import zenoh
 from scipy.spatial.transform import Rotation
 
-from pico_body_tianji.controller_only.mocap_h5 import HAND_KEYPOINT_EDGES
+from pico_body_tianji.controller_only.mocap_h5 import (
+    HAND_KEYPOINT_EDGES, compose_pose, invert_pose,
+)
 from pico_body_tianji.joint_state_model import urdf_joint_names
 from pico_body_tianji.mujoco_joint_state import apply_joint_positions
 from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
@@ -81,6 +83,78 @@ class MujocoJointMirror:
             pass
 
 
+# wuji-sdk firmware 序；新 tianji_wuji2 小指无 _finger_，旧 beta1 为别名。
+_WUJI2_RIGHT_JOINT_NAMES = [
+    "r_thumb_cmc_flex", "r_thumb_cmc_abd", "r_thumb_mcp", "r_thumb_ip",
+    "r_index_finger_mcp_flex", "r_index_finger_mcp_abd",
+    "r_index_finger_pip", "r_index_finger_dip",
+    "r_middle_finger_mcp_flex", "r_middle_finger_mcp_abd",
+    "r_middle_finger_pip", "r_middle_finger_dip",
+    "r_ring_finger_mcp_flex", "r_ring_finger_mcp_abd",
+    "r_ring_finger_pip", "r_ring_finger_dip",
+    "r_pinky_mcp_flex", "r_pinky_mcp_abd", "r_pinky_pip", "r_pinky_dip",
+]
+_WUJI2_RIGHT_JOINT_ALIASES = {
+    "r_pinky_mcp_flex": "r_pinky_finger_mcp_flex",
+    "r_pinky_mcp_abd": "r_pinky_finger_mcp_abd",
+    "r_pinky_pip": "r_pinky_finger_pip",
+    "r_pinky_dip": "r_pinky_finger_dip",
+}
+
+
+class WujiHandCommandMirror:
+    """镜像 wuji_hand2_bridge 发布的 20×float32 firmware 序关节命令。"""
+
+    def __init__(self, session, model, topic: str):
+        self._qpos_addresses = []
+        for name in _WUJI2_RIGHT_JOINT_NAMES:
+            candidate = name
+            joint_id = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_JOINT, candidate
+            )
+            if joint_id < 0:
+                candidate = _WUJI2_RIGHT_JOINT_ALIASES.get(name, "")
+                joint_id = mujoco.mj_name2id(
+                    model, mujoco.mjtObj.mjOBJ_JOINT, candidate
+                )
+            if joint_id < 0:
+                raise RuntimeError(f"MuJoCo 模型缺少 wuji2 手关节：{name}")
+            self._qpos_addresses.append(int(model.jnt_qposadr[joint_id]))
+        self._pending: np.ndarray | None = None
+        self._received_once = False
+
+        def on_sample(sample) -> None:
+            payload = bytes(sample.payload)
+            if len(payload) != 20 * 4:
+                return
+            self._pending = np.frombuffer(payload, dtype="<f4").copy()
+
+        self._sub = session.declare_subscriber(key(topic), on_sample)
+        _LOG.info("等待 wuji2 手部关节命令：%s", topic)
+
+    @property
+    def received_once(self) -> bool:
+        return self._received_once
+
+    def apply_latest(self, data) -> int:
+        pending = self._pending
+        self._pending = None
+        if pending is None:
+            return 0
+        for qpos_address, value in zip(self._qpos_addresses, pending):
+            data.qpos[qpos_address] = float(value)
+        if not self._received_once:
+            self._received_once = True
+            _LOG.info("已接收 wuji2 20 关节命令；MuJoCo 开始镜像手指")
+        return len(self._qpos_addresses)
+
+    def close(self) -> None:
+        try:
+            self._sub.undeclare()
+        except Exception:
+            pass
+
+
 def _qpos_addresses(model) -> dict[str, int]:
     addresses = {}
     for name in urdf_joint_names():
@@ -141,22 +215,29 @@ def _add_frame_zero_skeleton(xml: str) -> str:
       </material>
     </visual>"""
         )
-    # 彩色坐标系轴（长为全长的圆柱，中心在中点，由世界坐标定位）。
-    #  两套轴统一用 RGB：+X=红、+Y=绿、+Z=蓝。
-    #  Manus wrist：+X=指尖、+Y=手背、+Z=小拇指侧。
-    #  wuji2 r_wrist：+X/+Y/+Z 为厂商 URDF link 本地轴。
-    for axis_name in ("manus", "r_wrist"):
+    # 两套动态坐标轴：
+    # - manus_wrist：H5 frame0 原始 W frame，细/半透明/长；
+    # - r_wrist：机器人当前 FK B frame，纯 RGB、粗/短，随机械臂移动。
+    # W->B 目标仅用于数值误差诊断，不画第三套轴。
+    axis_styles = {
+        "manus_wrist": (
+            0.003,
+            ("1 0.35 0.35 0.62", "0.35 1 0.35 0.62", "0.35 0.55 1 0.62"),
+        ),
+        "r_wrist": (
+            0.007,
+            ("1 0 0 1", "0 1 0 1", "0 0 1 1"),
+        ),
+    }
+    for axis_name, (radius, colors) in axis_styles.items():
         for axis_index in range(3):
-            rgba = (
-                ("1 0 0 0.95", "0 1 0 0.95", "0 0 1 0.95")[axis_index]
-            )
             visuals.append(
                 f"""
     <visual name="ax_{axis_name}_{axis_index}">
       <origin xyz="0 0 0" rpy="0 0 0" />
-      <geometry><cylinder radius="0.006" length="0.001" /></geometry>
+      <geometry><cylinder radius="{radius}" length="0.001" /></geometry>
       <material name="ax_{axis_name}_mat_{axis_index}">
-        <color rgba="{rgba}" />
+        <color rgba="{colors[axis_index]}" />
       </material>
     </visual>"""
             )
@@ -269,6 +350,14 @@ class FrameZeroHandSkeleton:
         self._pending: dict | None = None
         self._received_once = False
         self._sim_from_motive: tuple[np.ndarray, np.ndarray] | None = None
+        self._target_origin_mj: np.ndarray | None = None
+        self._target_rotation_mj: np.ndarray | None = None
+        self._target_tcp_pose_chest: np.ndarray | None = None
+        self._solved_tcp_pose_chest: np.ndarray | None = None
+        self._tcp_to_wrist_pose: np.ndarray | None = None
+        self.last_position_error_mm: float | None = None
+        self.last_rotation_error_deg: float | None = None
+        self._last_error_log_at = -float("inf")
         self._tianji_config = get_config()
         self._wrist_axis_x_geom_id = self._required_geom(
             model, "r_wrist_axis_0"
@@ -291,15 +380,11 @@ class FrameZeroHandSkeleton:
             for index in range(len(HAND_KEYPOINT_EDGES))
         ]
         self._manus_axis_ids = [
-            self._required_geom(model, f"ax_manus_{index}")
+            self._required_geom(model, f"ax_manus_wrist_{index}")
             for index in range(3)
         ]
         self._wrist_axis_ids = [
             self._required_geom(model, f"ax_r_wrist_{index}")
-            for index in range(3)
-        ]
-        self._wrist_axis_fk_ids = [
-            self._required_geom(model, f"r_wrist_axis_{index}")
             for index in range(3)
         ]
         for geom_id in (
@@ -313,8 +398,14 @@ class FrameZeroHandSkeleton:
         # 隐藏 URDF 自带的 TCP/marker/r_wrist 坐标轴（只保留上面两套
         # 动态轴）；geom 仍保留用于 FK 位姿读取。
         for prefix in (
+            "TCP_Link_L_axis_",
             "TCP_Link_R_axis_",
-            "marker_mocap_axis_",
+            "marker_mocap_axis_",      # 旧组合 URDF
+            "marker_mocap_l_axis_",    # 最新双手 URDF
+            "marker_mocap_r_axis_",
+            "l_mount_axis_",
+            "r_mount_axis_",
+            "l_wrist_axis_",
             "r_wrist_axis_",
         ):
             for index in range(3):
@@ -326,6 +417,16 @@ class FrameZeroHandSkeleton:
                     model.geom_rgba[geom_id, 3] = 0.0
         self._sub = ZenohJsonSub(
             session, key(topic), self._on_skeleton
+        )
+        self._target_sub = ZenohJsonSub(
+            session,
+            key("/pico_body/right_arm_target_pose"),
+            self._on_target_pose,
+        )
+        self._solved_sub = ZenohJsonSub(
+            session,
+            key("/pico_body_sim/right_arm/solved_pose"),
+            self._on_solved_pose,
         )
         _LOG.info("等待 frame0 手部关键点骨架：%s", topic)
 
@@ -346,6 +447,32 @@ class FrameZeroHandSkeleton:
     def _on_skeleton(self, msg: dict) -> None:
         self._pending = msg
 
+    @staticmethod
+    def _pose_from_message(msg: dict) -> np.ndarray | None:
+        try:
+            p = msg["position"]
+            q = msg["orientation"]
+            pose = np.array([
+                p["x"], p["y"], p["z"],
+                q["x"], q["y"], q["z"], q["w"],
+            ], dtype=np.float64)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not np.isfinite(pose).all() or np.linalg.norm(pose[3:]) < 1.0e-9:
+            return None
+        pose[3:] /= np.linalg.norm(pose[3:])
+        return pose
+
+    def _on_target_pose(self, msg: dict) -> None:
+        pose = self._pose_from_message(msg)
+        if pose is not None:
+            self._target_tcp_pose_chest = pose
+
+    def _on_solved_pose(self, msg: dict) -> None:
+        pose = self._pose_from_message(msg)
+        if pose is not None:
+            self._solved_tcp_pose_chest = pose
+
     def apply_latest(self, model, data) -> bool:
         payload = self._pending
         if payload is None:
@@ -359,8 +486,15 @@ class FrameZeroHandSkeleton:
                 payload["home_wuji2_wrist_pose_motive"],
                 dtype=np.float64,
             )
-            frame0_manus_quat = np.asarray(
+            manus_wrist_quat_motive = np.asarray(
                 payload["frame0_manus_quat_xyzw"], dtype=np.float64
+            )
+            target_wrist_pose_motive = np.asarray(
+                payload["frame0_wuji2_wrist_pose_motive"],
+                dtype=np.float64,
+            )
+            tcp_to_wrist_pose = np.asarray(
+                payload["tcp_to_wrist_pose_xyzw"], dtype=np.float64
             )
             edges = tuple(
                 tuple(int(value) for value in edge)
@@ -372,16 +506,25 @@ class FrameZeroHandSkeleton:
         if (
             points_motive.shape != (21, 3)
             or home_pose_motive.shape != (7,)
-            or frame0_manus_quat.shape != (4,)
+            or manus_wrist_quat_motive.shape != (4,)
+            or target_wrist_pose_motive.shape != (7,)
+            or tcp_to_wrist_pose.shape != (7,)
             or not np.isfinite(points_motive).all()
             or not np.isfinite(home_pose_motive).all()
-            or not np.isfinite(frame0_manus_quat).all()
-            or np.linalg.norm(frame0_manus_quat) < 1.0e-9
+            or not np.isfinite(manus_wrist_quat_motive).all()
+            or not np.isfinite(target_wrist_pose_motive).all()
+            or not np.isfinite(tcp_to_wrist_pose).all()
+            or np.linalg.norm(manus_wrist_quat_motive) < 1.0e-9
+            or np.linalg.norm(target_wrist_pose_motive[3:]) < 1.0e-9
             or edges != HAND_KEYPOINT_EDGES
         ):
             _LOG.warning("忽略形状/拓扑不匹配的 frame0 骨架消息")
             return False
 
+        self._tcp_to_wrist_pose = tcp_to_wrist_pose.copy()
+        self._tcp_to_wrist_pose[3:] /= np.linalg.norm(
+            self._tcp_to_wrist_pose[3:]
+        )
         frozen = bool(payload.get("frozen", False))
         if not frozen or self._sim_from_motive is None:
             home_position_mj, _home_wrist_rotation = (
@@ -438,7 +581,14 @@ class FrameZeroHandSkeleton:
             color = _POINT_COLORS[child].copy()
             color[3] = 0.78
             model.geom_rgba[geom_id] = color
-        self._update_axes(model, data, points_mj, frame0_manus_quat)
+        self._update_reference_axes(
+            model,
+            data,
+            points_mj,
+            manus_wrist_quat_motive,
+            target_wrist_pose_motive[3:],
+        )
+        self.update_fk_axes(model, data, force_log=bool(frozen))
         if not self._received_once:
             self._received_once = True
             _LOG.info(
@@ -455,81 +605,117 @@ class FrameZeroHandSkeleton:
     ) -> None:
         _draw_axis(model, geom_id, origin, direction, length, color)
 
-    def _update_axes(
+    def _update_reference_axes(
         self, model, data, points_mj: np.ndarray,
-        frame0_manus_quat: np.ndarray,
+        manus_wrist_quat: np.ndarray,
+        target_wrist_quat: np.ndarray,
     ) -> None:
-        # Manus wrist 轴：原点在腕点，+X=指尖(红)、+Y=手背(绿)、+Z=小拇指侧(蓝)。
+        """绘制原始 Manus W 与转换后的目标 Wuji B 两套固定参考轴。"""
         wrist_origin = points_mj[0]
         rotation_mj_from_motive, _ = self._sim_from_motive
-        manus_rotation_motive = (
-            frame0_manus_quat / np.linalg.norm(frame0_manus_quat)
-        )
-        x, y, z, w = manus_rotation_motive
-        R_manus_motive = np.array(
-            [
-                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-                [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-            ]
-        )
+        R_manus_motive = Rotation.from_quat(
+            manus_wrist_quat / np.linalg.norm(manus_wrist_quat)
+        ).as_matrix()
+        R_target_motive = Rotation.from_quat(
+            target_wrist_quat / np.linalg.norm(target_wrist_quat)
+        ).as_matrix()
         R_manus_mj = rotation_mj_from_motive @ R_manus_motive
-        tip_axis = R_manus_mj[:, 0]
-        back_axis = R_manus_mj[:, 1]
-        pinky_axis = R_manus_mj[:, 2]
-        self._draw_axis(
-            model, self._manus_axis_ids[0], wrist_origin,
-            tip_axis, 0.16, np.array([1.0, 0.0, 0.0, 0.95]),
+        R_target_mj = rotation_mj_from_motive @ R_target_motive
+        self._target_origin_mj = wrist_origin.copy()
+        self._target_rotation_mj = R_target_mj.copy()
+
+        # Manus W：长 180mm、细、半透明浅 RGB。
+        manus_colors = (
+            np.array([1.0, 0.35, 0.35, 0.62]),
+            np.array([0.35, 1.0, 0.35, 0.62]),
+            np.array([0.35, 0.55, 1.0, 0.62]),
         )
-        self._draw_axis(
-            model, self._manus_axis_ids[1], wrist_origin,
-            back_axis, 0.16, np.array([0.0, 1.0, 0.0, 0.95]),
+        for axis_index, geom_id in enumerate(self._manus_axis_ids):
+            self._draw_axis(
+                model, geom_id, wrist_origin,
+                R_manus_mj[:, axis_index], 0.18,
+                manus_colors[axis_index],
+            )
+
+    def update_fk_axes(self, model, data, *, force_log: bool = False) -> bool:
+        """每个关节帧更新当前 FK r_wrist，并记录目标/FK 位姿误差。"""
+        if self._target_origin_mj is None or self._target_rotation_mj is None:
+            return False
+        # 只使用 X/Z 圆柱恢复共同原点和右手系。Y 圆柱局部 +Z 指向 -Y，
+        # 不能按统一 center-half*localZ 公式处理。
+        wrist_origin_fk, wrist_rotation_fk = _frame_from_axis_geoms(
+            data,
+            self._wrist_axis_x_geom_id,
+            self._wrist_axis_z_geom_id,
+            0.045,
         )
-        self._draw_axis(
-            model, self._manus_axis_ids[2], wrist_origin,
-            pinky_axis, 0.16, np.array([0.0, 0.0, 1.0, 0.95]),
+        target_source = "Motive preview"
+        if (
+            self._target_tcp_pose_chest is not None
+            and self._solved_tcp_pose_chest is not None
+            and self._tcp_to_wrist_pose is not None
+        ):
+            target_wrist_chest = compose_pose(
+                self._target_tcp_pose_chest, self._tcp_to_wrist_pose
+            )
+            solved_wrist_chest = compose_pose(
+                self._solved_tcp_pose_chest, self._tcp_to_wrist_pose
+            )
+            current_wrist_mj = np.concatenate((
+                wrist_origin_fk,
+                Rotation.from_matrix(wrist_rotation_fk).as_quat(),
+            ))
+            mj_from_chest = compose_pose(
+                current_wrist_mj, invert_pose(solved_wrist_chest)
+            )
+            target_wrist_mj = compose_pose(
+                mj_from_chest, target_wrist_chest
+            )
+            self._target_origin_mj = target_wrist_mj[:3].copy()
+            self._target_rotation_mj = Rotation.from_quat(
+                target_wrist_mj[3:]
+            ).as_matrix()
+            target_source = "IK target/solved"
+
+        actual_colors = (
+            np.array([1.0, 0.0, 0.0, 1.0]),
+            np.array([0.0, 1.0, 0.0, 1.0]),
+            np.array([0.0, 0.0, 1.0, 1.0]),
         )
-        # wuji2 r_wrist 轴：从组合 URDF 自带 r_wrist_axis_* 的 FK 位姿
-        # 实时读取——每个 geom 的 col2 是该轴世界方向，轴中点减去半长
-        # 得到 r_wrist 原点，随机械臂 FK 运动。
-        wrist_origin_fk = np.zeros(3)
-        wrist_axes_fk = np.zeros((3, 3))
-        for axis_index, fk_id in enumerate(self._wrist_axis_fk_ids):
-            unit = data.geom_xmat[fk_id].reshape(3, 3)[:, 2].copy()
-            unit /= np.linalg.norm(unit) + 1.0e-12
-            origin = data.geom_xpos[fk_id] - (0.045 * unit)
-            wrist_origin_fk += origin
-            wrist_axes_fk[:, axis_index] = unit
-        wrist_origin_fk /= 3.0
-        # 正交化（URDF 轴 geom 可能未严格正交），以 X 为主方向。
-        wrist_x = wrist_axes_fk[:, 0].copy()
-        wrist_x /= np.linalg.norm(wrist_x) + 1.0e-12
-        wrist_y_candidate = wrist_axes_fk[:, 1]
-        wrist_y = (
-            wrist_y_candidate
-            - np.dot(wrist_y_candidate, wrist_x) * wrist_x
+        for axis_index, geom_id in enumerate(self._wrist_axis_ids):
+            self._draw_axis(
+                model, geom_id, wrist_origin_fk,
+                wrist_rotation_fk[:, axis_index], 0.115,
+                actual_colors[axis_index],
+            )
+
+        position_error_mm = 1000.0 * float(
+            np.linalg.norm(wrist_origin_fk - self._target_origin_mj)
         )
-        wrist_y /= np.linalg.norm(wrist_y) + 1.0e-12
-        wrist_z = np.cross(wrist_x, wrist_y)
-        wrist_z /= np.linalg.norm(wrist_z) + 1.0e-12
-        self._draw_axis(
-            model, self._wrist_axis_ids[0], wrist_origin_fk,
-            wrist_x, 0.12, np.array([1.0, 0.0, 0.0, 0.95]),
-        )
-        self._draw_axis(
-            model, self._wrist_axis_ids[1], wrist_origin_fk,
-            wrist_y, 0.12, np.array([0.0, 1.0, 0.0, 0.95]),
-        )
-        self._draw_axis(
-            model, self._wrist_axis_ids[2], wrist_origin_fk,
-            wrist_z, 0.12, np.array([0.0, 0.0, 1.0, 0.95]),
-        )
+        rotation_error_deg = float(np.rad2deg(
+            Rotation.from_matrix(
+                self._target_rotation_mj.T @ wrist_rotation_fk
+            ).magnitude()
+        ))
+        self.last_position_error_mm = position_error_mm
+        self.last_rotation_error_deg = rotation_error_deg
+        now = time.monotonic()
+        if force_log or now - self._last_error_log_at >= 0.5:
+            _LOG.info(
+                "frame0 r_wrist 目标↔FK[%s]：位置误差=%.2fmm 姿态误差=%.2f°",
+                target_source,
+                position_error_mm,
+                rotation_error_deg,
+            )
+            self._last_error_log_at = now
+        return True
 
     def close(self) -> None:
-        try:
-            self._sub.close()
-        except Exception:
-            pass
+        for sub in (self._sub, self._target_sub, self._solved_sub):
+            try:
+                sub.close()
+            except Exception:
+                pass
 
 
 def _parse_args():
@@ -548,6 +734,10 @@ def _parse_args():
                 "default": "",
                 "help": "frame0 手部 21 点/20 骨段目标话题；空值禁用",
             },
+            "--hand-commands-topic": {
+                "default": "",
+                "help": "wuji2 20×float32 关节命令话题；空值禁用",
+            },
         }
     )
 
@@ -563,6 +753,11 @@ def main() -> None:
 
     session = open_session()
     mirror = MujocoJointMirror(session, model, args.topic)
+    hand = (
+        WujiHandCommandMirror(session, model, args.hand_commands_topic)
+        if args.hand_commands_topic
+        else None
+    )
     skeleton = (
         FrameZeroHandSkeleton(
             session, model, args.frame0_skeleton_topic
@@ -581,13 +776,21 @@ def main() -> None:
 
             while viewer.is_running():
                 with viewer.lock():
-                    if mirror.apply_latest(data):
+                    changed = bool(mirror.apply_latest(data))
+                    if hand is not None and hand.apply_latest(data):
+                        changed = True
+                    if changed:
+                        # 先刷新手臂/手指 FK，随后才能读取当前 r_wrist frame。
                         mujoco.mj_forward(model, data)
-                    if (
-                        skeleton is not None
-                        and mirror.received_once
-                        and skeleton.apply_latest(model, data)
-                    ):
+                    skeleton_changed = False
+                    if skeleton is not None and mirror.received_once:
+                        skeleton_changed = skeleton.apply_latest(model, data)
+                        if not skeleton_changed and changed:
+                            skeleton_changed = skeleton.update_fk_axes(
+                                model, data
+                            )
+                    if skeleton_changed:
+                        # 动态轴/骨架写入 model.geom_* 后再刷新显示坐标。
                         mujoco.mj_forward(model, data)
                 viewer.sync()
                 if (
@@ -602,6 +805,8 @@ def main() -> None:
         pass
     finally:
         mirror.close()
+        if hand is not None:
+            hand.close()
         if skeleton is not None:
             skeleton.close()
 

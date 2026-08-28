@@ -21,6 +21,7 @@ VALIDATE_ONLY=false
 HEADLESS=false
 YAW_DEG=0.0
 RIGHT_ARM_POSE=""
+HAND_COMMANDS=false
 
 usage() {
   cat <<'EOF'
@@ -48,6 +49,8 @@ usage() {
   --paused        开始即暂停
   --validate-only 只校验并输出首末帧腕点，不打开窗口
   --headless      依次应用全部帧后退出
+  --hand-commands 订阅 wuji_hand2_bridge 的 retarget 命令并驱动手部关节
+                  （需要 wuji_hand2_bridge 在运行，dry-run 或真机）
   -h, --help
 
 按键：
@@ -82,6 +85,9 @@ while (($#)); do
       fi
       YAW_DEG="$2"
       shift
+      ;;
+    --hand-commands)
+      HAND_COMMANDS=true
       ;;
     --right-arm-pose=*)
       RIGHT_ARM_POSE="${1#--right-arm-pose=}"
@@ -171,6 +177,9 @@ if [[ "${VALIDATE_ONLY}" == true ]]; then
 fi
 if [[ "${HEADLESS}" == true ]]; then
   arguments+=(--headless)
+fi
+if [[ "${HAND_COMMANDS}" == true ]]; then
+  arguments+=(--hand-commands)
 fi
 
 printf '%s\n' \
