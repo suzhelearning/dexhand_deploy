@@ -144,3 +144,45 @@ git diff --check
 ```
 
 仍未覆盖：真实 Zenoh router 下三 query completion/multiple reply/reconnect 的进程测试；H5/live 真实 H5/hand/设备 preflight 扫描接口仍由 launcher 提供严格 typed result；原 1035 行 H5 测试中的完整 geometry/terminal/viewer 部分尚未完全恢复（当前保留 canonical lifecycle + 旧 step diagnostic 27 项保护）。
+
+## Fix round 4（第四轮修复）
+
+本轮按 brief 与完整重审 findings 继续收敛 source lifecycle、严格解析、real admission、diagnostics 与入口 wiring：
+
+- 新增 `sources/common/real_admission.py` 的 `RealCapabilityInput`，所有 bool 字段要求真实 YAML/Python boolean；`"false"` 等字符串拒绝解析。live 接受 typed capability/provider，并在 start_pending、teleop 每 tick 重新检查 speed、yaw、deadman 与 preflight；real capability 默认不声明。
+- H5 对实际 `wuji2_joints` 全部帧执行 `(N,20)`、finite、Wuji beta1 limits 校验，禁止 real admission 依赖前向填充；speed≤0.25、yaw=0、deadman 与 typed preflight 全部满足才暴露 real capability。H5 solved pose 现在强制匹配正式注入的 producer logical id 与 instance id；CLI 支持 `--expected-producer-*`，运行入口从 `TIANJI_ARM_PRODUCER_*` 注入，缺失即 fail closed。
+- live 冻结方向 delta 改为 `R_current * R_reference^-1`，并通过 world→Base 旋转共轭后施加 Home rotation；stream/return 不再使用旧 latch 立即切到 armed，return 只接受匹配 intent 的 returning/idle 及新 sequence 的 `at_home=true`、`return_complete=true`，完成有独立 deadline。
+- `SessionClient` 将 state、at_home、return_complete 三次 query 分别计 completion，subscriber event 不满足 snapshot barrier；foreign/multiple reply 使 client fail closed，coordinator sequence 使用 publisher-global baseline，reconnect 清 identity、baseline、invalid 状态并重新 query。`TargetPublisher` 补齐共享 allocator 的初始 sequence。
+- `MotiveFrameSource` 强制顶层 names、canonical decimal ids（拒绝 `7`/`07` 混用）、重复 id/name、finite/normalized quaternion；H5 与 diagnostics callback 均只保存 typed `MotiveFrame`。Frame0 viewer 改订阅 canonical arm target/solved topics，并在 `apply_latest()` 应用 producer 消息。
+- calibration diagnostic 禁止旧 state/target/final-command publisher，仅保留 canonical SessionState 订阅与可选 SessionClient intent；补充 `scripts/mocap_calibration`、CMake install 和 Pixi simulation-only task。H5 validate-only 改为直接 canonical module，live wrapper 只传新 CLI 参数并要求三个 component/router/coordinator identity。
+
+本轮 RED/GREEN 与 scoped 验证：
+
+```text
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_task3_round4
+# RED（首轮）：ModuleNotFoundError: pico_body_tianji.sources.common.real_admission
+# GREEN：Ran 5 tests ... OK
+
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest \
+  tests.test_task3_round4 tests.test_h5_replay tests.test_canonical_sources \
+  tests.test_mocap_keyboard_step tests.test_target_mapper
+# Ran 43 tests in 0.166s / OK
+
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest \
+  tests.test_controller_only_trace tests.test_controller_only_real_profile
+# Ran 5 tests in 0.010s / OK
+
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m py_compile \
+  src/pico_body_tianji/pico_body_tianji/sources/common/*.py \
+  src/pico_body_tianji/pico_body_tianji/sources/pico_controller/*.py \
+  src/pico_body_tianji/pico_body_tianji/sources/mocap/*.py \
+  src/pico_body_tianji/pico_body_tianji/diagnostics/mocap_calibration_node.py \
+  src/pico_body_tianji/scripts/mujoco_joint_viewer.py \
+  src/pico_body_tianji/scripts/mocap_calibration
+# 退出码 0，无输出
+
+git diff --check
+# 退出码 0，无输出
+```
+
+`tests/test_pico_link_probe.py` 已按批准 clean-cutover 删除；其旧 `full_body` imports 在本轮前即不可解析，不保留兼容 alias。未完成/风险：未运行 full suite、真实 Zenoh router、多进程 launcher、C++/Task 4-8 consumer 与实体设备验收；现有 wrapper 仍含后续 Task 8 的旧 runtime 启动段，需后续统一 session launcher 做最终 clean cutover。当前状态仍为 DONE_WITH_CONCERNS。

@@ -8,9 +8,8 @@ from types import SimpleNamespace
 
 import h5py
 import numpy as np
-
 from pico_body_tianji.protocol import topics
-from pico_body_tianji.protocol.messages import SessionState
+from pico_body_tianji.protocol.messages import LatchedBool, SessionState
 from pico_body_tianji.sources.mocap.h5 import load_mocap_h5
 from pico_body_tianji.sources.mocap.h5_replay_node import (
     DEFAULT_PARAMETERS,
@@ -33,6 +32,7 @@ class _Session:
         self.publishers = {}
         self.subscribers = []
         self.queryables = []
+        self.get_callbacks = {}
     def declare_publisher(self, key, **kwargs):
         pub = _Publisher(key)
         self.publishers[key] = pub
@@ -44,7 +44,7 @@ class _Session:
         self.queryables.append((key, callback))
         return SimpleNamespace(undeclare=lambda: None)
     def get(self, key, callback, **kwargs):
-        return None
+        self.get_callbacks[key] = callback
     def close(self):
         pass
 
@@ -90,10 +90,33 @@ class H5CanonicalLifecycleTest(unittest.TestCase):
                 publisher_instance_id="h5-instance",
                 router_zid="router-zid",
                 coordinator_instance_id="coordinator-instance",
+                expected_producer_logical_id="ik",
+                expected_producer_instance_id="ik-instance",
                 deadman=_Deadman(),
                 start_keyboard=False,
             )
             try:
+                node._session_client._on_state_payload(
+                    json.dumps(SessionState(
+                        1, 1, 10, "idle", "ready", "coordinator", None,
+                        "coordinator-instance", "router-zid",
+                    ).to_dict()).encode(),
+                    query_channel="state",
+                )
+                node._session_client._on_latched_payload(
+                    json.dumps(LatchedBool(
+                        1, 1, 10, True, "coordinator-instance", "router-zid"
+                    ).to_dict()).encode(),
+                    is_home=True,
+                    query_channel="at_home",
+                )
+                node._session_client._on_latched_payload(
+                    json.dumps(LatchedBool(
+                        1, 1, 10, False, "coordinator-instance", "router-zid"
+                    ).to_dict()).encode(),
+                    is_home=False,
+                    query_channel="return_complete",
+                )
                 node._at_home = True
                 node._session_client._on_state_payload(json.dumps(SessionState(
                     1, 1, 10, "idle", "ready", "coordinator", None,

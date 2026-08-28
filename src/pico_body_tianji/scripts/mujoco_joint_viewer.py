@@ -13,7 +13,14 @@ import numpy as np
 import zenoh
 from scipy.spatial.transform import Rotation
 
-from pico_body_tianji.protocol.messages import Frame0HandSkeleton, ProtocolError
+from pico_body_tianji.protocol import topics
+from pico_body_tianji.protocol.messages import (
+    ArmJointCommand,
+    ArmSolvedPose,
+    ArmTargetCommand,
+    Frame0HandSkeleton,
+    ProtocolError,
+)
 from pico_body_tianji.sources.mocap.h5 import (
     HAND_KEYPOINT_EDGES, compose_pose, invert_pose,
 )
@@ -22,9 +29,7 @@ from pico_body_tianji.mujoco_joint_state import apply_joint_positions
 from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
 from pico_body_tianji.zenoh_util import ZenohJsonSub, key, open_session, parse_cli_args
 from tianji_world_output.config_loader import get_config
-from tianji_world_output.transform_utils import (
-    get_chest_to_world_rotation,
-)
+from tianji_world_output.transform_utils import get_chest_to_world_rotation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -349,6 +354,8 @@ class FrameZeroHandSkeleton:
 
     def __init__(self, session, model, topic: str):
         self._pending: dict | None = None
+        self._pending_target: dict | None = None
+        self._pending_solved: dict | None = None
         self._received_once = False
         self._sim_from_motive: tuple[np.ndarray, np.ndarray] | None = None
         self._target_origin_mj: np.ndarray | None = None
@@ -421,12 +428,12 @@ class FrameZeroHandSkeleton:
         )
         self._target_sub = ZenohJsonSub(
             session,
-            key("/pico_body/right_arm_target_pose"),
+            topics.arm_target("right"),
             self._on_target_pose,
         )
         self._solved_sub = ZenohJsonSub(
             session,
-            key("/pico_body_sim/right_arm/solved_pose"),
+            topics.arm_solved_pose("right"),
             self._on_solved_pose,
         )
         _LOG.info("等待 frame0 手部关键点骨架：%s", topic)
@@ -465,19 +472,47 @@ class FrameZeroHandSkeleton:
         return pose
 
     def _on_target_pose(self, msg: dict) -> None:
-        pose = self._pose_from_message(msg)
-        if pose is not None:
-            self._target_tcp_pose_chest = pose
+        self._pending_target = msg
 
     def _on_solved_pose(self, msg: dict) -> None:
-        pose = self._pose_from_message(msg)
-        if pose is not None:
-            self._solved_tcp_pose_chest = pose
+        self._pending_solved = msg
+
+    def _apply_pending_producer_messages(self) -> bool:
+        changed = False
+        if self._pending_target is not None:
+            payload = self._pending_target
+            self._pending_target = None
+            try:
+                target = ArmTargetCommand.from_dict(payload)
+                if target.side != "right" or target.frame_id != "Base_R":
+                    raise ProtocolError("frame0 target must be right Base_R")
+                self._target_tcp_pose_chest = np.concatenate(
+                    (target.position_m, target.orientation_xyzw)
+                )
+                changed = True
+            except (ProtocolError, TypeError, ValueError) as exc:
+                _LOG.warning("忽略无效 canonical arm target: %s", exc)
+        if self._pending_solved is not None:
+            payload = self._pending_solved
+            self._pending_solved = None
+            try:
+                solved = ArmSolvedPose.from_dict(payload)
+                if solved.side != "right" or solved.frame_id != "Base_R":
+                    raise ProtocolError("frame0 solved pose must be right Base_R")
+                self._solved_tcp_pose_chest = np.concatenate(
+                    (solved.position_m, solved.orientation_xyzw)
+                )
+                changed = True
+            except (ProtocolError, TypeError, ValueError) as exc:
+                _LOG.warning("忽略无效 canonical solved pose: %s", exc)
+        return changed
 
     def apply_latest(self, model, data) -> bool:
+        producer_changed = self._apply_pending_producer_messages()
+
         payload = self._pending
         if payload is None:
-            return False
+            return producer_changed
         self._pending = None
         try:
             skeleton = Frame0HandSkeleton.from_dict(payload)

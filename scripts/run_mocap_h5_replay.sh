@@ -205,8 +205,13 @@ node_arguments=(
   --yaw-deg "${YAW_DEG}"
   --right-rigid-id "${RIGHT_RIGID_ID}"
   --rate 60
-  --connect-endpoint "${CONNECT_ENDPOINT}"
 )
+for identity in TIANJI_COMPONENT_INSTANCE_ID TIANJI_ROUTER_ZID TIANJI_COORDINATOR_INSTANCE_ID TIANJI_ARM_PRODUCER_LOGICAL_ID TIANJI_ARM_PRODUCER_INSTANCE_ID; do
+  if [[ "${VALIDATE_ONLY}" != true && -z "${!identity:-}" ]]; then
+    printf '错误：必须由 run_session 注入 %s。\n' "${identity}" >&2
+    exit 1
+  fi
+done
 
 if [[ "${WITH_HAND_COMMAND_VIEW}" == true && "${WITH_MUJOCO}" != true ]]; then
   printf '%s\n' '错误：完整 wuji2 回放模式需要 MuJoCo，不能与 --topics-only 组合。' >&2
@@ -214,9 +219,13 @@ if [[ "${WITH_HAND_COMMAND_VIEW}" == true && "${WITH_MUJOCO}" != true ]]; then
 fi
 
 if [[ "${VALIDATE_ONLY}" == true ]]; then
-  exec python -m \
-    pico_body_tianji.controller_only.mocap_h5_replay_node \
-    "${node_arguments[@]}" --validate-only
+  exec python -m pico_body_tianji.sources.mocap.h5_replay_node \
+    "${H5_PATH}" \
+    --speed "${SPEED}" \
+    --yaw-deg "${YAW_DEG}" \
+    --right-rigid-id "${RIGHT_RIGID_ID}" \
+    --rate 60 \
+    --validate-only
 fi
 
 if [[ -z "${DISPLAY:-}" ]]; then

@@ -219,6 +219,7 @@ install(
     scripts/marvin_hardware_bridge
     scripts/mocap_live
     scripts/mocap_h5_replay
+    scripts/mocap_calibration
     scripts/mujoco_joint_viewer.py
   DESTINATION lib/${PROJECT_NAME}
 )

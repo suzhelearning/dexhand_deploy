@@ -32,7 +32,6 @@ import time
 import numpy as np
 
 from ..sources.common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
-from ..controller_only.controller_only_trace import _assert_replay_graph_is_safe
 from ..controller_only.mocap_keyboard_step import (
     AXIS_STEPS,
     ArrowKeyParser,
@@ -43,27 +42,24 @@ from ..controller_only.mocap_keyboard_step import (
 )
 from ..controller_only.raw_keyboard import X11KeyState, raw_keyboard
 from ..sources.common.target_conditioner import TargetConditioningSettings
+from ..sources.common.session_client import SessionClient
 from ..sources.pico_controller.controller_frame import ControllerFrame
+from ..sources.mocap.motive import MotiveFrame, MotiveFrameSource
+from ..protocol import topics
 from ..zenoh_util import (
-    LiveToken,
     ZenohJsonSub,
-    ZenohPub,
-    ZenohTextSub,
-    key,
     load_node_config,
     load_tianji_config,
     open_session,
     parse_cli_args,
     parse_param_override,
-    stamp_now,
+    require_single_router,
 )
 
 _LOG = logging.getLogger("mocap_live")
 
-FRAME_KEY = "mocap/hands/frame"
-RIGID_BODY_NAMES_KEY = "mocap/rigid_body_names"
-AT_HOME_KEY = "pico_body_sim/at_home"
-RETURN_COMPLETE_KEY = "pico_body_sim/return_complete"
+FRAME_KEY = topics.MOCAP_HANDS_FRAME
+RIGID_BODY_NAMES_KEY = topics.MOCAP_RIGID_BODY_NAMES
 
 # 跟随中单侧失效容忍：超过该秒数未收到有效动捕帧即整体停止映射
 # （真机桥侧另有命令超时软停保护）。
@@ -125,6 +121,9 @@ class MocapLiveNode:
         rate: float = 60.0,
         side: str = "right",
         step_mm: float = 10.0,
+        publisher_instance_id: str | None = None,
+        router_zid: str | None = None,
+        coordinator_instance_id: str | None = None,
     ) -> None:
         if rate <= 0.0:
             raise ValueError("rate must be positive")
@@ -143,6 +142,20 @@ class MocapLiveNode:
                 )
         if side not in ("right", "both"):
             raise ValueError(f"side 必须是 right/both 之一，实际 {side!r}")
+        identity_values = (publisher_instance_id, router_zid, coordinator_instance_id)
+        if any(value is not None for value in identity_values):
+            if not all(value for value in identity_values):
+                raise ValueError("diagnostic requires component/router/coordinator identities")
+            self._session_client = SessionClient(
+                session,
+                source="diagnostic_mocap_calibration",
+                publisher_instance_id=publisher_instance_id,
+                router_zid=router_zid,
+                expected_coordinator_instance_id=coordinator_instance_id,
+            )
+            self._session_client.start()
+        else:
+            self._session_client = None
         self._session = session
         self._rate = rate
         self._side = side
@@ -216,46 +229,21 @@ class MocapLiveNode:
             input_to_robot=tianji_config.mocap_to_robot,
         )
 
-        self._pose_pubs = {
-            side: ZenohPub(
-                session, key(f"/pico_body/{side}_arm_target_pose")
-            )
-            for side in ("left", "right")
-        }
-        self._elbow_pubs = {
-            side: ZenohPub(
-                session,
-                key(f"/pico_body/{side}_arm_elbow_direction"),
-            )
-            for side in ("left", "right")
-        }
-        self._state_pub = ZenohPub(session, key("/pico_body/teleop_state"))
-        self._status_pub = ZenohPub(session, key("/pico_body/status"))
-        self._live = LiveToken(session, "mocap_live")
-        # phase、Home 回执与对应状态/目标发布跨主循环、键盘线程和
-        # Zenoh 回调线程共享。RLock 保证 phase 切换与旧状态发布不可
-        # 交错；否则 teleop 后迟到的一帧 idle 会触发真机安全回 Home。
+        # Diagnostics never publishes a session/state/target authority.  It
+        # only observes the canonical coordinator state; the optional command
+        # preview remains an in-process value used by the diagnostics UI.
         self._phase_lock = threading.RLock()
         self._at_home = False
         self._return_complete = False
         self._exit_after_return = False
-        self._at_home_sub = ZenohTextSub(
-            session, AT_HOME_KEY, self._on_at_home_text
-        )
-        self._return_complete_sub = ZenohTextSub(
-            session,
-            RETURN_COMPLETE_KEY,
-            self._on_return_complete_text,
-        )
-        self._session.get(
-            AT_HOME_KEY,
-            self._on_at_home_query,
-            timeout=1.0,
+        self._state_sub = ZenohJsonSub(
+            session, topics.SESSION_STATE, self._on_authoritative_state
         )
 
         # 最新动捕帧（订阅回调写入，tick 读取）。
+        self._motive_source = MotiveFrameSource()
         self._frame_lock = threading.Lock()
-        self._latest_frame: dict | None = None
+        self._latest_frame: MotiveFrame | None = None
         self._latest_received_monotonic = 0.0
         self._frame_sub = ZenohJsonSub(
             session, FRAME_KEY, self._on_mocap_frame
@@ -307,23 +295,34 @@ class MocapLiveNode:
 
     # -- 动捕帧 -------------------------------------------------------------
 
+    def _on_authoritative_state(self, payload: dict) -> None:
+        try:
+            state = SessionState.from_dict(payload)
+        except (TypeError, ValueError):
+            return
+        with self._phase_lock:
+            self._authoritative_state = state
+            self._at_home = state.state == "idle"
+
     def _on_mocap_frame(self, frame: dict) -> None:
+        try:
+            typed = self._motive_source.parse(frame)
+        except (TypeError, ValueError) as exc:
+            _LOG.warning("忽略无效 Motive frame: %s", exc)
+            return
         with self._frame_lock:
-            self._latest_frame = frame
+            self._latest_frame = typed
             self._latest_received_monotonic = time.monotonic()
 
     def _on_rigid_body_names(self, mapping: dict) -> None:
-        # natnet-zenoh 发布格式：{"names": {str(id): name}}
-        payload = mapping.get("names", mapping)
+        try:
+            names = self._motive_source.parse_names(mapping)
+        except (TypeError, ValueError) as exc:
+            _LOG.warning("忽略无效 Motive names: %s", exc)
+            return
         with self._frame_lock:
-            names = {
-                int(rid): str(name)
-                for rid, name in payload.items()
-            }
             changed = names != self._rigid_body_names
             self._rigid_body_names = names
-        # 发布端周期性重发名称映射（约 5s/次）；仅在实际变化时记录，
-        # 避免刷屏。
         if changed:
             _LOG.info("刚体名映射已更新：%s", names)
 
@@ -346,45 +345,30 @@ class MocapLiveNode:
             )
         return None
 
-    def _side_pose(self, frame: dict, side: str) -> np.ndarray | None:
-        """取单侧刚体位姿（Motive 系 7 向量）；无效/缺失返回 None。"""
+    def _side_pose(self, frame: MotiveFrame | dict, side: str) -> np.ndarray | None:
+        """取 typed MotiveFrame 的单侧位姿（字典仅供旧单元夹具使用）。"""
         rigid_id = self._resolve_rigid_id(side)
-        if rigid_id is None:
+        if isinstance(frame, MotiveFrame):
+            return None if rigid_id is None else frame.rigid_pose(rigid_id)
+        if not isinstance(frame, dict) or rigid_id is None:
             return None
         for body in frame.get("rigid_bodies", []):
-            if body.get("id") != rigid_id:
+            if not isinstance(body, dict) or body.get("id") != rigid_id:
                 continue
-            if not body.get("tracking_valid", False):
+            if body.get("tracking_valid") is not True:
                 return None
-            position = body.get("position")
-            quat = body.get("quaternion_xyzw")
-            if (
-                not isinstance(position, (list, tuple))
-                or len(position) != 3
-                or not isinstance(quat, (list, tuple))
-                or len(quat) != 4
-            ):
+            values = np.asarray(
+                list(body.get("position", ())) + list(body.get("quaternion_xyzw", ())),
+                dtype=np.float64,
+            )
+            if values.shape != (7,) or not np.isfinite(values).all():
                 return None
-            values = np.asarray(position + list(quat), dtype=np.float64)
-            if not np.isfinite(values).all():
+            norm = float(np.linalg.norm(values[3:]))
+            if not 0.999 <= norm <= 1.001:
                 return None
+            values[3:] /= norm
             return values
         return None
-
-    def _on_at_home_query(self, reply) -> None:
-        if reply.ok and reply.result.payload:
-            self._on_at_home_text(bytes(reply.result.payload).decode("utf-8"))
-
-    def _on_at_home_text(self, payload: str) -> None:
-        with self._phase_lock:
-            self._at_home = payload.strip() == "true"
-
-    def _on_return_complete_text(self, payload: str) -> None:
-        if payload.strip() == "true":
-            with self._phase_lock:
-                self._return_complete = True
-
-    # -- 键盘 ---------------------------------------------------------------
 
     # raw 模式终端无 echo；按键事件实时回显到 stdout。
     _ECHO_SYMBOLS = {
@@ -491,9 +475,21 @@ class MocapLiveNode:
                     self._return_complete = False
                     self._at_home = False
                     self._exit_after_return = False
-                    self._phase = "stepping"
+                    session_client = getattr(self, "_session_client", None)
+                    if session_client is not None:
+                        if not session_client.startup_ready:
+                            _LOG.warning("diagnostic coordinator snapshot 未就绪")
+                            return
+                        try:
+                            session_client.request_start("diagnostic_s")
+                        except (RuntimeError, ValueError) as exc:
+                            _LOG.warning("diagnostic start 被拒绝: %s", exc)
+                            return
+                        self._phase = "start_pending"
+                    else:
+                        self._phase = "stepping"
+                        self._publish_state("teleop")
                     self._phase_started = time.monotonic()
-                    self._publish_state("teleop")
                 _LOG.info(
                     "键盘 's'：已冻结 %s 参考位姿；后续 Motive 随动"
                     "不进入目标。方向键/1/0 手动步进；保持零位时按 c "
@@ -705,6 +701,12 @@ class MocapLiveNode:
                 self._circle_clock = None
             self._return_complete = False
             self._exit_after_return = exit_after_return
+            session_client = getattr(self, "_session_client", None)
+            if session_client is not None:
+                try:
+                    session_client.request_return("diagnostic_return")
+                except (RuntimeError, ValueError) as exc:
+                    _LOG.warning("diagnostic return intent failed: %s", exc)
             self._phase = "returning"
             self._phase_started = time.monotonic()
 
@@ -740,104 +742,41 @@ class MocapLiveNode:
     # -- 发布 ---------------------------------------------------------------
 
     def _publish_state(self, state: str) -> None:
-        self._state_pub.put_text(state)
-        self._status_pub.put_json(
-            {
-                "state": state,
-                "source": "live",
-                "input": "mocap_live",
-                "scope": "mocap_live",
-                "mapping":
-                    "controller_relative_end_pose_conditioned_v1",
-                "body_tracking": "disabled",
-                "motion_trackers_required": True,
-                "elbow_constraint":
-                    "published_default_zsp_backend_selected",
-                "smpl_used": False,
-                "at_safe_home": state == "idle" and self._at_home,
-                "left_rigid_id": self._rigid_ids["left"],
-                "right_rigid_id": self._rigid_ids["right"],
-                "side": self._side,
-                "control_mode": "motive_reference_keyboard_step",
-                "step_mm": self._step_mm,
-                "error": None,
-            }
-        )
-
-    def _pose_message(
-        self, pose: np.ndarray, frame_id: str, stamp: dict
-    ) -> dict:
-        return {
-            "stamp": stamp,
-            "frame_id": frame_id,
-            "position": {
-                "x": float(pose[0]),
-                "y": float(pose[1]),
-                "z": float(pose[2]),
-            },
-            "orientation": {
-                "x": float(pose[3]),
-                "y": float(pose[4]),
-                "z": float(pose[5]),
-                "w": float(pose[6]),
-            },
-        }
-
-    def _vector_message(
-        self, direction: np.ndarray, frame_id: str, stamp: dict
-    ) -> dict:
-        return {
-            "stamp": stamp,
-            "frame_id": frame_id,
-            "vector": {
-                "x": float(direction[0]),
-                "y": float(direction[1]),
-                "z": float(direction[2]),
-            },
-        }
-
-    def _publish_targets(self, targets: ControllerOnlyTargets) -> None:
-        stamp = stamp_now()
-        sides = self._active_sides
-        for side in sides:
-            pose = (
-                targets.left_pose
-                if side == "left"
-                else targets.right_pose
-            )
-            self._pose_pubs[side].put_json(
-                self._pose_message(pose, f"{side}_chest", stamp)
-            )
-            direction = (
-                targets.left_default_elbow_direction
-                if side == "left"
-                else targets.right_default_elbow_direction
-            )
-            self._elbow_pubs[side].put_json(
-                self._vector_message(
-                    direction, f"{side}_chest", stamp
-                )
-            )
-
+        # Diagnostic state is local display state, never a protocol authority.
+        self._diagnostic_state = str(state)
+    def _publish_targets(self, targets: ArmTargetBatch) -> None:
+        # Keep the computed preview local.  Canonical target publication is
+        # reserved for product sources and the coordinator.
+        self._latest_target_preview = targets
     def _tick(self) -> bool:
         """rate Hz 映射虚拟目标；仅 q 回零完成后返回 False。"""
-        # phase 判定、状态发布和该 phase 的目标发布必须是一个临界区。
-        # 键盘线程只能在完整 tick 前后切 phase，不能插入一个旧状态。
+        session_client = getattr(self, "_session_client", None)
+        if session_client is not None:
+            session_client.poll()
         with self._phase_lock:
             if self._phase == "armed":
                 self._publish_state("idle")
                 return True
+            if self._phase == "start_pending":
+                if session_client is not None and session_client.start_authorized:
+                    self._phase = "stepping"
+                elif session_client is not None and session_client.pending_intent_sequence is None:
+                    self._phase = "armed"
+                return True
             if self._phase == "returning":
-                self._publish_state("returning")
-                if not (self._return_complete and self._at_home):
+                complete = (
+                    session_client is not None
+                    and session_client.return_completion_fresh
+                ) or (
+                    session_client is None
+                    and self._return_complete
+                    and self._at_home
+                )
+                if not complete:
                     return True
                 if self._exit_after_return:
-                    _LOG.info("已确认 IK 回到安全 Home，退出")
                     return False
                 self._complete_return()
-                _LOG.info(
-                    "已确认 IK 回到安全 Home；保持运行，按 s 可再次开始"
-                )
                 return True
             self._publish_state("teleop")
             if self._advance_circle(time.monotonic()):
@@ -929,7 +868,10 @@ class MocapLiveNode:
             "target_conditioning": target_conditioning,
             "error": None,
         }
-        self._status_pub.put_json(status)
+        self._latest_diagnostics = status
+        capture = getattr(self, "_status_pub", None)
+        if capture is not None:
+            capture.put_json(status)
         for side, observed in motive_pose.items():
             position = observed["position_m"]
             orientation = observed["orientation_xyzw"]
@@ -989,30 +931,17 @@ class MocapLiveNode:
             )
 
     def close(self) -> None:
-        try:
-            self._stop()
-        finally:
+        self._stop()
+        for resource in (self._frame_sub, self._names_sub, self._state_sub):
             try:
-                self._frame_sub.close()
-                self._names_sub.close()
-                self._at_home_sub.close()
-                self._return_complete_sub.close()
-                for pub in (
-                    *self._pose_pubs.values(),
-                    *self._elbow_pubs.values(),
-                    self._state_pub,
-                    self._status_pub,
-                ):
-                    pub.close()
-            finally:
-                try:
-                    self._live.close()
-                finally:
-                    try:
-                        if self._circle_deadman is not None:
-                            self._circle_deadman.close()
-                    finally:
-                        self._session.close()
+                resource.close()
+            except Exception:
+                pass
+        if self._circle_deadman is not None:
+            self._circle_deadman.close()
+        if self._session_client is not None:
+            self._session_client.close()
+        self._session.close()
 
     def _stop(self) -> None:
         self._stop_event.set()
@@ -1072,30 +1001,33 @@ def main(argv=None) -> int:
         DEFAULT_PARAMETERS,
         overrides,
     )
-    if args.connect_endpoint:
-        import json as _json
-
-        import zenoh
-
-        config = zenoh.Config.from_json5(
-            _json.dumps(
-                {
-                    "mode": "client",
-                    "connect": {
-                        "endpoints": [args.connect_endpoint]
-                    },
-                }
-            )
-        )
-        session = zenoh.open(config)
-    else:
-        session = open_session()
-    _assert_replay_graph_is_safe(session)
     def _parse_rigid_spec(spec: str):
         try:
             return int(spec)
         except ValueError:
             return spec
+
+    import os
+    instance_id = os.environ.get("TIANJI_COMPONENT_INSTANCE_ID")
+    router_zid = os.environ.get("TIANJI_ROUTER_ZID")
+    coordinator_id = os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID")
+    if not instance_id or not router_zid or not coordinator_id:
+        raise RuntimeError(
+            "TIANJI_COMPONENT_INSTANCE_ID, TIANJI_ROUTER_ZID and "
+            "TIANJI_COORDINATOR_INSTANCE_ID are required"
+        )
+    if args.connect_endpoint:
+        import json as _json
+        import zenoh
+        config = zenoh.Config.from_json5(
+            _json.dumps(
+                {"mode": "client", "connect": {"endpoints": [args.connect_endpoint]}}
+            )
+        )
+        session = zenoh.open(config)
+    else:
+        session = open_session()
+    require_single_router(session, router_zid)
 
     node = MocapLiveNode(
         session,
@@ -1105,6 +1037,9 @@ def main(argv=None) -> int:
         rate=args.rate,
         side=args.side,
         step_mm=args.step_mm,
+        publisher_instance_id=instance_id,
+        router_zid=router_zid,
+        coordinator_instance_id=coordinator_id,
     )
     try:
         _LOG.warning(

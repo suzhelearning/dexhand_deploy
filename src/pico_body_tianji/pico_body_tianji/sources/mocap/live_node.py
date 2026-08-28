@@ -19,6 +19,7 @@ from scipy.spatial.transform import Rotation
 from ...protocol import topics
 from ...protocol.messages import ProtocolError
 from ...sources.common.freshness import FreshnessGate
+from ...sources.common.real_admission import RealCapabilityInput, parse_real_capability
 from ...sources.common.session_client import SessionClient
 from ...sources.common.target_conditioner import TargetConditioningSettings
 from ...sources.common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
@@ -54,6 +55,8 @@ DEFAULT_PARAMETERS = {
     "right_default_elbow_direction": [0.45638698, 0.74604902, -0.48489358],
     "real_preflight_passed": False,
     "real_mode": False,
+    "speed": 1.0,
+    "yaw_deg": 0.0,
 }
 
 _FRAME_STALE_S = 0.5
@@ -151,15 +154,25 @@ class MocapLiveNode:
         coordinator_instance_id: str | None = None,
         active_sides: tuple[str, ...] = ("right",),
         clock: Any = time.monotonic,
+        real_capability: RealCapabilityInput | Mapping[str, Any] | Any | None = None,
     ) -> None:
         params = {**DEFAULT_PARAMETERS, **(params or {})}
         for field in ("real_preflight_passed", "real_mode"):
             if not isinstance(params[field], bool):
                 raise ValueError(f"{field} must be a YAML boolean")
         self._real_mode = params["real_mode"]
-        self._real_preflight_ok = params["real_preflight_passed"]
-        if self._real_mode and not self._real_preflight_ok:
-            raise ValueError("real mode requires live preflight")
+        self._speed = float(params["speed"])
+        self._yaw_deg = float(params["yaw_deg"])
+        if not np.isfinite(self._speed) or self._speed <= 0.0:
+            raise ValueError("speed must be positive and finite")
+        if not np.isfinite(self._yaw_deg):
+            raise ValueError("yaw_deg must be finite")
+        if real_capability is None:
+            real_capability = params.get("real_capability")
+        if self._real_mode and real_capability is None:
+            raise ValueError("real mode requires typed real_capability input")
+        self._real_capability = real_capability
+        self._real_capability_error: str | None = None
         if set(active_sides) not in ({"left"}, {"right"}, {"left", "right"}):
             raise ValueError("active_sides must contain left/right")
         self._active_sides = tuple(active_sides)
@@ -224,7 +237,9 @@ class MocapLiveNode:
         self._references: dict[str, np.ndarray] = {}
         self._phase = "armed"
         self._last_error: str | None = None
-        self._real_preflight_ok = bool(params.get("real_preflight_passed", False))
+        self._real_capability_error: str | None = None
+        self._return_deadline = 0.0
+        self._return_timed_out = False
         self._closed = False
 
     @property
@@ -254,30 +269,42 @@ class MocapLiveNode:
                 self._stream_instance_id = frame.stream_instance_id
                 self._stream_sequence = -1
             elif frame.stream_instance_id != self._stream_instance_id:
+                was_active = self._phase not in {"armed", "returning", "fault"}
                 self._stream_instance_id = frame.stream_instance_id
                 self._stream_sequence = -1
                 self._references.clear()
-                self._phase = "armed"
-                self._request_return_locked("aligned_stream_instance_changed")
+                if was_active:
+                    self._request_return_locked("aligned_stream_instance_changed")
             if frame.stream_sequence <= self._stream_sequence:
                 return
             self._stream_sequence = frame.stream_sequence
             self._latest = frame
             self._received_at = self._clock()
             self._publisher.publish_raw_mocap_live(_to_raw_payload(frame))
-
     def _request_return_locked(self, reason: str) -> None:
+        was_active = self._phase not in {"armed", "returning", "fault"}
         try:
             self._session_client.request_return(reason)
         except (RuntimeError, ValueError) as exc:
             self._last_error = str(exc)
         self._references.clear()
+        self._return_timed_out = False
+        self._return_deadline = time.monotonic() + 5.0
+        if was_active:
+            self._phase = "returning"
+    def _complete_return_locked(self) -> None:
+        self._references.clear()
         self._phase = "armed"
+        self._return_timed_out = False
+        self._return_deadline = 0.0
 
     def request_start(self) -> bool:
         with self._lock:
             frame = self._latest
             if self._phase != "armed" or frame is None:
+                return False
+            if self._real_mode and not self._real_capability_snapshot()[0]:
+                self._real_capability_error = self._real_capability_snapshot()[1]
                 return False
             if any(not frame.hands[side]["valid"] for side in self._active_sides):
                 return False
@@ -306,28 +333,63 @@ class MocapLiveNode:
                     self._request_return_locked("mocap_s_return")
         elif value in {"q", "\x03"}:
             with self._lock:
-                if self._phase != "armed":
+                if self._phase not in {"armed", "returning", "fault"}:
                     self._request_return_locked("mocap_quit")
+                elif self._phase == "returning":
+                    self._return_deadline = time.monotonic() + 5.0
                 else:
                     self._closed = True
 
     def _build_targets(self, frame: AlignedHandFrame) -> ArmTargetBatch:
         poses: dict[str, np.ndarray] = {}
         for side in ("left", "right"):
-            home = np.concatenate((self._config.init_pos[side], self._config.init_quat[side]))
+            home = np.concatenate(
+                (self._config.init_pos[side], self._config.init_quat[side])
+            )
             if side not in self._references:
                 poses[side] = home
                 continue
             current = np.asarray(frame.hands[side]["wrist_pose"], dtype=np.float64)
             reference = self._references[side]
-            delta_rotation = (
-                Rotation.from_quat(reference[3:]).inv()
-                * Rotation.from_quat(current[3:])
+            # Both poses are source/world rotations.  The frozen-reference
+            # delta is current * reference^-1; transform that delta into the
+            # arm Base frame before applying it to the robot Home rotation.
+            delta_world = (
+                Rotation.from_quat(current[3:])
+                * Rotation.from_quat(reference[3:]).inv()
             )
-            position = home[:3] + self._config.get_world_to_chest_rotation(side) @ self._config.mocap_to_robot @ (current[:3] - reference[:3])
-            orientation = (Rotation.from_quat(home[3:]) * delta_rotation).as_quat()
+            world_to_base = (
+                self._config.get_world_to_chest_rotation(side)
+                @ self._config.mocap_to_robot
+            )
+            delta_base = Rotation.from_matrix(
+                world_to_base
+                @ delta_world.as_matrix()
+                @ world_to_base.T
+            )
+            position = home[:3] + world_to_base @ (current[:3] - reference[:3])
+            orientation = (
+                Rotation.from_quat(home[3:]) * delta_base
+            ).as_quat()
             poses[side] = np.concatenate((position, orientation))
         return self._mapper.map_absolute_tcp_poses(poses["left"], poses["right"])
+
+    def _real_capability_snapshot(self) -> tuple[bool, str | None]:
+        if not self._real_mode:
+            return False, "real mode not requested"
+        if self._real_capability is None:
+            return False, "typed real capability input missing"
+        try:
+            capability = parse_real_capability(self._real_capability)
+        except (TypeError, ValueError) as exc:
+            return False, str(exc)
+        if float(capability.speed) != self._speed:
+            return False, "real capability speed does not match configured speed"
+        if float(capability.yaw_deg) != self._yaw_deg:
+            return False, "real capability yaw does not match configured yaw"
+        if not capability.admitted:
+            return False, "real capability predicates are not admitted"
+        return True, None
 
     def _tick(self, now: float | None = None) -> None:
         now = self._clock() if now is None else float(now)
@@ -335,8 +397,19 @@ class MocapLiveNode:
         with self._lock:
             frame = self._latest
             fresh = frame is not None and now - self._received_at <= self._stale_timeout_s
+            if self._phase == "returning":
+                if self._session_client.return_completion_fresh:
+                    self._complete_return_locked()
+                elif now >= self._return_deadline:
+                    self._return_timed_out = True
+                    self._last_error = "coordinator return completion timeout"
+                    self._phase = "fault"
+                self._publish_status_locked()
+                return
             if self._phase == "start_pending":
-                if not fresh:
+                if self._real_mode and not self._real_capability_snapshot()[0]:
+                    self._request_return_locked("mocap_real_capability_lost")
+                elif not fresh:
                     self._request_return_locked("mocap_stale_before_start")
                 elif self._session_client.start_authorized:
                     self._mapper.initialize(
@@ -351,12 +424,14 @@ class MocapLiveNode:
             if self._phase != "teleop":
                 self._publish_status_locked()
                 return
-            if not fresh or any(not frame.hands[side]["valid"] for side in self._active_sides):
-                self._request_return_locked("mocap_stale_or_invalid_side")
+            # Re-evaluate all real-admission inputs on every active tick,
+            # including a provider that changes speed/yaw/deadman state.
+            if self._real_mode and not self._real_capability_snapshot()[0]:
+                self._request_return_locked("mocap_real_capability_lost")
                 self._publish_status_locked()
                 return
-            if getattr(self, "_real_mode", False) and not self._real_preflight_ok:
-                self._request_return_locked("mocap_real_capability_lost")
+            if not fresh or any(not frame.hands[side]["valid"] for side in self._active_sides):
+                self._request_return_locked("mocap_stale_or_invalid_side")
                 self._publish_status_locked()
                 return
             try:
@@ -392,19 +467,23 @@ class MocapLiveNode:
         poses = {
             side: self._references.get(
                 side,
-                np.concatenate((self._config.init_pos[side], self._config.init_quat[side])),
+                np.concatenate(
+                    (self._config.init_pos[side], self._config.init_quat[side])
+                ),
             )
             for side in ("left", "right")
         }
         return ControllerFrame.from_poses(poses["left"], poses["right"])
 
     def _publish_status_locked(self) -> None:
+        real_ok, real_reason = self._real_capability_snapshot()
+        self._real_capability_error = real_reason
         self._publisher.publish_source_status(
             component_id="mocap_live",
             phase=self._phase,
             ready=self._session_client.startup_ready and self._last_error is None,
-            healthy=self._last_error is None,
-            capabilities=["simulation", "real"] if self._real_preflight_ok else ["simulation"],
+            healthy=self._last_error is None and self._phase != "fault",
+            capabilities=["simulation"] + (["real"] if real_ok else []),
             error=self._last_error,
             diagnostics={
                 "stream_instance_id": self._stream_instance_id,
@@ -412,6 +491,7 @@ class MocapLiveNode:
                 "frame_valid": None if self._latest is None else self._latest.frame_valid,
                 "active_sides": list(self._active_sides),
                 "watchdog_s": self._stale_timeout_s,
+                "real_capability_error": real_reason,
             },
         )
     def close(self) -> None:

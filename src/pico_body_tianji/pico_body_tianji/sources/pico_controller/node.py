@@ -113,14 +113,14 @@ class PicoControllerSource:
         self._phase = "armed"
         self._last_a = False
         self._edge_previous = False
-        self._teleop_edge_previous = False
         self._last_sample: ControllerSample | None = None
         self._last_source_state = "unavailable"
         self._last_source_timestamp_ns: int | None = None
         self._last_error: str | None = None
         self._last_targets: ArmTargetBatch | None = None
+        self._return_deadline = 0.0
+        self._return_timed_out = False
         self._closed = False
-
     @property
     def phase(self) -> str:
         return self._phase
@@ -133,17 +133,16 @@ class PicoControllerSource:
     def target_publisher(self) -> TargetPublisher:
         return self._publisher
 
-    def start(self) -> None:
-        self._session_client.start()
-        self._publish_status()
-
     def _request_return(self, reason: str) -> None:
-        if self._phase not in ("returning", "armed"):
-            try:
-                self._session_client.request_return(reason)
-            except RuntimeError as exc:
-                self._last_error = str(exc)
+        if self._phase in ("returning", "fault"):
+            return
+        try:
+            self._session_client.request_return(reason, timeout_s=1.0)
+        except (RuntimeError, ValueError) as exc:
+            self._last_error = str(exc)
         self._phase = "returning"
+        self._return_deadline = time.monotonic() + 5.0
+        self._return_timed_out = False
         self._last_targets = None
 
     def _tick(self, now: float | None = None) -> None:
@@ -225,9 +224,14 @@ class PicoControllerSource:
             return
 
         if self._phase == "returning":
-            state = self._session_client.state
-            if state is not None and state.state == "idle" and self._session_client.return_complete:
+            if self._session_client.return_completion_fresh:
                 self._phase = "armed"
+                self._return_deadline = 0.0
+                self._return_timed_out = False
+            elif now >= self._return_deadline:
+                self._last_error = "coordinator return completion timeout"
+                self._return_timed_out = True
+                self._phase = "fault"
             self._publish_status()
 
     def _publish_targets(self, targets: ArmTargetBatch, source_timestamp_ns: int | None) -> None:
@@ -251,13 +255,15 @@ class PicoControllerSource:
             component_id="pico_controller",
             phase=self._phase,
             ready=self._session_client.startup_ready and self._last_error is None,
-            healthy=self._last_error is None,
+            healthy=self._last_error is None and self._phase != "fault",
             capabilities=["simulation", "real"],
             error=self._last_error,
             diagnostics={
                 "source_state": self._last_source_state,
                 "source_timestamp_ns": self._last_source_timestamp_ns,
                 "right_a_pressed": self._last_a,
+                "return_timed_out": self._return_timed_out,
+                "return_intent_baseline": self._session_client.return_intent_baseline,
             },
         )
 

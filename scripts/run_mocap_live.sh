@@ -211,21 +211,21 @@ printf '%s\n' \
   '  持续按住 Enter 才推进，松开即暂停，再按继续；s 回 Home；q 安全退出。' \
   '该任务不会连接 Marvin 控制器。'
 
-# 动捕实时节点前台运行：stdin 直连终端（raw 模式读键）。
+for identity in TIANJI_COMPONENT_INSTANCE_ID TIANJI_ROUTER_ZID TIANJI_COORDINATOR_INSTANCE_ID; do
+  if [[ -z "${!identity:-}" ]]; then
+    printf '错误：必须由 run_session 注入 %s。\n' "${identity}" >&2
+    exit 1
+  fi
+done
+if [[ -n "${CONNECT_ENDPOINT}" ]]; then
+  export TIANJI_ROUTER_ENDPOINT="${CONNECT_ENDPOINT}"
+fi
+# canonical mocap_live only accepts --config/--param; component, router and
+# coordinator identities are intentionally passed through the environment.
 live_arguments=(
   --config "${PARAMETERS}"
   --param "rate:=60"
-  --left-rigid-id "${LEFT_RIGID_ID}"
-  --right-rigid-id "${RIGHT_RIGID_ID}"
-  --side "${SIDE}"
-  --step-mm "${STEP_MM}"
-  --connect-endpoint "${CONNECT_ENDPOINT}"
 )
-if [[ -n "${CIRCLE_SPEED_MM_S}" ]]; then
-  live_arguments+=(
-    --param "circle_maximum_speed_mm_s:=${CIRCLE_SPEED_MM_S}"
-  )
-fi
 "${LIVE_NODE}" "${live_arguments[@]}"
 LIVE_EXIT=$?
 

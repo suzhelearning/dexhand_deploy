@@ -9,6 +9,7 @@ import numpy as np
 from pico_body_tianji.protocol.messages import (
     ArmTargetCommand,
     HandTargetCommand,
+    LatchedBool,
     ProtocolError,
     ProtocolEnvelope,
     SessionState,
@@ -44,6 +45,7 @@ class _Session:
         self.subscribers: list[tuple[str, object]] = []
         self.queryables: list[tuple[str, object]] = []
         self.puts: list[tuple[str, bytes]] = []
+        self.get_callbacks: dict[str, object] = {}
 
     def declare_publisher(self, key: str, **kwargs):
         publisher = _Publisher(key)
@@ -60,9 +62,9 @@ class _Session:
 
     def put(self, key: str, payload, **kwargs) -> None:
         self.puts.append((key, bytes(payload)))
-
     def get(self, key: str, callback, **kwargs) -> None:
-        # Snapshot timeout is intentionally represented by no reply in this fake.
+        # Query replies are supplied explicitly by each behavior test.
+        self.get_callbacks[key] = callback
         return None
     def close(self) -> None:
         pass
@@ -187,6 +189,24 @@ class MocapLiveTest(unittest.TestCase):
         self.assertNotIn(topics.MOCAP_HANDS_FRAME, declared_keys)
         node._on_aligned_payload(self._payload())
         self.assertFalse(node.request_start())
+        snapshot_state = SessionState(
+            schema_version=1,
+            sequence=1,
+            timestamp_ns=10,
+            state="idle",
+            reason="ready",
+            source="coordinator",
+            intent_sequence=None,
+            publisher_instance_id="coordinator-instance",
+            router_zid="router-zid",
+        )
+        session.get_callbacks[topics.SESSION_STATE](snapshot_state.to_dict())
+        session.get_callbacks[topics.AT_HOME](
+            LatchedBool(1, 1, 10, True, "coordinator-instance", "router-zid").to_dict()
+        )
+        session.get_callbacks[topics.RETURN_COMPLETE](
+            LatchedBool(1, 1, 10, False, "coordinator-instance", "router-zid").to_dict()
+        )
         state = SessionState(
             schema_version=1,
             sequence=1,
@@ -225,7 +245,7 @@ class MocapLiveTest(unittest.TestCase):
         )
         self.assertEqual(hand.keypoints_m[0], [0.0, 0.0, 0.0])
         node._on_aligned_payload(self._payload("stream-2", 1))
-        self.assertEqual(node.phase, "armed")
+        self.assertEqual(node.phase, "returning")
         node.close()
 
 

@@ -31,7 +31,6 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from ...protocol import topics
-from ...protocol.messages import ArmSolvedPose
 from ..common.replay_clock import HoldToRunClock
 from ..common.session_client import SessionClient
 from ..common.target_conditioner import TargetConditioningSettings
@@ -44,10 +43,11 @@ from .h5 import (
     MocapRecording,
     compose_pose,
     invert_pose,
-    load_mocap_h5,
     synthetic_reference_pose,
 )
-from .motive import MotiveFrameSource
+from ...protocol.messages import ArmSolvedPose, HAND_JOINT_NAMES, ProtocolError
+from ..common.real_admission import RealCapabilityInput, parse_real_capability
+from .motive import MotiveFrame, MotiveFrameSource
 from ...zenoh_util import (
     ZenohJsonSub,
     load_node_config,
@@ -141,6 +141,41 @@ DEFAULT_PARAMETERS = {
     ],
 }
 
+# Wuji Hand 2 beta1 limits, in the canonical 20-joint wire order.
+_HAND_LOWER_RAD = np.asarray(
+    [-1.187, -1.484, -1.047, -1.047]
+    + [-1.047, -0.698, -1.047, -1.047] * 4,
+    dtype=np.float64,
+)
+_HAND_UPPER_RAD = np.asarray(
+    [1.291, 0.698, 1.570, 1.570]
+    + [1.570, 0.698, 2.094, 1.570] * 4,
+    dtype=np.float64,
+)
+
+
+def validate_h5_hand_real_preflight(
+    joints_rad: np.ndarray,
+    *,
+    lower_limits_rad: np.ndarray | None = None,
+    upper_limits_rad: np.ndarray | None = None,
+) -> tuple[bool, str]:
+    """Validate every direct hand frame; never forward-fill real input."""
+    values = np.asarray(joints_rad, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != 20:
+        return False, "wuji2_joints must have shape (N,20)"
+    if values.shape[0] == 0 or not np.isfinite(values).all():
+        return False, "wuji2_joints must contain finite frames"
+    lower = _HAND_LOWER_RAD if lower_limits_rad is None else np.asarray(lower_limits_rad, dtype=np.float64)
+    upper = _HAND_UPPER_RAD if upper_limits_rad is None else np.asarray(upper_limits_rad, dtype=np.float64)
+    if lower.shape != (20,) or upper.shape != (20,) or not np.isfinite(lower).all() or not np.isfinite(upper).all():
+        return False, "hand limits must be finite 20-vectors"
+    if np.any(lower >= upper):
+        return False, "hand lower limits must be below upper limits"
+    if np.any(values < lower) or np.any(values > upper):
+        return False, "wuji2_joints contains values outside hand limits"
+    return True, ""
+
 _ACTIVE_PHASES = {"approaching", "ready", "replaying", "completed"}
 
 def _pose_from_payload(payload: dict[str, Any]) -> np.ndarray | None:
@@ -208,6 +243,7 @@ class MocapH5ReplayNode:
         publisher_instance_id: str,
         router_zid: str,
         coordinator_instance_id: str | None = None,
+        expected_producer_logical_id: str | None = None,
         expected_producer_instance_id: str | None = None,
         right_rigid_id: int | str = "tianji_wrist",
         speed: float = 1.0,
@@ -215,6 +251,7 @@ class MocapH5ReplayNode:
         rate: float = 60.0,
         deadman: X11KeyState | None | object = _CREATE_DEADMAN,
         start_keyboard: bool = True,
+        real_capability: RealCapabilityInput | dict[str, Any] | Any | None = None,
     ) -> None:
         if not np.isfinite(speed) or speed <= 0.0:
             raise ValueError("speed 必须为正有限数值")
@@ -225,19 +262,39 @@ class MocapH5ReplayNode:
         for field in ("h5_real_preflight_passed", "hand_real_preflight_passed", "real_mode"):
             if not isinstance(params.get(field), bool):
                 raise ValueError(f"{field} must be a YAML boolean")
+        if not expected_producer_logical_id or not expected_producer_instance_id:
+            raise ValueError(
+                "expected producer logical and instance identities are required"
+            )
         self._real_mode = params["real_mode"]
+        self._real_capability = real_capability
+        if self._real_mode and real_capability is None:
+            raise ValueError("real mode requires typed real_capability input")
+        self._external_h5_preflight_ok = params["h5_real_preflight_passed"]
+        self._external_hand_preflight_ok = params["hand_real_preflight_passed"]
+        direct_joints = recording.hands["right"].wuji2_joints
+        self._h5_joint_preflight_ok = True
+        self._h5_joint_preflight_reason = ""
+        if direct_joints is not None:
+            self._h5_joint_preflight_ok, self._h5_joint_preflight_reason = (
+                validate_h5_hand_real_preflight(
+                    direct_joints,
+                    lower_limits_rad=params.get("hand_lower_limits_rad"),
+                    upper_limits_rad=params.get("hand_upper_limits_rad"),
+                )
+            )
         self._real_preflight_ok = (
-            params["h5_real_preflight_passed"]
-            and params["hand_real_preflight_passed"]
+            self._external_h5_preflight_ok
+            and self._external_hand_preflight_ok
+            and self._h5_joint_preflight_ok
         )
-        if self._real_mode and not self._real_preflight_ok:
-            raise ValueError("real mode requires H5 and hand preflight")
         if isinstance(right_rigid_id, int):
             if right_rigid_id <= 0:
                 raise ValueError("right_rigid_id 必须为正整数或刚体名")
         elif not isinstance(right_rigid_id, str) or not right_rigid_id.strip():
             raise ValueError("right_rigid_id 必须为正整数或刚体名")
-        self._expected_producer_instance_id = expected_producer_instance_id
+        self._expected_producer_logical_id = str(expected_producer_logical_id)
+        self._expected_producer_instance_id = str(expected_producer_instance_id)
         self._session = session
         self._recording = recording
         self._speed = float(speed)
@@ -414,7 +471,7 @@ class MocapH5ReplayNode:
         self._session_client.start()
 
         self._lock = threading.RLock()
-        self._latest_motive_frame: dict[str, Any] | None = None
+        self._latest_motive_frame: MotiveFrame | None = None
         self._motive_received_at = 0.0
         self._rigid_body_names: dict[int, str] = {}
         self._right_rigid_home_pose: np.ndarray | None = None
@@ -453,10 +510,17 @@ class MocapH5ReplayNode:
         else:
             self._deadman = deadman  # type: ignore[assignment]
 
+        self._real_capability_error: str | None = None
+        if self._real_mode:
+            real_ok, real_reason = self._real_capability_snapshot()
+            if not real_ok:
+                raise ValueError(f"real mode admission denied: {real_reason}")
         self._at_home = False
         self._return_complete = False
         self._phase = "armed"
         self._exit_after_return = False
+        self._return_deadline = 0.0
+        self._return_timed_out = False
         self._quit = False
         self._last_error: str | None = None
         self._last_s_at = -float("inf")
@@ -501,11 +565,26 @@ class MocapH5ReplayNode:
             "活动阶段按 s 回 Home，按 q 回 Home 后退出。"
         )
 
-    def _frame(self, right_pose: np.ndarray) -> ControllerFrame:
-        return ControllerFrame.from_poses(
-            self._left_reference_pose,
-            right_pose,
-        )
+    def _real_capability_snapshot(self) -> tuple[bool, str | None]:
+        if not self._real_mode:
+            return False, "real mode not requested"
+        if self._real_capability is None:
+            return False, "typed real capability input missing"
+        try:
+            capability = parse_real_capability(self._real_capability)
+        except (TypeError, ValueError) as exc:
+            return False, str(exc)
+        if float(capability.speed) != self._speed:
+            return False, "real capability speed does not match configured speed"
+        if float(capability.yaw_deg) != self._yaw_deg:
+            return False, "real capability yaw does not match configured yaw"
+        if not capability.admitted:
+            return False, "real capability predicates are not admitted"
+        if not self._real_preflight_ok:
+            return False, self._h5_joint_preflight_reason or "H5/hand preflight failed"
+        if self._deadman is None:
+            return False, "deadman unavailable"
+        return True, None
 
     def _on_motive_frame(self, frame: dict[str, Any]) -> None:
         try:
@@ -515,34 +594,20 @@ class MocapH5ReplayNode:
             return
         with self._lock:
             self._latest_motive_typed = typed
-            self._latest_motive_frame = frame
+            self._latest_motive_frame = typed
             self._motive_received_at = time.monotonic()
 
     def _on_rigid_body_names(self, mapping: dict[str, Any]) -> None:
-        payload = mapping.get("names", mapping)
-        if not isinstance(payload, dict):
+        try:
+            names = self._motive_source.parse_names(mapping)
+        except (TypeError, ValueError) as exc:
+            self._last_error = str(exc)
             return
-        names = {}
-        for rigid_id, name in payload.items():
-            if (
-                isinstance(rigid_id, bool)
-                or not isinstance(rigid_id, (int, str))
-                or (isinstance(rigid_id, str) and not rigid_id.isdecimal())
-                or int(rigid_id) <= 0
-                or not isinstance(name, str)
-                or not name
-            ):
-                self._last_error = "invalid rigid body names payload"
-                return
-            names[int(rigid_id)] = name
         with self._lock:
             changed = names != self._rigid_body_names
             self._rigid_body_names = names
-        # 发布端周期性重发名称映射（约 5s/次）；仅在实际变化时记录，
-        # 避免刷屏。
         if changed:
             _LOG.info("Motive 刚体名映射已更新：%s", names)
-
     def _resolved_right_rigid_id(self) -> int | None:
         if isinstance(self._right_rigid_id, int):
             return self._right_rigid_id
@@ -551,46 +616,11 @@ class MocapH5ReplayNode:
                 return rigid_id
         return None
 
-    def _right_arm_pose(
-        self, frame: dict[str, Any] | None
-    ) -> np.ndarray | None:
-        typed = getattr(self, "_latest_motive_typed", None)
-        rigid_id = self._resolved_right_rigid_id()
-        if typed is not None and rigid_id is not None:
-            return typed.rigid_pose(rigid_id)
-        if not isinstance(frame, dict):
+    def _right_arm_pose(self, frame: Any) -> np.ndarray | None:
+        if not isinstance(frame, MotiveFrame):
             return None
         rigid_id = self._resolved_right_rigid_id()
-        if rigid_id is None:
-            return None
-        bodies = frame.get("rigid_bodies")
-        if not isinstance(bodies, list):
-            return None
-        for body in bodies:
-            if not isinstance(body, dict) or body.get("id") != rigid_id:
-                continue
-            if not body.get("tracking_valid", False):
-                return None
-            position = body.get("position")
-            quaternion = body.get("quaternion_xyzw")
-            if (
-                not isinstance(position, (list, tuple))
-                or len(position) != 3
-                or not isinstance(quaternion, (list, tuple))
-                or len(quaternion) != 4
-            ):
-                return None
-            pose = np.asarray(
-                list(position) + list(quaternion), dtype=np.float64
-            )
-            if not np.isfinite(pose).all():
-                return None
-            quaternion_norm = float(np.linalg.norm(pose[3:7]))
-            if quaternion_norm < 1.0e-8:
-                return None
-            pose[3:7] /= quaternion_norm
-            return pose
-        return None
+        return None if rigid_id is None else frame.rigid_pose(rigid_id)
 
     def _fresh_right_arm_pose(
         self, now: float | None = None
@@ -618,11 +648,10 @@ class MocapH5ReplayNode:
             rigid_pose, self._rigid_to_marker_mocap_pose
         )
         return compose_pose(marker_pose, self._marker_to_mount_pose)
-
-    def _wrist_pose_from_rigid(self, rigid_pose: np.ndarray) -> np.ndarray:
-        return compose_pose(
-            self._mount_pose_from_rigid(rigid_pose),
-            _WUJI2_MOUNT_TO_WRIST_POSE,
+    def _frame(self, right_pose: np.ndarray) -> ControllerFrame:
+        return ControllerFrame.from_poses(
+            self._left_reference_pose,
+            right_pose,
         )
 
     def _frame_zero_skeleton_payload(
@@ -640,26 +669,12 @@ class MocapH5ReplayNode:
             "phase": self._phase,
             "frozen": self._phase != "armed",
             "source_frame_index": self._frame_zero_source_index,
-            "h5_path": str(self._recording.path),
-            "point_order": (
-                "mediapipe: wrist, thumb1-4, index5-8, "
-                "middle9-12, ring13-16, pinky17-20"
-            ),
+            "keypoints_world_m": self._frame_zero_keypoints.tolist(),
             "edges": [list(edge) for edge in HAND_KEYPOINT_EDGES],
-            "points_motive_world": self._frame_zero_keypoints.tolist(),
-            "frame0_manus_quat_xyzw": (
-                self._frame_zero_pose[3:7].tolist()
-            ),
-            "home_wuji2_mount_pose_motive": mount_home_pose.tolist(),
-            "home_wuji2_wrist_pose_motive": wrist_home_pose.tolist(),
-            "frame0_wuji2_wrist_pose_motive": (
-                target_wrist_motive.tolist()
-            ),
-            "tcp_to_wrist_pose_xyzw": self._tcp_to_wrist_pose.tolist(),
-            "transform_contract": (
-                "world axes use mocap_to_robot; tianji_wrist locates "
-                "r_mount; Manus wrist maps directly to r_wrist"
-            ),
+            "manus_wrist_pose": self._frame_zero_pose.tolist(),
+            "robot_wrist_home_pose": wrist_home_pose.tolist(),
+            "target_wrist_pose": target_wrist_motive.tolist(),
+            "tcp_to_wrist_pose": self._tcp_to_wrist_pose.tolist(),
         }
 
     def _publish_frame_zero_skeleton(
@@ -702,30 +717,19 @@ class MocapH5ReplayNode:
         )
         return self._publish_frame_zero_skeleton(wrist_pose, mount_pose)
 
-    def _on_at_home_query(self, reply) -> None:
-        if reply.ok and reply.result.payload:
-            self._on_at_home_text(bytes(reply.result.payload).decode("utf-8"))
-
-    def _on_at_home_text(self, payload: str) -> None:
-        with self._lock:
-            self._at_home = payload.strip() == "true"
-
-    def _on_return_complete_text(self, payload: str) -> None:
-        if payload.strip() == "true":
-            with self._lock:
-                self._return_complete = True
 
     def _on_solved_pose(self, payload: dict[str, Any]) -> None:
         try:
             solved = ArmSolvedPose.from_dict(payload)
         except (TypeError, ValueError):
             return
-        if solved.side != "right" or solved.frame_id != "Base_R":
-            return
-        if solved.envelope.router_zid != self._session_client.router_zid:
-            return
-        expected = getattr(self, "_expected_producer_instance_id", None)
-        if expected is not None and solved.envelope.publisher_instance_id != expected:
+        if (
+            solved.side != "right"
+            or solved.frame_id != "Base_R"
+            or solved.producer != self._expected_producer_logical_id
+            or solved.envelope.router_zid != self._session_client.router_zid
+            or solved.envelope.publisher_instance_id != self._expected_producer_instance_id
+        ):
             return
         pose = np.concatenate(
             (np.asarray(solved.position_m), np.asarray(solved.orientation_xyzw))
@@ -898,8 +902,10 @@ class MocapH5ReplayNode:
         self._return_complete = False
         self._exit_after_return = exit_after_return
         self._deadman_pressed = False
+        self._return_timed_out = False
+        self._return_deadline = time.monotonic() + 5.0
         try:
-            self._session_client.request_return("h5_return")
+            self._session_client.request_return("h5_return", timeout_s=1.0)
         except (RuntimeError, ValueError) as exc:
             self._last_error = str(exc)
         self._phase = "returning"
@@ -1193,11 +1199,7 @@ class MocapH5ReplayNode:
             "names_key": RIGID_BODY_NAMES_KEY,
             "rigid_spec": self._right_rigid_id,
             "resolved_id": self._resolved_right_rigid_id(),
-            "frame_number": (
-                frame.get("frame_number")
-                if isinstance(frame, dict)
-                else None
-            ),
+            "frame_number": None if frame is None else frame.frame_number,
             "age_ms": None if age_s is None else age_s * 1000.0,
             "tracking_valid": fresh,
             "rigid_home_pose_xyzw": (
@@ -1313,12 +1315,10 @@ class MocapH5ReplayNode:
     def _tick(self, now: float | None = None) -> bool:
         now = time.monotonic() if now is None else float(now)
         self._session_client.poll()
-        if self._session_client.at_home is not None:
-            self._at_home = bool(self._session_client.at_home)
-        if self._session_client.return_complete is not None:
-            self._return_complete = bool(self._session_client.return_complete)
         with self._lock:
             if self._phase == "armed":
+                if self._session_client.at_home is not None:
+                    self._at_home = bool(self._session_client.at_home)
                 self._read_deadman()
                 if (
                     self._at_home
@@ -1330,14 +1330,32 @@ class MocapH5ReplayNode:
                 self._publish_state("idle")
                 return True
             if self._phase == "returning":
+                if self._session_client.return_completion_fresh:
+                    self._at_home = True
+                    self._return_complete = True
+                    self._complete_return()
+                    if self._exit_after_return:
+                        _LOG.info("已确认 IK 回到安全 Home，退出")
+                        return False
+                elif now >= self._return_deadline:
+                    self._return_timed_out = True
+                    self._last_error = "coordinator return completion timeout"
+                    self._phase = "fault"
                 self._publish_state("returning")
-                if not self._session_client.return_completion_fresh:
-                    return True
-                if self._exit_after_return:
-                    _LOG.info("已确认 IK 回到安全 Home，退出")
-                    return False
-                self._complete_return()
                 return True
+            if self._phase == "fault":
+                self._publish_state("fault")
+                return True
+            if (
+                self._real_mode
+                and self._phase in {"start_pending", "approaching", "ready", "replaying", "completed"}
+            ):
+                real_ok, real_reason = self._real_capability_snapshot()
+                if not real_ok:
+                    self._last_error = real_reason
+                    self._begin_return(exit_after_return=False)
+                    self._publish_state("returning")
+                    return True
             if self._phase == "start_pending":
                 if self._session_client.start_authorized:
                     try:
@@ -1349,8 +1367,6 @@ class MocapH5ReplayNode:
                         self._phase = "approaching"
                         self._phase_started = now
                 elif self._session_client.pending_intent_sequence is None:
-                    # Coordinator reject/timeout is atomic: no stale reference
-                    # may survive into the next start request.
                     self._phase = "armed"
                     self._right_rigid_home_pose = None
                     self._right_marker_home_pose = None
@@ -1359,7 +1375,6 @@ class MocapH5ReplayNode:
                     self._virtual_tcp_home_pose = None
                 self._publish_state("idle")
                 return True
-
             self._publish_state("teleop")
             if self._phase == "approaching":
                 pressed = self._read_deadman()
@@ -1370,10 +1385,7 @@ class MocapH5ReplayNode:
                         self._approach_stable_ticks += 1
                     else:
                         self._approach_stable_ticks = 0
-                    if (
-                        self._approach_stable_ticks
-                        >= self._required_stable_ticks
-                    ):
+                    if self._approach_stable_ticks >= self._required_stable_ticks:
                         self._phase = "ready"
                         self._phase_started = now
                         _LOG.warning(
@@ -1382,14 +1394,7 @@ class MocapH5ReplayNode:
                         )
                 self._publish_cached_targets()
                 return True
-            if (
-                self._phase in {"approaching", "ready", "replaying", "completed"}
-                and not self._real_preflight_ok
-                and getattr(self, "_real_mode", False)
-            ):
-                self._begin_return(exit_after_return=False)
-                self._publish_state("returning")
-                return True
+
 
             if self._phase == "ready":
                 self._deadman_pressed = self._read_deadman()
@@ -1482,6 +1487,8 @@ class MocapH5ReplayNode:
                     "startup_snapshot_ready": self._session_client.startup_ready,
                 }
             )
+            real_ok, real_reason = self._real_capability_snapshot()
+            diagnostics["real_capability_error"] = real_reason
             self._publisher.publish_source_status(
                 component_id="h5_replay",
                 phase=self._phase,
@@ -1490,15 +1497,8 @@ class MocapH5ReplayNode:
                     and self._deadman is not None
                     and self._last_error is None
                 ),
-                healthy=self._last_error is None,
-                capabilities=(
-                    ["simulation", "real"]
-                    if self._real_preflight_ok
-                    and self._speed <= 0.25
-                    and abs(self._yaw_deg) <= 1.0e-12
-                    and self._deadman is not None
-                    else ["simulation"]
-                ),
+                healthy=self._last_error is None and self._phase != "fault",
+                capabilities=["simulation"] + (["real"] if real_ok else []),
                 error=self._last_error,
                 diagnostics=diagnostics,
             )
@@ -1573,6 +1573,16 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="只校验和汇总 H5，不连接 Zenoh、不运动",
     )
+    parser.add_argument(
+        "--expected-producer-logical-id",
+        default=None,
+        help="授权的 arm producer logical id（也可由 TIANJI_ARM_PRODUCER_LOGICAL_ID 注入）",
+    )
+    parser.add_argument(
+        "--expected-producer-instance-id",
+        default=None,
+        help="授权的 arm producer instance id（也可由 TIANJI_ARM_PRODUCER_INSTANCE_ID 注入）",
+    )
     return parser
 
 def _open_session(endpoint: str):
@@ -1634,11 +1644,25 @@ def main(argv=None) -> int:
     instance_id = os.environ.get("TIANJI_COMPONENT_INSTANCE_ID")
     router_zid = os.environ.get("TIANJI_ROUTER_ZID")
     coordinator_id = os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID")
+    producer_logical_id = (
+        args.expected_producer_logical_id
+        or os.environ.get("TIANJI_ARM_PRODUCER_LOGICAL_ID")
+    )
+    producer_instance_id = (
+        args.expected_producer_instance_id
+        or os.environ.get("TIANJI_ARM_PRODUCER_INSTANCE_ID")
+    )
     if not instance_id or not router_zid or not coordinator_id:
         session.close()
         raise RuntimeError(
             "TIANJI_COMPONENT_INSTANCE_ID, TIANJI_ROUTER_ZID and "
             "TIANJI_COORDINATOR_INSTANCE_ID are required"
+        )
+    if not producer_logical_id or not producer_instance_id:
+        session.close()
+        raise RuntimeError(
+            "expected arm producer logical/instance identity is required "
+            "(--expected-producer-* or TIANJI_ARM_PRODUCER_*)"
         )
     require_single_router(session, router_zid)
     node: MocapH5ReplayNode | None = None
@@ -1650,6 +1674,8 @@ def main(argv=None) -> int:
             publisher_instance_id=instance_id,
             router_zid=router_zid,
             coordinator_instance_id=coordinator_id,
+            expected_producer_logical_id=producer_logical_id,
+            expected_producer_instance_id=producer_instance_id,
             right_rigid_id=(
                 int(args.right_rigid_id)
                 if args.right_rigid_id.isdecimal()
@@ -1658,6 +1684,7 @@ def main(argv=None) -> int:
             speed=args.speed,
             yaw_deg=args.yaw_deg,
             rate=args.rate,
+            real_capability=params.get("real_capability"),
         )
         try:
             return node.run()

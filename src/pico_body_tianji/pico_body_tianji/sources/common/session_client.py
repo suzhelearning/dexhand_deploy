@@ -52,7 +52,21 @@ class SessionClient:
         self._resources: list[Any] = []
         self._lock = threading.RLock()
         self._state_event = threading.Event()
+        # Each latched key has an independent query completion.  Subscriber
+        # traffic is deliberately not allowed to satisfy this barrier: a
+        # source must have a snapshot for all three authority keys before it
+        # can connect or move.
         self._snapshot_event = threading.Event()
+        self._query_complete = {
+            "state": False,
+            "at_home": False,
+            "return_complete": False,
+        }
+        self._query_reply_count = {
+            "state": 0,
+            "at_home": 0,
+            "return_complete": 0,
+        }
         self._started = False
         self._snapshot_started_at = 0.0
         self._snapshot_timed_out = False
@@ -60,7 +74,12 @@ class SessionClient:
         self._at_home: LatchedBool | None = None
         self._return_complete: LatchedBool | None = None
         self._coordinator_identity: str | None = None
-        self._last_coordinator_sequence: dict[str, int] = {}
+        # Coordinator sequence is publisher-instance global, not per topic.
+        # A control tick may publish state and both latches with one sequence,
+        # so the same sequence is accepted once per channel but never rolls
+        # back globally.
+        self._coordinator_sequence_baseline = -1
+        self._accepted_coordinator_messages: set[tuple[str, int]] = set()
         self._pending_action: str | None = None
         self._pending_intent_sequence: int | None = None
         self._pending_deadline = 0.0
@@ -112,9 +131,19 @@ class SessionClient:
                 return False
             return (
                 self.return_authorized
-                and self.return_complete_sequence > baseline[2]
-                and self.at_home_sequence > baseline[1]
+                and self._at_home is not None
+                and self._at_home.value
+                and self._at_home.sequence > baseline[1]
+                and self._return_complete is not None
+                and self._return_complete.value
+                and self._return_complete.sequence > baseline[2]
             )
+    @property
+    def return_intent_baseline(self) -> tuple[int, int, int] | None:
+        with self._lock:
+            if self._pending_intent_sequence is None:
+                return None
+            return self._intent_baselines.get(self._pending_intent_sequence)
     @property
     def pending_intent_sequence(self) -> int | None:
         with self._lock:
@@ -127,9 +156,14 @@ class SessionClient:
 
     @property
     def startup_ready(self) -> bool:
-        """Whether a coordinator snapshot was received without identity errors."""
+        """True only after all three independent query snapshots completed."""
         with self._lock:
-            return self._snapshot_event.is_set() and not self._snapshot_timed_out and not self._invalid_coordinator
+            self._poll_timeout_locked()
+            return (
+                self._snapshot_event.is_set()
+                and not self._snapshot_timed_out
+                and not self._invalid_coordinator
+            )
 
     @property
     def snapshot_timed_out(self) -> bool:
@@ -141,9 +175,11 @@ class SessionClient:
     def coordinator_instance_id(self) -> str | None:
         with self._lock:
             return self._coordinator_identity
+
     @property
     def snapshot_complete(self) -> bool:
         with self._lock:
+            self._poll_timeout_locked()
             return self._snapshot_event.is_set() and not self._snapshot_timed_out
 
     def reconnect(self) -> None:
@@ -160,11 +196,23 @@ class SessionClient:
             self._at_home = None
             self._return_complete = None
             self._coordinator_identity = None
-            self._last_coordinator_sequence.clear()
+            self._coordinator_sequence_baseline = -1
+            self._accepted_coordinator_messages.clear()
+            self._query_complete = {
+                "state": False,
+                "at_home": False,
+                "return_complete": False,
+            }
+            self._query_reply_count = {
+                "state": 0,
+                "at_home": 0,
+                "return_complete": 0,
+            }
             self._snapshot_event.clear()
             self._snapshot_timed_out = False
             self._pending_action = None
             self._pending_intent_sequence = None
+            self._invalid_coordinator = False
         self.start()
 
     def start(self) -> None:
@@ -176,6 +224,16 @@ class SessionClient:
             self._snapshot_started_at = time.monotonic()
             self._snapshot_timed_out = False
             self._snapshot_event.clear()
+            self._query_complete = {
+                "state": False,
+                "at_home": False,
+                "return_complete": False,
+            }
+            self._query_reply_count = {
+                "state": 0,
+                "at_home": 0,
+                "return_complete": 0,
+            }
         # Subscriber declaration intentionally precedes every query.
         self._resources.extend(
             [
@@ -197,7 +255,6 @@ class SessionClient:
         except Exception:
             # A missing snapshot is fail-closed; the timer below keeps startup blocked.
             return
-
     @staticmethod
     def _payload(value: Any) -> bytes | None:
         if isinstance(value, (bytes, bytearray, memoryview)):
@@ -210,6 +267,18 @@ class SessionClient:
         result = getattr(value, "result", None)
         payload = getattr(result, "payload", None)
         return None if payload is None else bytes(payload)
+
+    def _mark_query(self, channel: str, *, success: bool) -> None:
+        with self._lock:
+            count = self._query_reply_count[channel] + 1
+            self._query_reply_count[channel] = count
+            if count != 1 or not success:
+                self._invalid_coordinator = True
+                self._query_complete[channel] = False
+            else:
+                self._query_complete[channel] = True
+            if all(self._query_complete.values()) and not self._invalid_coordinator:
+                self._snapshot_event.set()
 
     def _on_state_sample(self, sample: Any) -> None:
         payload = self._payload(sample)
@@ -227,33 +296,40 @@ class SessionClient:
             self._on_latched_payload(payload, is_home=False)
 
     def _on_state_reply(self, reply: Any) -> None:
-        if getattr(reply, "ok", True) is False:
-            return
         payload = self._payload(reply)
-        if payload:
-            self._on_state_payload(payload)
+        if getattr(reply, "ok", True) is False or not payload:
+            self._mark_query("state", success=False)
+            return
+        self._on_state_payload(payload, query_channel="state")
 
     def _on_at_home_reply(self, reply: Any) -> None:
-        if getattr(reply, "ok", True) is False:
-            return
         payload = self._payload(reply)
-        if payload:
-            self._on_latched_payload(payload, is_home=True)
+        if getattr(reply, "ok", True) is False or not payload:
+            self._mark_query("at_home", success=False)
+            return
+        self._on_latched_payload(payload, is_home=True, query_channel="at_home")
 
     def _on_return_complete_reply(self, reply: Any) -> None:
-        if getattr(reply, "ok", True) is False:
-            return
         payload = self._payload(reply)
-        if payload:
-            self._on_latched_payload(payload, is_home=False)
-
+        if getattr(reply, "ok", True) is False or not payload:
+            self._mark_query("return_complete", success=False)
+            return
+        self._on_latched_payload(
+            payload, is_home=False, query_channel="return_complete"
+        )
     def _accept_coordinator(
-        self, instance: str, sequence: int, router: str, channel: str
+        self,
+        instance: str,
+        sequence: int,
+        router: str,
+        channel: str,
+        *,
+        origin: str = "sample",
     ) -> bool:
         if router != self.router_zid:
             self._invalid_coordinator = True
             return False
-        if self.expected_coordinator_instance_id is not None and instance != self.expected_coordinator_instance_id:
+        if instance != self.expected_coordinator_instance_id:
             self._invalid_coordinator = True
             return False
         if self._coordinator_identity is None:
@@ -261,54 +337,77 @@ class SessionClient:
         elif self._coordinator_identity != instance:
             self._invalid_coordinator = True
             return False
-        key = f"{channel}:{instance}"
-        previous = self._last_coordinator_sequence.get(key, -1)
-        if sequence <= previous:
+        if sequence < self._coordinator_sequence_baseline:
             return False
-        self._last_coordinator_sequence[key] = sequence
+        if sequence > self._coordinator_sequence_baseline:
+            self._coordinator_sequence_baseline = sequence
+            self._accepted_coordinator_messages.clear()
+        token = (f"{origin}:{channel}", sequence)
+        if token in self._accepted_coordinator_messages:
+            return False
+        self._accepted_coordinator_messages.add(token)
         return True
 
-    def _on_state_payload(self, payload: bytes) -> None:
+    def _on_state_payload(
+        self, payload: bytes, *, query_channel: str | None = None
+    ) -> bool:
         try:
             state = SessionState.from_dict(json.loads(payload.decode("utf-8")))
         except (UnicodeDecodeError, json.JSONDecodeError, ProtocolError, TypeError, ValueError):
-            return
+            if query_channel is not None:
+                self._mark_query(query_channel, success=False)
+            return False
         with self._lock:
-            if not self._accept_coordinator(
+            accepted = self._accept_coordinator(
                 state.publisher_instance_id,
                 state.sequence,
                 state.router_zid,
                 "state",
-            ):
-                return
-            self._state = state
-            if (
-                self._pending_action == "start"
-                and state.intent_sequence == self._pending_intent_sequence
-                and state.state != "teleop"
-            ):
-                self._pending_action = None
-                self._pending_intent_sequence = None
-            self._state_event.set()
-            self._snapshot_event.set()
+                origin="query" if query_channel is not None else "sample",
+            )
+            if accepted:
+                self._state = state
+                if (
+                    self._pending_action == "start"
+                    and state.intent_sequence == self._pending_intent_sequence
+                    and state.state != "teleop"
+                ):
+                    self._pending_action = None
+                    self._pending_intent_sequence = None
+                self._state_event.set()
+        if query_channel is not None:
+            self._mark_query(query_channel, success=accepted)
+        return accepted
 
-    def _on_latched_payload(self, payload: bytes, *, is_home: bool) -> None:
+    def _on_latched_payload(
+        self,
+        payload: bytes,
+        *,
+        is_home: bool,
+        query_channel: str | None = None,
+    ) -> bool:
         try:
             latch = LatchedBool.from_dict(json.loads(payload.decode("utf-8")))
         except (UnicodeDecodeError, json.JSONDecodeError, ProtocolError, TypeError, ValueError):
-            return
+            if query_channel is not None:
+                self._mark_query(query_channel, success=False)
+            return False
         with self._lock:
-            if not self._accept_coordinator(
+            accepted = self._accept_coordinator(
                 latch.publisher_instance_id,
                 latch.sequence,
                 latch.router_zid,
                 "at_home" if is_home else "return_complete",
-            ):
-                return
-            if is_home:
-                self._at_home = latch
-            else:
-                self._return_complete = latch
+                origin="query" if query_channel is not None else "sample",
+            )
+            if accepted:
+                if is_home:
+                    self._at_home = latch
+                else:
+                    self._return_complete = latch
+        if query_channel is not None:
+            self._mark_query(query_channel, success=accepted)
+        return accepted
 
     def _authorized_state(self, state: str, action: str) -> bool:
         current = self._state

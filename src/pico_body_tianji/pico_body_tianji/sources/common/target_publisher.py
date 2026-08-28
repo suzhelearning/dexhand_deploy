@@ -58,6 +58,7 @@ class TargetPublisher:
         self.router_zid = router_zid
         self._clock = clock
         self._allocator = allocator or SequenceAllocator()
+        self._sequence = 0
         self._publishers: dict[str, ZenohPub] = {}
 
     @property
