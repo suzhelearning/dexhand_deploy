@@ -131,7 +131,7 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
         self.assertTrue(self.coordinator.return_complete.value)
         first_sequence = self.coordinator.return_complete.sequence
         self.coordinator.tick(now_ns=1_000_000_300)
-        self.assertEqual(self.coordinator.return_complete.sequence, first_sequence)
+        self.assertGreater(self.coordinator.return_complete.sequence, first_sequence)
 
 
 from pico_body_tianji.connection_readiness import evaluate_connection, evaluate_fault_return, evaluate_start

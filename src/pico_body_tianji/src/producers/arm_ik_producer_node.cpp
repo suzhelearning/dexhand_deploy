@@ -246,6 +246,7 @@ public:
     }
     command_subscriber_ = session_.declare_subscriber(
       "tianji/command/arm/**", [this](const zenoh::Sample &sample) { on_command(sample.get_payload().as_string()); }, []() {});
+    status_publisher_ = session_.declare_publisher(zenoh::KeyExpr("tianji/producer/status"));
     liveliness_token_ = session_.liveliness_declare_token(zenoh::KeyExpr("tj/live/producer/arm/arm_ik_producer/" + instance_));
     publish_status("");
   }

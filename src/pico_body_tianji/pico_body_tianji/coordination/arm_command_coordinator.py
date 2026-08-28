@@ -488,9 +488,9 @@ class ArmCommandCoordinator:
             self._at_home = LatchedBool(1, self._sequence, timestamp_ns, True, self.publisher_instance_id, self.router_zid)
             self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, True, self.publisher_instance_id, self.router_zid)
         else:
-            self._at_home = LatchedBool(1, self._sequence, timestamp_ns, all(command.position_rad == list(getattr(self.robot, f"{side}_home_rad")) for side, command in commands.items()), self.publisher_instance_id, self.router_zid)
-            if not self._return_complete.value:
-                self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, False, self.publisher_instance_id, self.router_zid)
+            at_home = all(command.position_rad == list(getattr(self.robot, f"{side}_home_rad")) for side, command in commands.items())
+            self._at_home = LatchedBool(1, self._sequence, timestamp_ns, at_home, self.publisher_instance_id, self.router_zid)
+            self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, self._return_complete.value, self.publisher_instance_id, self.router_zid)
         self._state = SessionState(1, self._sequence, timestamp_ns, self._state.state, self._state.reason, "coordinator", self._state.intent_sequence, self.publisher_instance_id, self.router_zid)
         for side, command in commands.items():
             self._publish(side, command.to_dict())
