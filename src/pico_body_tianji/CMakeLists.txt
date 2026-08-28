@@ -61,10 +61,10 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 add_library(
   arm_ik
-  src/arm_ik_factory.cpp
-  src/pinocchio_cpp/pinocchio_arm_ik.cpp
-  src/pinocchio_qp/pinocchio_qp_arm_ik.cpp
-  src/tianji_official/tianji_official_arm_ik_proxy.cpp
+  src/ik/arm_ik_factory.cpp
+  src/ik/pinocchio_cpp/pinocchio_arm_ik.cpp
+  src/ik/pinocchio_qp/pinocchio_qp_arm_ik.cpp
+  src/ik/tianji_official/tianji_official_arm_ik_proxy.cpp
 )
 target_compile_features(arm_ik PUBLIC cxx_std_17)
 target_compile_options(
@@ -84,7 +84,7 @@ target_link_libraries(
 # Eigen/dl，供独立 worker 和 probe 使用；主节点内使用 IPC proxy。
 add_library(
   tianji_official_native STATIC
-  src/tianji_official/tianji_official_arm_ik.cpp
+  src/ik/tianji_official/tianji_official_arm_ik.cpp
   src/tianji_official/glibc_isoc23_strtol_shim.cpp
 )
 target_compile_features(tianji_official_native PUBLIC cxx_std_17)
@@ -100,7 +100,7 @@ target_link_libraries(
 
 # 该节点只做所选后端的 IK/FK，不直接连接机械臂；通讯走 Zenoh。
 add_executable(
-  tianji_kinematic_sim src/tianji_kinematic_sim_node.cpp
+  arm_ik_producer src/producers/arm_ik_producer_node.cpp
 )
 add_executable(
   tianji_official_ik_probe
@@ -114,12 +114,12 @@ add_executable(
   pinocchio_qp_ik_probe
   src/pinocchio_qp/pinocchio_qp_ik_probe.cpp
 )
-target_compile_features(tianji_kinematic_sim PUBLIC cxx_std_17)
+target_compile_features(arm_ik_producer PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_probe PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_worker PUBLIC cxx_std_17)
 target_compile_features(pinocchio_qp_ik_probe PUBLIC cxx_std_17)
 target_compile_options(
-  tianji_kinematic_sim PRIVATE -Wall -Wextra -Wpedantic
+  arm_ik_producer PRIVATE -Wall -Wextra -Wpedantic
 )
 target_compile_options(
   tianji_official_ik_probe PRIVATE -Wall -Wextra -Wpedantic
@@ -131,21 +131,21 @@ target_compile_options(
   pinocchio_qp_ik_probe PRIVATE -Wall -Wextra -Wpedantic
 )
 target_include_directories(
-  tianji_kinematic_sim PRIVATE
+  arm_ik_producer PRIVATE
     "${ZENOH_CPP_ROOT}/include"
     "${ZENOH_ROOT}/include"
 )
-target_compile_definitions(tianji_kinematic_sim PRIVATE ZENOHCXX_ZENOHC)
-target_link_libraries(tianji_kinematic_sim arm_ik "${ZENOH_ROOT}/lib/libzenohc.so")
+target_compile_definitions(arm_ik_producer PRIVATE ZENOHCXX_ZENOHC)
+target_link_libraries(arm_ik_producer arm_ik "${ZENOH_ROOT}/lib/libzenohc.so")
 target_link_libraries(tianji_official_ik_probe tianji_official_native)
 target_link_libraries(tianji_official_ik_worker tianji_official_native)
 target_link_libraries(pinocchio_qp_ik_probe arm_ik)
 # 便携 runtime 层为 glibc 2.35：把 glibc 2.38 的 __isoc23_strtol
 # 引用改接到 shim（见 glibc_isoc23_strtol_shim.cpp）。
-target_sources(tianji_kinematic_sim PRIVATE src/tianji_official/glibc_isoc23_strtol_shim.cpp)
-target_link_libraries(tianji_kinematic_sim arm_ik "${ZENOH_ROOT}/lib/libzenohc.so")
+target_sources(arm_ik_producer PRIVATE src/tianji_official/glibc_isoc23_strtol_shim.cpp)
+target_link_libraries(arm_ik_producer arm_ik "${ZENOH_ROOT}/lib/libzenohc.so")
 target_link_options(
-  tianji_kinematic_sim PRIVATE "-Wl,--wrap=__isoc23_strtol"
+  arm_ik_producer PRIVATE "-Wl,--wrap=__isoc23_strtol"
 )
 target_link_options(
   tianji_official_ik_probe PRIVATE "-Wl,--wrap=__isoc23_strtol"
@@ -202,7 +202,7 @@ install(
   TARGETS
     arm_ik
     tianji_official_native
-    tianji_kinematic_sim
+    arm_ik_producer
     tianji_official_ik_probe
     tianji_official_ik_worker
     pinocchio_qp_ik_probe
@@ -221,6 +221,7 @@ install(
     scripts/mocap_h5_replay
     scripts/mocap_calibration
     scripts/mujoco_joint_viewer.py
+    scripts/arm_command_coordinator
   DESTINATION lib/${PROJECT_NAME}
 )
 install(

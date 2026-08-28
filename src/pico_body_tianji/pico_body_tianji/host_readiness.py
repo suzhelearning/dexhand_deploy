@@ -313,3 +313,28 @@ class HostReadinessGate:
             left_joints_deg=self._commands["left"].joints_deg.copy(),
             right_joints_deg=self._commands["right"].joints_deg.copy(),
         )
+
+    def evaluate_connection(self, *, source_status, arm_producer_status, coordinator_state, arm_command, now_ns, required_capability="real"):
+        """独立连接门：不要求 policy observation 已就绪。"""
+        from .connection_readiness import evaluate_connection
+        return evaluate_connection(
+            source_status=source_status,
+            arm_producer_status=arm_producer_status,
+            coordinator_state=coordinator_state,
+            arm_command=arm_command,
+            now_ns=now_ns,
+            freshness_timeout_s=self._freshness_timeout_s,
+            required_capability=required_capability,
+        )
+
+    @staticmethod
+    def evaluate_start(*, executor_status, arm_state, coordinator_state, now_ns, freshness_timeout_s=1.0):
+        """独立 start 门：执行器需先报告 fresh state/ready。"""
+        from .connection_readiness import evaluate_start
+        return evaluate_start(
+            executor_status=executor_status,
+            arm_state=arm_state,
+            coordinator_state=coordinator_state,
+            now_ns=now_ns,
+            freshness_timeout_s=freshness_timeout_s,
+        )

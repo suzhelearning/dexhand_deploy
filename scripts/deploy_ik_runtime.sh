@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 STAGING_BIN="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji"
 RUNTIME_BIN="${BUNDLE_ROOT}/runtime/pico_body_tianji/lib/pico_body_tianji"
-NEW_IK="${STAGING_BIN}/tianji_kinematic_sim"
+NEW_IK="${STAGING_BIN}/arm_ik_producer"
 NEW_PROBE="${STAGING_BIN}/tianji_official_ik_probe"
 NEW_WORKER="${STAGING_BIN}/tianji_official_ik_worker"
 NEW_BRIDGE="${STAGING_BIN}/wuji_hand2_bridge"
@@ -54,19 +54,18 @@ if [[ ! -x "${STRIP_TOOL}" ]]; then
   printf '错误：找不到可执行的 strip 工具：%s\n' "${STRIP_TOOL}" >&2
   exit 1
 fi
-if [[ ! -x "${RUNTIME_BIN}/tianji_kinematic_sim" ]]; then
-  printf '%s\n' '错误：runtime IK Bash 包装器不存在，拒绝部署。' >&2
+if [[ ! -x "${RUNTIME_BIN}/arm_ik_producer" ]]; then
+  printf '%s\n' '错误：runtime arm_ik_producer Bash 包装器不存在，拒绝部署。' >&2
   exit 1
 fi
-if ! head -n 1 "${RUNTIME_BIN}/tianji_kinematic_sim" | grep -Fxq '#!/usr/bin/env bash'; then
-  printf '%s\n' '错误：runtime IK 入口不是预期的 Bash 包装器，拒绝部署。' >&2
+if ! head -n 1 "${RUNTIME_BIN}/arm_ik_producer" | grep -Fxq '#!/usr/bin/env bash'; then
+  printf '%s\n' '错误：runtime arm_ik_producer 入口不是预期的 Bash 包装器，拒绝部署。' >&2
   exit 1
 fi
 
 mkdir -p "${BACKUP_DIR}"
 for path in \
-  "${RUNTIME_BIN}/tianji_kinematic_sim.bin" \
-  "${RUNTIME_BIN}/tianji_kinematic_sim" \
+  "${RUNTIME_BIN}/arm_ik_producer" \
   "${RUNTIME_BIN}/tianji_official_ik_probe" \
   "${RUNTIME_BIN}/tianji_official_ik_probe.bin" \
   "${RUNTIME_BIN}/tianji_official_ik_worker" \
@@ -112,14 +111,14 @@ if [[ "$(realpath "${SDK_CONFIG}")" != "$(realpath "${SDK_RUNTIME_ROOT}/CommonCo
     "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
 fi
 
-install -m 0755 "${NEW_IK}" "${RUNTIME_BIN}/tianji_kinematic_sim.bin.new"
+install -m 0755 "${NEW_IK}" "${RUNTIME_BIN}/arm_ik_producer.bin.new"
 install -m 0755 "${NEW_PROBE}" "${RUNTIME_BIN}/tianji_official_ik_probe.bin.new"
 install -m 0755 "${NEW_WORKER}" "${RUNTIME_BIN}/tianji_official_ik_worker.bin.new"
 install -m 0755 "${NEW_BRIDGE}" "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new"
 # staging 保留 RelWithDebInfo 完整调试符号；runtime 只部署去除
 # DWARF 调试段的运行版，避免将数十 MB 的调试信息提交到 Git。
 "${STRIP_TOOL}" --strip-debug \
-  "${RUNTIME_BIN}/tianji_kinematic_sim.bin.new"
+  "${RUNTIME_BIN}/arm_ik_producer.bin.new"
 "${STRIP_TOOL}" --strip-debug \
   "${RUNTIME_BIN}/tianji_official_ik_probe.bin.new"
 "${STRIP_TOOL}" --strip-debug \
@@ -127,8 +126,8 @@ install -m 0755 "${NEW_BRIDGE}" "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new"
 "${STRIP_TOOL}" --strip-debug \
   "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new"
 mv -f -- \
-  "${RUNTIME_BIN}/tianji_kinematic_sim.bin.new" \
-  "${RUNTIME_BIN}/tianji_kinematic_sim.bin"
+  "${RUNTIME_BIN}/arm_ik_producer.bin.new" \
+  "${RUNTIME_BIN}/arm_ik_producer.bin"
 mv -f -- \
   "${RUNTIME_BIN}/tianji_official_ik_probe.bin.new" \
   "${RUNTIME_BIN}/tianji_official_ik_probe.bin"
@@ -139,8 +138,8 @@ mv -f -- \
   "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new" \
   "${RUNTIME_BIN}/wuji_hand2_bridge.bin"
 install -m 0755 \
-  "${BUNDLE_ROOT}/scripts/runtime_tianji_kinematic_sim.sh" \
-  "${RUNTIME_BIN}/tianji_kinematic_sim"
+  "${BUNDLE_ROOT}/scripts/runtime_arm_ik_producer.sh" \
+  "${RUNTIME_BIN}/arm_ik_producer"
 install -m 0755 \
   "${BUNDLE_ROOT}/scripts/runtime_tianji_official_ik_probe.sh" \
   "${RUNTIME_BIN}/tianji_official_ik_probe"
@@ -189,8 +188,8 @@ printf '%s  runtime\n' "${runtime_hash}" >"${BUNDLE_ROOT}/RUNTIME_TREE_SHA256"
 
 printf '%s\n' \
   "IK runtime 部署完成；旧文件备份在 ${BACKUP_DIR}" \
-  "保留入口：${RUNTIME_BIN}/tianji_kinematic_sim" \
-  "新二进制：${RUNTIME_BIN}/tianji_kinematic_sim.bin" \
+  "保留入口：${RUNTIME_BIN}/arm_ik_producer" \
+  "新二进制：${RUNTIME_BIN}/arm_ik_producer.bin" \
   "runtime ELF 已移除 DWARF 调试信息；staging 仍保留调试版" \
   "官方 probe：${RUNTIME_BIN}/tianji_official_ik_probe" \
   "官方 SDK：${SDK_RUNTIME_ROOT}" \

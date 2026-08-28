@@ -44,9 +44,9 @@ python -m unittest \
   tests.e2e_wuji_hand2_dry
 
 # 优先用 staging 调试版；未构建时退回 runtime 部署的 .bin。
-IK_NODE="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_kinematic_sim"
+IK_NODE="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/arm_ik_producer"
 if [[ ! -x "${IK_NODE}" ]]; then
-  IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/tianji_kinematic_sim.bin"
+  IK_NODE="${PROJECT_PREFIX}/lib/pico_body_tianji/arm_ik_producer.bin"
 fi
 if [[ ! -x "${IK_NODE}" ]]; then
   printf '错误：可配置 IK 节点未生成：%s\n' "${IK_NODE}" >&2
@@ -61,7 +61,7 @@ HANGING_WORKER="${BUNDLE_ROOT}/tests/fake_hanging_official_ik_worker.sh"
 # 官方 IK 后端配假挂死 worker：deadline/重启保护必须在 2 秒内触发。
 worker_timeout_log="$(mktemp)"
 mapfile -t ik_official_params < <(
-  yaml_params_for tianji_kinematic_sim \
+  yaml_params_for arm_ik_producer \
     "${CONTROLLER_ONLY_CONFIG}" \
     "urdf_path:=${PREVIEW_URDF}" \
     ik_backend:=tianji_official
@@ -101,7 +101,7 @@ import yaml
 path = sys.argv[1]
 with open(path, encoding="utf-8") as fh:
     data = yaml.safe_load(fh) or {}
-section = data.get("tianji_kinematic_sim", data)
+section = data.get("arm_ik_producer", data)
 if isinstance(section, dict) and "ros__parameters" in section:
     section = section["ros__parameters"]
 backend = section.get("ik_backend", "")
@@ -112,7 +112,7 @@ PY
 
 # IK 纯运动学节点直接启动（--param key:=value），3 秒超时。
 mapfile -t ik_preview_params < <(
-  yaml_params_for tianji_kinematic_sim \
+  yaml_params_for arm_ik_producer \
     "${PREVIEW_CONFIG}" \
     "urdf_path:=${PREVIEW_URDF}"
 )

@@ -373,10 +373,15 @@ class SessionClient:
                     self._pending_action = None
                     self._pending_intent_sequence = None
                 self._state_event.set()
-            # A query snapshot can legitimately be older than a subscriber
-            # event received after declaration.  It still completes this
-            # channel; only an actual authority/parse error invalidates it.
-            query_valid = not self._invalid_coordinator
+            # A query reply may be older than an event accepted after the
+            # subscriber declaration.  Such a reply is valid only when this
+            # channel already has a cached value; an old cross-channel reply
+            # must not satisfy a channel whose value is still missing.
+            cached_channel = self._state is not None
+            query_valid = (
+                (accepted or cached_channel)
+                and not self._invalid_coordinator
+            )
         if query_channel is not None:
             self._mark_query(query_channel, success=query_valid)
         return accepted
@@ -407,7 +412,11 @@ class SessionClient:
                     self._at_home = latch
                 else:
                     self._return_complete = latch
-            query_valid = not self._invalid_coordinator
+            cached_channel = self._at_home is not None if is_home else self._return_complete is not None
+            query_valid = (
+                (accepted or cached_channel)
+                and not self._invalid_coordinator
+            )
         if query_channel is not None:
             self._mark_query(query_channel, success=query_valid)
         return accepted

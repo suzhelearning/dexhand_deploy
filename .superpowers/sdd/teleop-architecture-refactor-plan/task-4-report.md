@@ -1,0 +1,36 @@
+# Task 4 报告
+
+## 已实现
+
+- 新增 `pico_body_tianji/coordination/arm_command_coordinator.py` 与入口 `src/pico_body_tianji/scripts/arm_command_coordinator`：
+  - launcher 传入 `publisher_instance_id`、`router_zid`，拒绝匿名 identity；
+  - 唯一发布双臂 `ArmJointCommand`、`SessionState`、`LatchedBool(at_home/return_complete)`，双臂每 tick 共享 sequence/timestamp；
+  - subscriber/queryable transport、exactly-one source/producer/executor readiness、freshness、proposal 限位/步长/回滚 fault、stale proposal bounded return、arm Home 与 hand at-zero gate；
+  - fault 不置 return_complete，正常 return 在 fresh arm/hand 安全状态满足后一次性完成。
+- 新增 `config/robot/arm.yaml` 与 `config/coordinator/arm.yaml`，Home/limit/joint order 与 coordinator 八字段均使用弧度。
+- 新增 `connection_readiness.py`，并在 `HostReadinessGate` 暴露 connection/start 两层 gate；connection 不要求 policy observation，fault-return 只接受 fresh returning Home command。
+- 新增独立 `src/pico_body_tianji/src/producers/arm_ik_producer_node.cpp` 与 `arm_ik_producer` CMake target/runtime wrapper。producer 仅订阅 canonical target/final command、调用原有 `ArmIkSolver`、发布 proposal/solved/status；严格检查 side/frame/schema/quaternion/elbow/identity/freshness，不发布 rejected proposal 占位。
+- 三个 IK backend 源文件与 factory 迁移到 `src/pico_body_tianji/src/ik/{pinocchio_cpp,pinocchio_qp,tianji_official}`，算法实现未删除；旧 monolithic 节点与 CMake target 删除。
+- 修复 `SessionClient` query barrier：旧的跨 channel sequence reply 只有在本 channel 已有 subscriber/cache value 时才完成该 channel；缺值 channel 不再被全局旧 baseline 错误放行。
+- 新增 focused tests 覆盖 robot/coordinator 配置、idle 双臂刷新、exactly-one start、拒绝不变更、proposal fault/bounded Home、stale return、return latch once、readiness split 与 SessionClient query barrier。
+
+## 实际验证
+
+1. `pixi run bash -lc 'source scripts/common.sh && activate_bundle_runtime && python -m py_compile src/pico_body_tianji/pico_body_tianji/coordination/arm_command_coordinator.py src/pico_body_tianji/pico_body_tianji/connection_readiness.py && python -m unittest tests.test_arm_coordinator tests.test_task3_round4 tests.test_canonical_sources'`
+   - 结果：`Ran 32 tests ... OK`。
+2. `pixi run -e ik-build build-ik`
+   - 结果：CMake 配置、三个 backend library、`arm_ik_producer`、official probes、Wuji bridge 均构建/安装成功；输出中仅有既有 CMake Boost policy warning 与 Wuji C++20 designated-initializer warning。
+3. `pixi run -e ik-build bash -lc 'cmake --build build/ik --target arm_ik_producer --parallel 4'`
+   - 结果：`Built target arm_ik_producer`。
+4. `set +e; ./build/ik/arm_ik_producer ...; test "$code" -eq 1`
+   - 结果：缺少 `TIANJI_COMPONENT_INSTANCE_ID`、`TIANJI_COORDINATOR_INSTANCE_ID`、`TIANJI_ROUTER_ZID` 时 exit 1，明确 fail-closed。
+5. `git diff --check`
+   - 结果：无 whitespace error。
+
+## 跨任务未完成项与风险
+
+- Task 3 ledger 中 trusted real preflight/provider 仍按裁决留给 Task 5/8；本提交默认 simulation capability，未宣称真机安全准入或物理验收。
+- Task 8/10 仍需完成统一 `run_session` launcher、实际 router ZID 查询、MuJoCo/Marvin/Wuji executor 全链路接线、旧脚本/配置/diagnostic 入口清理及完整 E2E；本任务只更新了 IK build/deploy/test 的直接入口引用。
+- C++ producer 当前使用轻量 canonical JSON parser/Zenoh wiring，未完成跨语言 process-level router smoke；需要后续正式 protocol fixture 与 managed ACL router 验证。
+- hand producer/status 的完整 profile exactly-one 与执行器重连闭环仍需 Task 5/8 进程级验证；Python coordinator 已提供 typed hand gate 基础。
+- 历史 H5 1035-line parity 仍按 Task 3 裁决由 Task 10 扩展，未在本 focused 范围宣称完整回归。

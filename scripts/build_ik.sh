@@ -24,7 +24,7 @@ cmake -S src/pico_body_tianji -B build/ik \
 cmake --build build/ik --parallel "$(nproc)"
 cmake --install build/ik
 
-ik_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_kinematic_sim"
+ik_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/arm_ik_producer"
 probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_probe"
 worker_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_worker"
 qp_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/pinocchio_qp_ik_probe"
