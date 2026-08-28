@@ -75,6 +75,36 @@ PYTHONPATH=src/pico_body_tianji pixi run python -m py_compile \
 - 本任务未迁移旧 source/node，未删除旧入口，未修改 acquisition。
 - parser 对 wire payload 执行 exact-key 校验，不从 topic、liveliness 或 HDF5 attrs 推断 envelope。
 - raw 消息使用完整 envelope；acquisition 的 stream instance/sequence 作为 mocap live raw 的独立字段保留，供后续 source ordering 使用。
-- 当前 constructor 为便于后续 producer/executor 单元构造，为部分直接 wire 类型提供显式匿名 identity 默认值；`from_dict()` 仍要求 wire 上必须有 `publisher_instance_id` 与 `router_zid`，因此外部 JSON 不存在兼容性缺口。后续生产节点必须传入 launcher 分配的真实 identity，不能依赖匿名默认值。
-- 组件 capability 要求至少包含 `simulation` 或 `real`；safety request 强制 `latch=true`。Safety request 的 launcher identity 授权与 request/ack 跨消息 run-id 关联由后续 coordinator/validation 层执行，本消息 parser 只验证本消息结构和值域。
+- 所有可直接构造的 wire 类型均要求显式传入 `publisher_instance_id` 与 `router_zid`，不存在匿名 identity 默认值；`from_dict()` 同样严格要求二者。
+- `SafetyStopRequest.validate_authority(expected_supervisor_instance_id, expected_run_id)` 与 `SafetyStopAck.validate_for(expected_executor_id, expected_run_id)` 为 consumer 的授权/run 绑定入口；request 强制 `latch=true`。
 - 未运行格式化器、lint、项目级 suite 或 acquisition 测试；聚焦协议测试和语法检查均通过。
+
+## Round 1 审查修复
+
+- `ComponentStatus` 补齐严格 envelope `sequence`，并在 `to_dict()/from_dict()` 统一处理。
+- 删除所有可上 wire 的匿名 identity 默认值；Frame0 diagnostics 也要求显式 sequence、publisher instance 与 router ZID。
+- 增加 SafetyStop consumer 的 supervisor/run、executor/run/latch 校验入口及负例测试。
+- diagnostics 改为递归 JSON finite 校验；topics side helper 统一拒绝非法 side；hand wrist 不再容错改写，必须精确为 `[0, 0, 0]`；messages/topics 使用显式 `__all__`。
+- 新增 quaternion `[0.999, 1.001]` 边界/外侧、elbow 阈值、错误 arm order、raw discriminator、session discriminator、nested diagnostics、constructor identity 缺失等测试。
+
+修复后聚焦测试命令及实际输出：
+
+```bash
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest discover -s tests -p 'test_protocol.py'
+```
+
+```text
+............
+----------------------------------------------------------------------
+Ran 12 tests in 0.002s
+
+OK
+```
+
+修复后语法检查命令及实际输出：
+
+```bash
+PYTHONPATH=src/pico_body_tianji pixi run python -m py_compile src/pico_body_tianji/pico_body_tianji/protocol/topics.py src/pico_body_tianji/pico_body_tianji/protocol/messages.py tests/test_protocol.py
+```
+
+无输出，返回成功。

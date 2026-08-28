@@ -82,6 +82,7 @@ class ProtocolMessagesTest(unittest.TestCase):
             schema_version=1, sequence=8, timestamp_ns=9, producer="ik",
             side="left", target_sequence=None, names=self.arm_names,
             position_rad=[0.0] * 7, diagnostics={"iterations": 1},
+            publisher_instance_id="ik-1", router_zid="router-1",
         ))
         self.assert_round_trip(ArmSolvedPose(
             envelope=self.envelope, producer="ik", side="right", frame_id="Base_R",
@@ -92,43 +93,48 @@ class ProtocolMessagesTest(unittest.TestCase):
             schema_version=1, sequence=10, timestamp_ns=11, producer="coordinator",
             side="left", mode="teleop", proposal_sequence=8, target_sequence=7,
             names=self.arm_names, position_rad=[0.0] * 7,
+            publisher_instance_id="coord-1", router_zid="router-1",
         ))
         self.assert_round_trip(ArmJointState(
             schema_version=1, sequence=12, timestamp_ns=13, executor="mujoco",
             names=self.arm_names + [f"Joint{i}_R" for i in range(1, 8)],
             position_rad=[0.0] * 14, velocity_rad_s=None,
+            publisher_instance_id="exec-1", router_zid="router-1",
         ))
 
     def test_hand_messages_round_trip(self) -> None:
         self.assert_round_trip(HandTargetCommand(
             schema_version=1, sequence=1, timestamp_ns=2, source_timestamp_ns=None,
             source="mocap_live", side="left", frame_id="wrist_relative_mediapipe",
-            keypoints_m=self.keypoints,
+            keypoints_m=self.keypoints, publisher_instance_id="source-1", router_zid="router-1",
         ))
         self.assert_round_trip(HandJointCommand(
             schema_version=1, sequence=3, timestamp_ns=4, producer="retarget",
             side="left", names=self.hand_names, position_rad=[0.0] * 20,
+            publisher_instance_id="retarget-1", router_zid="router-1",
         ))
         self.assert_round_trip(HandJointState(
             schema_version=1, sequence=5, timestamp_ns=6, executor="wuji",
             side="left", names=self.hand_names, position_rad=[0.0] * 20,
-            velocity_rad_s=None,
+            velocity_rad_s=None, publisher_instance_id="wuji-1", router_zid="router-1",
         ))
 
     def test_session_status_and_safety_round_trip(self) -> None:
         self.assert_round_trip(SessionIntent(
             schema_version=1, sequence=1, timestamp_ns=2, source="user",
-            action="start", reason="button",
+            action="start", reason="button", publisher_instance_id="source-1", router_zid="router-1",
         ))
         self.assert_round_trip(SessionState(
             schema_version=1, sequence=3, timestamp_ns=4, state="teleop",
             reason="ready", source="coordinator", intent_sequence=1,
+            publisher_instance_id="coord-1", router_zid="router-1",
         ))
-        self.assert_round_trip(LatchedBool(schema_version=1, sequence=5, timestamp_ns=6, value=True))
+        self.assert_round_trip(LatchedBool(schema_version=1, sequence=5, timestamp_ns=6, value=True, publisher_instance_id="coord-1", router_zid="router-1"))
         self.assert_round_trip(ComponentStatus(
-            schema_version=1, timestamp_ns=7, component_role="producer_arm",
+            schema_version=1, sequence=7, timestamp_ns=7, component_role="producer_arm",
             component_id="ik-1", phase="ready", ready=True, healthy=True,
             capabilities=["simulation"], error=None, diagnostics={"backend": "pinocchio_cpp"},
+            publisher_instance_id="ik-1", router_zid="router-1",
         ))
         self.assert_round_trip(HandExecutorStatus(
             schema_version=1, publisher_instance_id="hand-1", router_zid="router-1",
@@ -163,12 +169,12 @@ class ProtocolMessagesTest(unittest.TestCase):
             },
         ))
         self.assert_round_trip(Frame0HandSkeleton(
-            schema_version=1, timestamp_ns=20, side="right", frame_id="motive_world",
+            schema_version=1, sequence=20, timestamp_ns=20, side="right", frame_id="motive_world",
             keypoints_world_m=self.keypoints, edges=[[i, i + 1] for i in range(20)],
             manus_wrist_pose=self.pose, robot_wrist_home_pose=self.pose,
             target_wrist_pose=self.pose, tcp_to_wrist_pose=self.pose,
+            publisher_instance_id="diag-1", router_zid="router-1",
         ))
-
     def test_rejects_unknown_schema_missing_fields_and_bad_shapes(self) -> None:
         payload = self.envelope.to_dict()
         payload["schema_version"] = 2
@@ -182,6 +188,10 @@ class ProtocolMessagesTest(unittest.TestCase):
                 frame_id="Base_L", position_m=[0.1, 0.2, 0.3], orientation_xyzw=[0, 0, 0, 1],
                 elbow_reference_direction=[1, 0, 0],
             ).to_dict(), "position_m": [0.1, 0.2]})
+        unknown = self.envelope.to_dict()
+        unknown["unexpected"] = 1
+        with self.assertRaises(ValueError):
+            ProtocolEnvelope.from_dict(unknown)
         with self.assertRaises(ValueError):
             ArmTargetCommand(
                 envelope=self.envelope, source_timestamp_ns=None, source="x", side="left",
@@ -199,15 +209,16 @@ class ProtocolMessagesTest(unittest.TestCase):
                 schema_version=1, sequence=1, timestamp_ns=2, source_timestamp_ns=None,
                 source="x", side="left", frame_id="wrist_relative_mediapipe",
                 keypoints_m=[[1.0, 0.0, 0.0]] + self.keypoints[1:],
+                publisher_instance_id="source-1", router_zid="router-1",
             )
 
     def test_rejects_nonfinite_envelope_geometry_and_wrong_orders(self) -> None:
         with self.assertRaises(ValueError):
             ProtocolEnvelope(1, "pub", "router", 1, math.nan)
         with self.assertRaises(ValueError):
-            ArmJointProposal(1, 1, 1, "ik", "left", None, self.arm_names, [math.inf] * 7, {})
+            ArmJointProposal(1, 1, 1, "ik", "left", None, self.arm_names, [math.inf] * 7, {}, "ik-1", "router-1")
         with self.assertRaises(ValueError):
-            HandJointCommand(1, 1, 1, "retarget", "left", self.hand_names[::-1], [0.0] * 20)
+            HandJointCommand(1, 1, 1, "retarget", "left", self.hand_names[::-1], [0.0] * 20, "hand-1", "router-1")
         target = ArmTargetCommand(
             envelope=self.envelope, source_timestamp_ns=None, source="x", side="left",
             frame_id="Base_L", position_m=[0.1, 0.2, 0.3], orientation_xyzw=[0, 0, 0, 2],
@@ -221,8 +232,96 @@ class ProtocolMessagesTest(unittest.TestCase):
             ArmTargetCommand.from_dict(malformed)
         with self.assertRaises(ValueError):
             Frame0HandSkeleton(1, 1, "left", "motive_world", self.keypoints, [[0, 1]] * 19,
-                               self.pose, self.pose, self.pose, self.pose)
+                               self.pose, self.pose, self.pose, self.pose, 1, "diag-1", "router-1")
 
+    def test_safety_authority_and_run_validation(self) -> None:
+        request = SafetyStopRequest(self.envelope, "run-1", "operator")
+        request.validate_authority("pub-1", "run-1")
+        with self.assertRaises(ValueError):
+            request.validate_authority("other-supervisor", "run-1")
+        with self.assertRaises(ValueError):
+            request.validate_authority("pub-1", "other-run")
+        with self.assertRaises(ValueError):
+            SafetyStopRequest(self.envelope, "run-1", "operator", latch=False)
+        ack = SafetyStopAck(self.envelope, "arm-1", "run-1", True, "operator")
+        ack.validate_for("arm-1", "run-1")
+        with self.assertRaises(ValueError):
+            ack.validate_for("arm-2", "run-1")
+        with self.assertRaises(ValueError):
+            ack.validate_for("arm-1", "other-run")
+        with self.assertRaises(ValueError):
+            SafetyStopAck(self.envelope, "arm-1", "run-1", False, "operator").validate_for("arm-1", "run-1")
+
+    def test_rejects_nested_non_json_diagnostics_and_topic_side(self) -> None:
+        with self.assertRaises(ValueError):
+            ComponentStatus(1, 1, 2, "producer_arm", "ik", "ready", True, True, ["simulation"], None, {"nested": {"bad": math.inf}}, "ik-1", "router-1")
+        with self.assertRaises(ValueError):
+            topics.arm_target("bad")
+        with self.assertRaises(ValueError):
+            topics.hand_target("bad")
+        with self.assertRaises(ValueError):
+            topics.arm_proposal("bad")
+        with self.assertRaises(ValueError):
+            topics.arm_solved_pose("bad")
+        with self.assertRaises(ValueError):
+            topics.arm_command("bad")
+        with self.assertRaises(ValueError):
+            topics.hand_command("bad")
+        with self.assertRaises(ValueError):
+            topics.hand_state("bad")
+        with self.assertRaises(ValueError):
+            topics.hand_executor_status("bad")
+
+    def test_direct_wire_constructor_requires_identity(self) -> None:
+        with self.assertRaises(TypeError):
+            ArmJointProposal(1, 1, 1, "ik", "left", None, self.arm_names, [0.0] * 7, {})
+
+
+    def test_wire_boundaries_and_discriminators(self) -> None:
+        target = ArmTargetCommand(
+            envelope=self.envelope, source_timestamp_ns=None, source="x", side="left",
+            frame_id="Base_L", position_m=[0.1, 0.2, 0.3], orientation_xyzw=[0, 0, 0, 1],
+            elbow_reference_direction=[1, 0, 0],
+        ).to_dict()
+        for norm in (0.999, 1.001):
+            bounded = dict(target)
+            bounded["orientation_xyzw"] = [0.0, 0.0, 0.0, norm]
+            ArmTargetCommand.from_dict(bounded)
+        for norm in (0.998, 1.002):
+            outside = dict(target)
+            outside["orientation_xyzw"] = [0.0, 0.0, 0.0, norm]
+            with self.assertRaises(ValueError):
+                ArmTargetCommand.from_dict(outside)
+        threshold = ArmTargetCommand(
+            envelope=self.envelope, source_timestamp_ns=None, source="x", side="left",
+            frame_id="Base_L", position_m=[0.1, 0.2, 0.3], orientation_xyzw=[0, 0, 0, 1],
+            elbow_reference_direction=[1e-8, 0, 0],
+        )
+        self.assertEqual(threshold.elbow_reference_direction, [1.0, 0.0, 0.0])
+        with self.assertRaises(ValueError):
+            ArmTargetCommand(
+                envelope=self.envelope, source_timestamp_ns=None, source="x", side="left",
+                frame_id="Base_L", position_m=[0.1, 0.2, 0.3], orientation_xyzw=[0, 0, 0, 1],
+                elbow_reference_direction=[1e-9, 0, 0],
+            )
+        with self.assertRaises(ValueError):
+            ArmJointCommand(
+                schema_version=1, sequence=1, timestamp_ns=2, producer="coordinator",
+                side="left", mode="teleop", proposal_sequence=None, target_sequence=None,
+                names=[f"Joint{i}_R" for i in range(1, 8)], position_rad=[0.0] * 7,
+                publisher_instance_id="coord-1", router_zid="router-1",
+            )
+        with self.assertRaises(ValueError):
+            RawPicoControllerSample(
+                envelope=self.envelope, source_timestamp_ns=None, left_pose=self.pose,
+                right_pose=self.pose, right_a_pressed=False, source_type="bad",
+            )
+        with self.assertRaises(ValueError):
+            SessionIntent(1, 1, 1, "source", "bad", "reason", "source-1", "router-1")
+        with self.assertRaises(ValueError):
+            SessionState(1, 1, 1, "bad", "reason", "source", None, "coord-1", "router-1")
+        with self.assertRaises(ValueError):
+            ComponentStatus(1, 1, 2, "bad", "id", "ready", True, True, ["simulation"], None, {}, "id", "router-1")
 
 if __name__ == "__main__":
     unittest.main()

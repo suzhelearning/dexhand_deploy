@@ -160,11 +160,31 @@ def _names(value: Any, expected: Sequence[str], field: str) -> list[str]:
     return result
 
 
+def _json_data(value: Any, field: str) -> Any:
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ProtocolError(f"{field} must contain only finite JSON values")
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_json_data(item, f"{field}[{index}]") for index, item in enumerate(value)]
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ProtocolError(f"{field} object keys must be strings")
+            result[key] = _json_data(item, f"{field}.{key}")
+        return result
+    raise ProtocolError(f"{field} contains a non-JSON value")
+
+
 def _dict(value: Any, field: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ProtocolError(f"{field} must be an object")
-    return dict(value)
-
+    return _json_data(value, field)
 
 def _capabilities(value: Any) -> list[str]:
     if not isinstance(value, (list, tuple, set)):
@@ -314,8 +334,8 @@ class ArmJointProposal:
     names: list[str]
     position_rad: list[float]
     diagnostics: dict[str, Any]
-    publisher_instance_id: str = "anonymous-producer"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns")
@@ -348,8 +368,8 @@ class ArmJointCommand:
     target_sequence: int | None
     names: list[str]
     position_rad: list[float]
-    publisher_instance_id: str = "anonymous-coordinator"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns")
@@ -379,8 +399,8 @@ class ArmJointState:
     names: list[str]
     position_rad: list[float]
     velocity_rad_s: list[float] | None
-    publisher_instance_id: str = "anonymous-executor"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns"); _string(self.executor, "executor")
@@ -408,16 +428,15 @@ class HandTargetCommand:
     side: str
     frame_id: str
     keypoints_m: list[list[float]]
-    publisher_instance_id: str = "anonymous-source"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns"); _nullable_integer(self.source_timestamp_ns, "source_timestamp_ns")
         _string(self.source, "source"); _side(self.side)
         if self.frame_id != HAND_FRAME: raise ProtocolError(f"hand target must use frame_id={HAND_FRAME}")
         self.keypoints_m = _matrix(self.keypoints_m, 21, 3, "keypoints_m")
-        if any(abs(component) > 1e-12 for component in self.keypoints_m[0]): raise ProtocolError("keypoints_m[0] wrist must be [0, 0, 0]")
-        self.keypoints_m[0] = [0.0, 0.0, 0.0]
+        if any(component != 0.0 for component in self.keypoints_m[0]): raise ProtocolError("keypoints_m[0] wrist must be exactly [0, 0, 0]")
         _identity(self.publisher_instance_id, "publisher_instance_id"); _identity(self.router_zid, "router_zid")
 
     def to_dict(self) -> dict[str, Any]:
@@ -440,8 +459,8 @@ class HandJointCommand:
     side: str
     names: list[str]
     position_rad: list[float]
-    publisher_instance_id: str = "anonymous-producer"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns"); _string(self.producer, "producer"); side = _side(self.side)
@@ -467,8 +486,8 @@ class HandJointState:
     names: list[str]
     position_rad: list[float]
     velocity_rad_s: list[float] | None
-    publisher_instance_id: str = "anonymous-executor"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns"); _string(self.executor, "executor"); side = _side(self.side)
@@ -492,8 +511,8 @@ class SessionIntent:
     source: str
     action: str
     reason: str
-    publisher_instance_id: str = "anonymous-source"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns"); _string(self.source, "source"); _string(self.reason, "reason")
@@ -518,8 +537,8 @@ class SessionState:
     reason: str
     source: str
     intent_sequence: int | None
-    publisher_instance_id: str = "anonymous-coordinator"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns"); _string(self.reason, "reason"); _string(self.source, "source"); _nullable_integer(self.intent_sequence, "intent_sequence")
@@ -541,8 +560,8 @@ class LatchedBool:
     sequence: int
     timestamp_ns: int
     value: bool
-    publisher_instance_id: str = "anonymous-coordinator"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns")
@@ -560,6 +579,7 @@ class LatchedBool:
 @dataclass(eq=True)
 class ComponentStatus:
     schema_version: int
+    sequence: int
     timestamp_ns: int
     component_role: str
     component_id: str
@@ -569,11 +589,11 @@ class ComponentStatus:
     capabilities: list[str]
     error: str | None
     diagnostics: dict[str, Any]
-    publisher_instance_id: str = "anonymous-component"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
-        _schema(self.schema_version); _integer(self.timestamp_ns, "timestamp_ns")
+        _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns")
         if self.component_role not in COMPONENT_ROLES: raise ProtocolError("invalid component_role")
         _string(self.component_id, "component_id"); _string(self.phase, "phase")
         if not isinstance(self.ready, bool) or not isinstance(self.healthy, bool): raise ProtocolError("ready and healthy must be boolean")
@@ -583,13 +603,13 @@ class ComponentStatus:
         _identity(self.publisher_instance_id, "publisher_instance_id"); _identity(self.router_zid, "router_zid")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schema_version": self.schema_version, "publisher_instance_id": self.publisher_instance_id, "router_zid": self.router_zid, "timestamp_ns": self.timestamp_ns, "component_role": self.component_role, "component_id": self.component_id, "phase": self.phase, "ready": self.ready, "healthy": self.healthy, "capabilities": self.capabilities, "error": self.error, "diagnostics": self.diagnostics}
+        return {"schema_version": self.schema_version, "publisher_instance_id": self.publisher_instance_id, "router_zid": self.router_zid, "sequence": self.sequence, "timestamp_ns": self.timestamp_ns, "component_role": self.component_role, "component_id": self.component_id, "phase": self.phase, "ready": self.ready, "healthy": self.healthy, "capabilities": self.capabilities, "error": self.error, "diagnostics": self.diagnostics}
 
     @classmethod
     def from_dict(cls, data: Any) -> "ComponentStatus":
-        value = _mapping(data); payload = {"timestamp_ns", "component_role", "component_id", "phase", "ready", "healthy", "capabilities", "error", "diagnostics"}
+        value = _mapping(data); payload = {"sequence", "timestamp_ns", "component_role", "component_id", "phase", "ready", "healthy", "capabilities", "error", "diagnostics"}
         _keys(value, {"schema_version", "publisher_instance_id", "router_zid"} | payload)
-        return cls(value["schema_version"], value["timestamp_ns"], value["component_role"], value["component_id"], value["phase"], value["ready"], value["healthy"], value["capabilities"], value["error"], value["diagnostics"], value["publisher_instance_id"], value["router_zid"])
+        return cls(value["schema_version"], value["sequence"], value["timestamp_ns"], value["component_role"], value["component_id"], value["phase"], value["ready"], value["healthy"], value["capabilities"], value["error"], value["diagnostics"], value["publisher_instance_id"], value["router_zid"])
 
 
 @dataclass(eq=True)
@@ -603,8 +623,8 @@ class HandExecutorStatus:
     at_zero: bool
     tracking_allowed: bool
     error: str | None
-    publisher_instance_id: str = "anonymous-executor"
-    router_zid: str = "unknown-router"
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns"); _side(self.side)
@@ -643,6 +663,16 @@ class SafetyStopRequest:
         env = ProtocolEnvelope.from_dict({key: value[key] for key in ("schema_version", "publisher_instance_id", "router_zid", "sequence", "timestamp_ns")})
         return cls(env, value["run_id"], value["reason"], value["latch"])
 
+    def validate_authority(self, expected_supervisor_instance_id: str, expected_run_id: str | None = None) -> None:
+        """Validate launcher authorization before a consumer acts on the stop."""
+        _identity(expected_supervisor_instance_id, "expected_supervisor_instance_id")
+        if self.envelope.publisher_instance_id != expected_supervisor_instance_id:
+            raise ProtocolError("safety stop publisher is not the authorized supervisor")
+        if expected_run_id is not None:
+            _identity(expected_run_id, "expected_run_id")
+            if self.run_id != expected_run_id:
+                raise ProtocolError("safety stop run_id does not match active run")
+
 
 @dataclass(eq=True)
 class SafetyStopAck:
@@ -664,6 +694,17 @@ class SafetyStopAck:
         value = _mapping(data); _keys(value, {"schema_version", "publisher_instance_id", "router_zid", "sequence", "timestamp_ns", "executor_id", "run_id", "latched", "reason"})
         env = ProtocolEnvelope.from_dict({key: value[key] for key in ("schema_version", "publisher_instance_id", "router_zid", "sequence", "timestamp_ns")})
         return cls(env, value["executor_id"], value["run_id"], value["latched"], value["reason"])
+
+    def validate_for(self, expected_executor_id: str, expected_run_id: str) -> None:
+        """Validate that an acknowledgement belongs to this executor and run."""
+        _identity(expected_executor_id, "expected_executor_id")
+        _identity(expected_run_id, "expected_run_id")
+        if self.executor_id != expected_executor_id:
+            raise ProtocolError("safety stop ack executor_id mismatch")
+        if self.run_id != expected_run_id:
+            raise ProtocolError("safety stop ack run_id mismatch")
+        if not self.latched:
+            raise ProtocolError("safety stop ack must be latched")
 
 
 @dataclass(eq=True)
@@ -768,9 +809,9 @@ class Frame0HandSkeleton:
     robot_wrist_home_pose: list[float]
     target_wrist_pose: list[float]
     tcp_to_wrist_pose: list[float]
-    publisher_instance_id: str = "anonymous-diagnostic"
-    router_zid: str = "unknown-router"
-    sequence: int = 0
+    sequence: int
+    publisher_instance_id: str
+    router_zid: str
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.timestamp_ns, "timestamp_ns"); _side(self.side)
@@ -790,7 +831,17 @@ class Frame0HandSkeleton:
         _edges(value["edges"])
         for field in ("manus_wrist_pose", "robot_wrist_home_pose", "target_wrist_pose", "tcp_to_wrist_pose"):
             _pose(value[field], field, parse=True)
-        return cls(value["schema_version"], value["timestamp_ns"], value["side"], value["frame_id"], value["keypoints_world_m"], value["edges"], value["manus_wrist_pose"], value["robot_wrist_home_pose"], value["target_wrist_pose"], value["tcp_to_wrist_pose"], value["publisher_instance_id"], value["router_zid"], value["sequence"])
+        return cls(value["schema_version"], value["timestamp_ns"], value["side"], value["frame_id"], value["keypoints_world_m"], value["edges"], value["manus_wrist_pose"], value["robot_wrist_home_pose"], value["target_wrist_pose"], value["tcp_to_wrist_pose"], value["sequence"], value["publisher_instance_id"], value["router_zid"])
 
 
-__all__ = [name for name in globals() if not name.startswith("_")]
+__all__ = [
+    "SCHEMA_VERSION", "SIDES", "ARM_FRAMES", "ARM_MODES", "SESSION_ACTIONS",
+    "SESSION_STATES", "COMPONENT_ROLES", "HAND_FRAME", "DIAGNOSTIC_FRAME",
+    "ARM_JOINT_NAMES", "HAND_JOINT_NAMES", "ALL_ARM_JOINT_NAMES",
+    "ProtocolError", "ProtocolEnvelope", "ArmTargetCommand", "ArmJointProposal",
+    "ArmSolvedPose", "ArmJointCommand", "ArmJointState", "HandTargetCommand",
+    "HandJointCommand", "HandJointState", "SessionIntent", "SessionState",
+    "LatchedBool", "ComponentStatus", "HandExecutorStatus", "SafetyStopRequest",
+    "SafetyStopAck", "RawPicoControllerSample", "RawMocapLiveSample",
+    "RawH5ReplaySample", "Frame0HandSkeleton",
+]

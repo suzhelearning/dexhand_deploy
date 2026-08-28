@@ -36,36 +36,57 @@ MOCAP_RIGID_BODY_NAMES = "mocap/rigid_body_names"
 
 
 def arm_target(side: str) -> str:
-    return ARM_TARGET.format(side=side)
+    return ARM_TARGET.format(side=_side(side))
 
 
 def hand_target(side: str) -> str:
-    return HAND_TARGET.format(side=side)
+    return HAND_TARGET.format(side=_side(side))
 
 
 def arm_proposal(side: str) -> str:
-    return ARM_PROPOSAL.format(side=side)
+    return ARM_PROPOSAL.format(side=_side(side))
 
 
 def arm_solved_pose(side: str) -> str:
-    return ARM_SOLVED_POSE.format(side=side)
+    return ARM_SOLVED_POSE.format(side=_side(side))
 
 
 def arm_command(side: str) -> str:
-    return ARM_COMMAND.format(side=side)
+    return ARM_COMMAND.format(side=_side(side))
+
+
+
+def _side(side: str) -> str:
+    if side not in ("left", "right"):
+        raise ValueError("side must be left or right")
+    return side
 
 
 def hand_command(side: str) -> str:
-    return HAND_COMMAND.format(side=side)
+    return HAND_COMMAND.format(side=_side(side))
 
 
 def hand_state(side: str) -> str:
-    return HAND_STATE.format(side=side)
+    return HAND_STATE.format(side=_side(side))
 
 
 def hand_executor_status(side: str) -> str:
-    return HAND_EXECUTOR_STATUS.format(side=side)
+    return HAND_EXECUTOR_STATUS.format(side=_side(side))
 
 
 def safety_ack(executor_id: str) -> str:
     return SAFETY_ACK.format(executor_id=executor_id)
+
+
+__all__ = [
+    "SESSION_INTENT", "SESSION_STATE", "SOURCE_STATUS", "ARM_TARGET",
+    "HAND_TARGET", "PRODUCER_STATUS", "ARM_PROPOSAL", "ARM_SOLVED_POSE",
+    "COORDINATOR_STATUS", "AT_HOME", "RETURN_COMPLETE", "ARM_COMMAND",
+    "HAND_COMMAND", "ARM_STATE", "HAND_STATE", "EXECUTOR_STATUS",
+    "HAND_EXECUTOR_STATUS", "SAFETY_STOP", "SAFETY_ACK",
+    "RAW_PICO_CONTROLLER", "RAW_MOCAP_LIVE", "RAW_H5_REPLAY",
+    "FRAME0_HAND_SKELETON", "MOCAP_ALIGNED_HANDS", "MOCAP_HANDS_FRAME",
+    "MOCAP_RIGID_BODY_NAMES", "arm_target", "hand_target", "arm_proposal",
+    "arm_solved_pose", "arm_command", "hand_command", "hand_state",
+    "hand_executor_status", "safety_ack",
+]
