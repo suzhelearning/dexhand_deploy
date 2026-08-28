@@ -56,3 +56,5 @@
   1. `pixi run bash -lc 'source scripts/common.sh && activate_bundle_runtime && python -m py_compile src/pico_body_tianji/pico_body_tianji/coordination/arm_command_coordinator.py && python -m unittest tests.test_arm_coordinator'` → `Ran 10 tests ... OK`。
   2. `pixi run -e ik-build bash -lc 'cmake --build build/ik --target arm_ik_producer --parallel 4'` → `Built target arm_ik_producer`。
 - 保留风险：完整 formal JSON unknown-field parser、HostReadiness 到 Marvin 实际调用、完整 launcher/runtime clean cutover、跨语言 process fixture 与物理 executor 仍需后续闭合。
+
+- round2 follow-up verification repeated the same focused commands after restoring the periodic authority publish path; both remained green (`10 tests OK`, `Built target arm_ik_producer`).
