@@ -384,9 +384,19 @@ class ArmCommandCoordinator:
     def _check_teleop_health(self, now_ns: int) -> None:
         if self._state.state != "teleop":
             return
-        for role in ("source", "producer_arm", "executor_arm"):
+        for role in ("source", "producer_arm"):
             if not self._domain_ready(role, now_ns):
                 self._enter_returning(f"{role} stale or unhealthy", now_ns)
+                return
+        if not self._domain_ready("executor_arm", now_ns) or not self._fresh(self._arm_state, now_ns):
+            self._enter_fault("executor arm/state stale or unhealthy")
+            return
+        if self._hand_enabled():
+            if not self._domain_ready("producer_hand", now_ns):
+                self._enter_returning("producer_hand stale or unhealthy", now_ns)
+                return
+            if not all(self._fresh(self._hand_status.get(side), now_ns) and self._hand_status[side].value.healthy for side in self.profile.get("hand_sides", ("left", "right"))):
+                self._enter_fault("hand executor status stale or unhealthy")
                 return
         for side in self.profile.get("active_sides", ("left", "right")):
             if not self._fresh(self._proposals.get(side), now_ns):
@@ -395,11 +405,9 @@ class ArmCommandCoordinator:
 
     def _enter_fault(self, reason: str) -> None:
         self._fault_reason = reason
-        if self._return_start_command is None:
-            self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
-        if self._return_started_ns is None:
-            self._return_started_ns = self.clock()
         if self._state.state != "fault":
+            self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
+            self._return_started_ns = self.clock()
             self._sequence += 1
             self._state = self._make_state("fault", reason, self._state.intent_sequence)
             self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
@@ -483,6 +491,12 @@ class ArmCommandCoordinator:
             self._at_home = LatchedBool(1, self._sequence, timestamp_ns, all(command.position_rad == list(getattr(self.robot, f"{side}_home_rad")) for side, command in commands.items()), self.publisher_instance_id, self.router_zid)
             if not self._return_complete.value:
                 self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, False, self.publisher_instance_id, self.router_zid)
+        self._state = SessionState(1, self._sequence, timestamp_ns, self._state.state, self._state.reason, "coordinator", self._state.intent_sequence, self.publisher_instance_id, self.router_zid)
+        for side, command in commands.items():
+            self._publish(side, command.to_dict())
+        self._publish("state", self._state.to_dict())
+        self._publish("home", self._at_home.to_dict())
+        self._publish("complete", self._return_complete.to_dict())
         return commands
 
     def start(self) -> None:

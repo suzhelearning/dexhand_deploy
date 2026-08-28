@@ -45,3 +45,14 @@
   1. `pixi run bash -lc 'source scripts/common.sh && activate_bundle_runtime && python -m unittest tests.test_arm_coordinator'` → `Ran 10 tests ... OK`。
   2. `pixi run -e ik-build bash -lc 'cmake --build build/ik --target arm_ik_producer --parallel 4'` → `Built target arm_ik_producer`。
 - 尚未完成：C++ 仍需后续替换为仓库统一正式 JSON parser/完整 cross-language process fixture；HostReadiness 对 Marvin 的生产调用、非默认 router SessionInfo exactly-one、所有历史 launcher/runtime 调用点和完整 hand/executor process smoke 仍需后续修复。
+
+## Fix round 2
+
+- 恢复 C++ target parser 对 `router_zid` 的实际赋值；保留 source 校验，避免合法 target 被错误判定 router mismatch。
+- 恢复 coordinator tick 的双臂 command、SessionState、at_home、return_complete 周期发布；所有 wire 输出继续共用 tick sequence/timestamp。
+- 修正每轮新 fault 的 bounded-return 起点和起始时间：进入 fault 时从当前 safe command 重新快照，避免复用上一轮轨迹。
+- C++ producer 保留独立 status publisher 与 liveliness token，初始化与每次 control tick 发布 healthy/ready typed status。
+- 实际命令与输出：
+  1. `pixi run bash -lc 'source scripts/common.sh && activate_bundle_runtime && python -m py_compile src/pico_body_tianji/pico_body_tianji/coordination/arm_command_coordinator.py && python -m unittest tests.test_arm_coordinator'` → `Ran 10 tests ... OK`。
+  2. `pixi run -e ik-build bash -lc 'cmake --build build/ik --target arm_ik_producer --parallel 4'` → `Built target arm_ik_producer`。
+- 保留风险：完整 formal JSON unknown-field parser、HostReadiness 到 Marvin 实际调用、完整 launcher/runtime clean cutover、跨语言 process fixture 与物理 executor 仍需后续闭合。

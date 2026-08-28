@@ -84,6 +84,7 @@ public:
     if (integer_field("schema_version") != 1) throw std::invalid_argument("unsupported arm target schema");
     Target target;
     target.instance = string_field("publisher_instance_id");
+    target.router = string_field("router_zid");
     (void)string_field("source");
     target.side = string_field("side");
     target.frame = string_field("frame_id");
