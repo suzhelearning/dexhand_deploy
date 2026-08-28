@@ -113,3 +113,34 @@ git diff --check
 ```
 
 仍未覆盖：三类 query completion/reconnect 真实 Zenoh 行为、H5/live 完整设备 preflight 扫描、原 1035 行 H5 全部几何/terminal/viewer 回归测试恢复；这些已明确列入 concerns，不能宣称物理/全链路验收完成。
+
+## Fix round 3（重审 open findings）
+
+- `SessionClient` 增加 `snapshot_complete` 与 `reconnect()`：重连会丢弃 coordinator state/latch、identity、sequence baseline，重新执行 subscriber→query；intent 授权后的 pending deadline 不会清掉已授权 return completion。
+- `MotiveFrameSource` 进一步拒绝 bool/float/string coercion 的 frame/id、要求非负 frame、正整数 rigid id、有限且归一化 quaternion；H5 callback 保存并消费 typed Motive frame，rigid names 严格校验。
+- live/PICO/H5 的 source config real-mode/preflight bool 均要求真实 YAML boolean，real mode 默认 fail closed；active tick 检查 capability loss。live orientation 使用 frozen reference 的 `R_current * inverse(R_reference)` 并应用于 Home rotation；conditioner 完整读取 source 参数。
+- diagnostics calibration 节点迁移到 `diagnostics/mocap_calibration_node.py` 并改用 canonical mapper/controller imports；`test_mocap_keyboard_step.py` 恢复完整 27 项行为覆盖并纳入 `scripts/test.sh`，未恢复任何旧 mapper/conditioner/source/H5/live/PICO 兼容 API。
+- viewer Frame0 使用正式 `Frame0HandSkeleton.from_dict()` 字段和 typed validation，H5 传入 Motive wrist home 坐标。
+
+Round 3 实际验证：
+
+```text
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m py_compile \
+  src/pico_body_tianji/pico_body_tianji/zenoh_util.py \
+  src/pico_body_tianji/pico_body_tianji/sources/common/*.py \
+  src/pico_body_tianji/pico_body_tianji/sources/pico_controller/*.py \
+  src/pico_body_tianji/pico_body_tianji/sources/mocap/*.py \
+  src/pico_body_tianji/pico_body_tianji/diagnostics/mocap_calibration_node.py \
+  src/pico_body_tianji/scripts/mujoco_joint_viewer.py
+# 退出码 0，无输出
+
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest \
+  tests.test_canonical_sources tests.test_target_mapper tests.test_mocap_h5 \
+  tests.test_h5_replay tests.test_mocap_keyboard_step
+# Ran 56 tests in 0.186s / OK
+
+git diff --check
+# 无输出，退出码 0
+```
+
+仍未覆盖：真实 Zenoh router 下三 query completion/multiple reply/reconnect 的进程测试；H5/live 真实 H5/hand/设备 preflight 扫描接口仍由 launcher 提供严格 typed result；原 1035 行 H5 测试中的完整 geometry/terminal/viewer 部分尚未完全恢复（当前保留 canonical lifecycle + 旧 step diagnostic 27 项保护）。

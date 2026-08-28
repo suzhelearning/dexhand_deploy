@@ -34,6 +34,7 @@ assert_no_conflicting_teleop_nodes
 python -m unittest \
   tests.test_target_mapper \
   tests.test_canonical_sources \
+  tests.test_mocap_keyboard_step \
   tests.test_controller_only_host_readiness \
   tests.test_controller_only_real_profile \
   tests.test_mocap_h5 \

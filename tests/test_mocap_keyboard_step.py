@@ -6,10 +6,8 @@ import unittest
 
 import numpy as np
 
-from pico_body_tianji.controller_frame import ControllerFrame
-from pico_body_tianji.controller_only.controller_only_mapper import (
-    ControllerOnlyTeleopMapper,
-)
+from pico_body_tianji.sources.pico_controller.controller_frame import ControllerFrame
+from pico_body_tianji.sources.common.target_mapper import EndEffectorTargetMapper
 from pico_body_tianji.controller_only.mocap_keyboard_step import (
     AXIS_STEPS,
     ArrowKeyParser,
@@ -17,8 +15,8 @@ from pico_body_tianji.controller_only.mocap_keyboard_step import (
     MotiveFrontCircleTrajectory,
     StepAccumulator,
 )
-from pico_body_tianji.controller_only.mocap_live_node import MocapLiveNode
-from pico_body_tianji.controller_only.target_conditioner import (
+from pico_body_tianji.diagnostics.mocap_calibration_node import MocapLiveNode
+from pico_body_tianji.sources.common.target_conditioner import (
     TargetConditioningSettings,
 )
 from tianji_world_output.config_loader import TianjiConfig
@@ -636,9 +634,9 @@ class MocapLiveReferenceKeyboardTest(unittest.TestCase):
 class MocapKeyboardStepMappingTest(unittest.TestCase):
     """验收：按一次键（动捕系 10mm）→ 目标位移 10mm（1:1）。"""
 
-    def _mapper(self) -> ControllerOnlyTeleopMapper:
+    def _mapper(self) -> EndEffectorTargetMapper:
         config = TianjiConfig.load()
-        return ControllerOnlyTeleopMapper(
+        return EndEffectorTargetMapper(
             config,
             rate=60.0,
             min_cutoff=1.2,
@@ -678,7 +676,7 @@ class MocapKeyboardStepMappingTest(unittest.TestCase):
             # One-Euro 滤波对 10mm 台阶渐近收敛（时间常数 ~0.13s）：
             # 每次按键后保持 0.5s（30 帧）再记录目标。
             for _ in range(30):
-                mapper.map_frame(
+                mapper.map_relative_controller_frame(
                     ControllerFrame.from_poses(pose, pose)
                 )
 
@@ -686,7 +684,7 @@ class MocapKeyboardStepMappingTest(unittest.TestCase):
         for _ in range(3):
             pose = accumulator.step("up")
             settle(pose)
-            targets = mapper.map_frame(
+            targets = mapper.map_relative_controller_frame(
                 ControllerFrame.from_poses(pose, pose)
             )
             settled.append(targets)

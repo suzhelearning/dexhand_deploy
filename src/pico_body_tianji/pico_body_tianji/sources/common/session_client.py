@@ -141,6 +141,31 @@ class SessionClient:
     def coordinator_instance_id(self) -> str | None:
         with self._lock:
             return self._coordinator_identity
+    @property
+    def snapshot_complete(self) -> bool:
+        with self._lock:
+            return self._snapshot_event.is_set() and not self._snapshot_timed_out
+
+    def reconnect(self) -> None:
+        """Drop coordinator identity/baselines and perform a fresh startup query."""
+        for resource in self._resources:
+            try:
+                resource.undeclare()
+            except Exception:
+                pass
+        self._resources.clear()
+        with self._lock:
+            self._started = False
+            self._state = None
+            self._at_home = None
+            self._return_complete = None
+            self._coordinator_identity = None
+            self._last_coordinator_sequence.clear()
+            self._snapshot_event.clear()
+            self._snapshot_timed_out = False
+            self._pending_action = None
+            self._pending_intent_sequence = None
+        self.start()
 
     def start(self) -> None:
         """Declare subscribers first, then request one-shot coordinator snapshots."""
@@ -302,8 +327,17 @@ class SessionClient:
         if self._started and not self._snapshot_event.is_set() and time.monotonic() - self._snapshot_started_at >= self._snapshot_timeout_s:
             self._snapshot_timed_out = True
         if self._pending_action is not None and time.monotonic() >= self._pending_deadline:
-            self._pending_action = None
-            self._pending_intent_sequence = None
+            authorized = (
+                self._state is not None
+                and self._state.intent_sequence == self._pending_intent_sequence
+                and (
+                    (self._pending_action == "start" and self._state.state == "teleop")
+                    or (self._pending_action == "return" and self._state.state in {"returning", "idle"})
+                )
+            )
+            if not authorized:
+                self._pending_action = None
+                self._pending_intent_sequence = None
 
     def poll(self) -> None:
         with self._lock:

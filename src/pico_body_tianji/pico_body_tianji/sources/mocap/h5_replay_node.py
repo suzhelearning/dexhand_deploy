@@ -522,13 +522,19 @@ class MocapH5ReplayNode:
         payload = mapping.get("names", mapping)
         if not isinstance(payload, dict):
             return
-        try:
-            names = {
-                int(rigid_id): str(name)
-                for rigid_id, name in payload.items()
-            }
-        except (TypeError, ValueError):
-            return
+        names = {}
+        for rigid_id, name in payload.items():
+            if (
+                isinstance(rigid_id, bool)
+                or not isinstance(rigid_id, (int, str))
+                or (isinstance(rigid_id, str) and not rigid_id.isdecimal())
+                or int(rigid_id) <= 0
+                or not isinstance(name, str)
+                or not name
+            ):
+                self._last_error = "invalid rigid body names payload"
+                return
+            names[int(rigid_id)] = name
         with self._lock:
             changed = names != self._rigid_body_names
             self._rigid_body_names = names
