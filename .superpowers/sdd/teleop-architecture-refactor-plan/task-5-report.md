@@ -137,3 +137,78 @@ pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m unittest tests.test
 - 本轮没有启动 managed router、完整 `run_session`/Task 8 profile token wiring，也没有完成多进程 Zenoh query/liveliness E2E。
 - C++ Wuji 只完成目标构建与代码路径核查；没有真实 Wuji SDK feedback/servo/disable 网络验收。Marvin 同样没有物理设备连接、跟踪、限位或急停实体验收。
 - 以上 focused fake/headless 与 peer-session smoke 不能替代 Task 9/10 设备 gate；不得据此宣称实体执行器通过。
+
+## Round 5 最终修复与验证
+
+### 本轮修复
+
+- Marvin `_admission_ok()` 在合法 typed `RealCapabilityInput` 路径明确返回 `True`；保留 SafetyStop 锁存、fault/returning bounded reconnect、feedback-first、`HardwareSafetyController` 限位/step/slew。
+- Marvin reconnect 根据权威 SessionState 区分 `returning` 与 `fault`：正常 returning 重连保持 returning，并可在收到 idle 后回到 `armed_idle`；fault 重连保持锁存 `fault_return`。SafetyStop 后普通 connect 仍在任何 SDK 调用前拒绝。
+- MuJoCo snapshot 使用 eclipse-zenoh 1.10 的 `reply.ok` → `reply.result` → `Sample.payload` 解包；三 key 仍要求 typed、exactly-one、coordinator/router identity 与 timestamp freshness。subscriber 或前一次尝试已收到较新 sequence 时，延迟/重试旧 snapshot 只计为该 key 满足，不覆盖当前值；重试保留 sequence baseline，缺失/重复/失败仍保持 not-ready 并重试。
+- Python Wuji retarget 的 `producer_hand`/`executor_hand` ComponentStatus `component_id` 分别与 producer/executor liveliness logical id 完全一致；direct 继续 executor-only。
+- C++ Wuji 在读取 `latest_states()` cache 后重新采样 monotonic 时间计算 measured age，避免 tick 开始时间把正常异步反馈误判为 future；重复 serial/断流继续 stale lockout，每 tick 发布 measured-derived status，SafetyStop callback 同轮发布 unhealthy status 与 matching ack。
+
+### Round 5 回归 RED
+
+先加入真实 Zenoh Reply-shaped fake（仅 `reply.ok`、`reply.result.payload`，不提供直接 `payload/get_payload()`）、subscriber 新状态覆盖旧 snapshot、retry baseline、普通 Marvin admission/connect、returning/fault reconnect、Wuji role-id 一致性回归，执行：
+
+```text
+pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m unittest tests.test_task5_executor_contract'
+```
+
+输出：`Ran 24 tests ... FAILED (failures=5)`；失败分别暴露 admission 无明确 True、returning 重连错误进入 fault_return、Reply 解包失败、snapshot sequence rollback、Wuji role/status logical-id 不一致。
+
+retry baseline 回归在保留旧 snapshot 清理逻辑时单独执行：
+
+```text
+pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m unittest tests.test_task5_executor_contract.Task5ExecutorContractTest.test_mujoco_retry_keeps_newer_subscriber_baseline'
+```
+
+输出：`Ran 1 test ... FAILED`，实际得到 sequence `1` 而非预期 `2`；移除重试时对 `_snapshot_values` 的清理后转绿。
+
+### Round 5 实际验证
+
+1. focused executor regression：
+
+   ```text
+   pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m unittest tests.test_task5_executor_contract'
+   ```
+
+   输出：`Ran 25 tests in 0.112s`，`OK`。
+
+2. Python 语法：
+
+   ```text
+   pixi run bash -lc 'PYTHONPATH=src/pico_body_tianji python -m py_compile src/pico_body_tianji/pico_body_tianji/executors/wuji_hand2/node.py src/pico_body_tianji/pico_body_tianji/executors/mujoco/node.py src/pico_body_tianji/pico_body_tianji/executors/marvin/bridge.py src/pico_body_tianji/pico_body_tianji/executors/marvin/readiness.py src/pico_body_tianji/pico_body_tianji/marvin_hardware_bridge.py tests/test_task5_executor_contract.py'
+   ```
+
+   输出：无错误。
+
+3. C++ Wuji bridge：
+
+   ```text
+   pixi run -e ik-build bash -lc 'cmake --build build/ik --target wuji_hand2_bridge -j2'
+   ```
+
+   输出：`[100%] Built target wuji_hand2_bridge`。
+
+4. 真实 Zenoh peer session constructor smoke：
+
+   ```text
+   PYTHONPATH=src/pico_body_tianji pixi run python -c 'import zenoh; from tests.test_task5_executor_contract import _FakeModel,_FakeData; from pico_body_tianji.executors.mujoco.node import MujocoExecutor; c=zenoh.Config.from_json5("{\"mode\":\"peer\"}"); s=zenoh.open(c); x=MujocoExecutor(session=s, model=_FakeModel(), data=_FakeData(), publisher_instance_id="mujoco", router_zid="peer", coordinator_instance_id="coord"); print(type(s).__name__, x.status.phase, x.status.ready); x.close(); s.close()'
+   ```
+
+   输出：`Session waiting_snapshot False`；构造/订阅/查询注册可达，未收到三份 snapshot 时保持 not-ready。
+
+5. 空白检查：
+
+   ```text
+   git diff --check
+   ```
+
+   输出：空。
+
+### 未完成 / 不可宣称项
+
+- 未启动 managed router、完整 `run_session`/Task 8 profile authority wiring 或多进程 query/liveliness E2E；peer session smoke 不替代这些验收。
+- 未连接真实 Marvin/Wuji 设备，未完成实体 feedback、servo-disable、限位、断网或急停 gate；C++ build 与 fake/headless 测试不构成物理通过。

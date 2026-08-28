@@ -309,8 +309,10 @@ class MujocoExecutor:
     def _reply_payload(self, reply: Any) -> Mapping[str, Any]:
         if not getattr(reply, "ok", False):
             raise ProtocolError("coordinator snapshot reply is not successful")
-        payload = reply.get_payload() if callable(getattr(reply, "get_payload", None)) else getattr(reply, "payload", reply)
-        return _sample_payload(payload)
+        result = getattr(reply, "result", None)
+        if result is None:
+            raise ProtocolError("successful coordinator snapshot reply has no result")
+        return _sample_payload(result)
 
     def _on_snapshot_reply(self, key_name: str, reply: Any, attempt: int) -> None:
         if attempt != self._snapshot_attempt:
@@ -338,6 +340,21 @@ class MujocoExecutor:
                 raise ProtocolError("snapshot router_zid mismatch")
             if parsed.timestamp_ns > now_ns or now_ns - parsed.timestamp_ns > self._snapshot_timeout_ns:
                 raise ProtocolError(f"stale coordinator snapshot: {key_name}")
+            current = self._snapshot_values.get(key_name)
+            if current is not None and parsed.sequence <= current.sequence:
+                # A subscriber callback may have delivered newer authority while
+                # the query was in flight. The snapshot still satisfies this
+                # key, but must never roll that value back.
+                if key_name == "state":
+                    self._session_state = current
+                elif key_name == "at_home":
+                    self._at_home = current
+                else:
+                    self._return_complete = current
+                self._snapshot_seen.add(key_name)
+                if len(self._snapshot_seen) == 3 and not self._snapshot_failed:
+                    self._snapshot_ready = True
+                return
             if key_name == "state":
                 self._session_state = parsed
                 self._session_received_ns = now_ns
@@ -360,7 +377,6 @@ class MujocoExecutor:
         attempt = self._snapshot_attempt
         self._snapshot_query_started_ns = int(self.clock())
         self._snapshot_seen.clear()
-        self._snapshot_values.clear()
         self._snapshot_failed = False
         self._snapshot_ready = False
         keys = (
@@ -409,6 +425,7 @@ class MujocoExecutor:
                     return
             self._session_state = state
             self._session_received_ns = now_ns
+            self._snapshot_values["state"] = state
         except (ProtocolError, TypeError, ValueError) as exc:
             self._healthy = False
             self._last_error = f"invalid session state: {exc}"

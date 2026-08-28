@@ -466,9 +466,13 @@ class WujiHandExecutor:
             (("producer_hand", "executor_hand") if self.mode == "retarget" else ("executor_hand",))
         )
         for role in roles:
+            component_id = (
+                self.authorized_producer
+                if role == "producer_hand"
+                else f"wuji_{self.side}"
+            )
             component = ComponentStatus(
-                1, self._status_sequence, now, role,
-                f"wuji_hand2_{self.side}_{role.removeprefix('producer_').removeprefix('executor_')}",
+                1, self._status_sequence, now, role, component_id,
                 self.mode, healthy, healthy,
                 ["simulation"] if self.dry_run else ["real"], self._last_error,
                 {"side": self.side, "mode": self.mode, "at_zero": self.at_zero, "tracking_allowed": tracking},

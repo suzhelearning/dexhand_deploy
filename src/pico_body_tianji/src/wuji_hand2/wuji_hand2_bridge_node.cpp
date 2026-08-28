@@ -485,9 +485,9 @@ void WujiHand2Bridge::publish_status(const std::string &error) {
       component_status_pub_->put(zenoh::Bytes(out.str()));
     };
     if (params_.mode == "retarget") {
-      component("producer_hand", "wuji_hand2_" + params_.side + "_producer");
+      component("producer_hand", params_.logical_producer);
     }
-    component("executor_hand", "wuji_hand2_" + params_.side + "_executor");
+    component("executor_hand", params_.side);
   }
 }
 int WujiHand2Bridge::run() {
@@ -628,6 +628,11 @@ int WujiHand2Bridge::run() {
           locked = true;
           device->close();
         } else {
+          // latest_states() returns a snapshot populated by an asynchronous
+          // callback. Sample monotonic time after reading that cache so a
+          // callback which arrived during this tick is not classified as
+          // future feedback merely because `current` was captured earlier.
+          const auto measured_now = now_ns();
           bool new_measurement = false;
           {
             std::lock_guard<std::mutex> guard(mutex_);
@@ -638,8 +643,9 @@ int WujiHand2Bridge::run() {
               measured_valid_ = true;
               new_measurement = true;
             }
-            if (!measured_valid_ || current < measured_received_ns_ ||
-                current - measured_received_ns_ > kFreshnessNs) {
+            if (!measured_valid_ || measured_received_ns_ <= 0 ||
+                measured_received_ns_ > measured_now ||
+                measured_now - measured_received_ns_ > kFreshnessNs) {
               measured_valid_ = false;
               tracking_allowed_ = false;
               safety_locked_ = true;

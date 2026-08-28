@@ -301,6 +301,8 @@ class MarvinExecutor:
         if not value.admitted:
             self._last_error = "real capability preflight denied"
             return False
+        return True
+
     def connect(self) -> bool:
         if self._safety_locked:
             self._last_error = "SafetyStop is latched; restart executor before reconnect"
@@ -308,6 +310,7 @@ class MarvinExecutor:
             self._publish_status()
             return False
         now = int(self.clock())
+        recovery_state = self._session_state.state if self._session_state is not None else None
         fault_reconnect = self._readiness.fault_return_ready(now_ns=now)
         if not fault_reconnect:
             deadline = time.monotonic() + float(self.params.get("connection_wait_s", 1.0))
@@ -344,7 +347,11 @@ class MarvinExecutor:
                     upper_limits_deg=np.degrees(self.robot.upper_limits_rad),
                     hard_limit_padding_deg=float(self.params["feedback_hard_limit_padding_deg"]),
                 )
-            self._phase = "fault_return" if fault_reconnect else "armed_idle"
+            self._phase = (
+                "fault_return" if recovery_state == "fault"
+                else "returning" if recovery_state == "returning"
+                else "armed_idle"
+            )
             return True
         except BaseException as exc:
             self._last_error = f"startup_error: {exc}"

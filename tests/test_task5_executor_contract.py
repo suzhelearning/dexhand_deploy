@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import unittest
 
@@ -21,6 +22,7 @@ from pico_body_tianji.protocol.messages import (
     SafetyStopRequest,
     SessionState,
 )
+from pico_body_tianji.sources.common.real_admission import RealCapabilityInput
 
 
 class _FakeModel:
@@ -97,13 +99,17 @@ class _FakeLiveSession(_FakeSession):
         return Live()
 
 
-class _Reply:
-    def __init__(self, payload, ok=True):
-        self.payload = payload
-        self.ok = ok
+class _ReplySample:
+    def __init__(self, payload):
+        self.payload = json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
-    def get_payload(self):
-        return self.payload
+
+class _Reply:
+    """Shape of eclipse-zenoh 1.10 successful query replies."""
+
+    def __init__(self, payload, ok=True):
+        self.ok = ok
+        self.result = _ReplySample(payload) if ok else None
 
 
 class _SnapshotSession(_FakeSession):
@@ -121,6 +127,20 @@ class _SnapshotSession(_FakeSession):
                     callback(_Reply(value))
             else:
                 callback(_Reply(reply))
+
+
+class _DeferredSnapshotSession(_SnapshotSession):
+    def __init__(self, replies):
+        super().__init__(replies)
+        self.pending = {}
+
+    def get(self, key, callback, **kwargs):
+        self.queries.append(key)
+        self.pending[key] = callback
+
+    def deliver(self, key):
+        reply = self.replies[key]
+        self.pending[key](_Reply(reply))
 
 class Task5ExecutorContractTest(unittest.TestCase):
     def test_mujoco_snapshot_barrier_requires_typed_replies(self):
@@ -184,6 +204,102 @@ class Task5ExecutorContractTest(unittest.TestCase):
         )
         self.assertTrue(executor._snapshot_ready)
         self.assertTrue(executor.status.ready)
+    def test_mujoco_snapshot_does_not_overwrite_newer_subscriber_state(self):
+        clock = _Clock(time.monotonic_ns())
+        now = clock()
+        state = SessionState(
+            1, 1, now, "idle", "startup", "coordinator", None, "coord", "router"
+        ).to_dict()
+        newer = SessionState(
+            1, 2, now, "teleop", "start", "coordinator", 1, "coord", "router"
+        )
+        session = _DeferredSnapshotSession({
+            "tianji/session/state": state,
+            "tianji/coordinator/at_home": LatchedBool(
+                1, 1, now, True, "coord", "router"
+            ).to_dict(),
+            "tianji/coordinator/return_complete": LatchedBool(
+                1, 1, now, False, "coord", "router"
+            ).to_dict(),
+        })
+        executor = MujocoExecutor(
+            session=session, model=_FakeModel(), data=_FakeData(),
+            publisher_instance_id="mujoco", router_zid="router",
+            coordinator_instance_id="coord", clock=clock,
+        )
+        state_callback = next(
+            callback for topic, callback in session.subscribers
+            if topic == "tianji/session/state"
+        )
+        state_callback(newer)
+        for key in (
+            "tianji/session/state",
+            "tianji/coordinator/at_home",
+            "tianji/coordinator/return_complete",
+        ):
+            session.deliver(key)
+        self.assertTrue(executor._snapshot_ready)
+        self.assertEqual(executor._session_state.sequence, 2)
+        self.assertEqual(executor._session_state.state, "teleop")
+    def test_mujoco_retry_keeps_newer_subscriber_baseline(self):
+        clock = _Clock(time.monotonic_ns())
+        now = clock()
+        old_state = SessionState(
+            1, 1, now, "idle", "startup", "coordinator", None, "coord", "router"
+        ).to_dict()
+        session = _DeferredSnapshotSession({
+            "tianji/session/state": old_state,
+            "tianji/coordinator/at_home": LatchedBool(
+                1, 1, now, True, "coord", "router"
+            ).to_dict(),
+            "tianji/coordinator/return_complete": LatchedBool(
+                1, 1, now, False, "coord", "router"
+            ).to_dict(),
+        })
+        executor = MujocoExecutor(
+            session=session, model=_FakeModel(), data=_FakeData(),
+            publisher_instance_id="mujoco", router_zid="router",
+            coordinator_instance_id="coord", clock=clock,
+        )
+        state_callback = next(
+            callback for topic, callback in session.subscribers
+            if topic == "tianji/session/state"
+        )
+        state_callback(SessionState(
+            1, 2, now, "teleop", "start", "coordinator", 1, "coord", "router"
+        ))
+        clock.value += executor._snapshot_timeout_ns
+        executor.tick(now_ns=clock())
+        session.deliver("tianji/session/state")
+        self.assertEqual(executor._session_state.sequence, 2)
+        self.assertEqual(executor._session_state.state, "teleop")
+
+
+
+    def test_wuji_role_status_ids_match_liveliness_logical_ids(self):
+        session = _FakeLiveSession()
+        WujiHandExecutor(
+            mode="retarget", side="right", session=session,
+            router_zid="router", publisher_instance_id="wuji",
+            authorized_producer="h5-hand", authorized_publisher_instance_id="h5-instance",
+            coordinator_instance_id="coord",
+        )
+        self.assertEqual(
+            {token.key for token in session.tokens},
+            {
+                "tj/live/executor/hand/wuji_right/wuji",
+                "tj/live/producer/hand/h5-hand/wuji",
+            },
+        )
+        component_statuses = [
+            json.loads(payload)
+            for topic, payload in session.published
+            if topic == "tianji/executor/status"
+        ]
+        self.assertEqual(
+            {(value["component_role"], value["component_id"]) for value in component_statuses},
+            {("producer_hand", "h5-hand"), ("executor_hand", "wuji_right")},
+        )
 
     def test_mujoco_snapshot_barrier_rejects_duplicate_key_reply(self):
         clock = _Clock(time.monotonic_ns())
@@ -394,14 +510,79 @@ class _FakeMarvinHardware:
     def shutdown(self):
         pass
 
+class _ConnectableMarvinHardware(_FakeMarvinHardware):
+    def __init__(self) -> None:
+        super().__init__()
+        self.home_calls = 0
+
+    def connect_and_prepare(self, *args, **kwargs):
+        self.connect_calls += 1
+        return self.feedback
+
+    def move_to_home(self, *args, **kwargs):
+        self.home_calls += 1
+
+
 
 class MarvinExecutorSafetyTest(unittest.TestCase):
-    def _command(self, side, sequence=1, timestamp=100, value=0.005):
+    def _command(self, side, sequence=1, timestamp=100, value=0.005, mode="returning"):
         return ArmJointCommand(
-            1, sequence, timestamp, "coordinator", side, "returning", None, None,
+            1, sequence, timestamp, "coordinator", side, mode, None, None,
             [f"Joint{i}_{'L' if side == 'left' else 'R'}" for i in range(1, 8)],
             [value] * 7, "coord", "router",
         )
+    def test_admitted_real_capability_allows_normal_connect(self):
+        hardware = _ConnectableMarvinHardware()
+        executor = MarvinExecutor(
+            hardware_session=hardware, publisher_instance_id="marvin",
+            router_zid="router", coordinator_instance_id="coord",
+            real_capability=RealCapabilityInput(0.1, 0.0, True, True),
+            clock=lambda: 100, params={"connection_wait_s": 0.01},
+        )
+        executor._readiness.connection_ready = lambda now_ns: True
+        self.assertTrue(executor._admission_ok())
+        self.assertTrue(executor.connect())
+        self.assertEqual(executor.phase, "armed_idle")
+        self.assertEqual(hardware.connect_calls, 1)
+        self.assertEqual(hardware.home_calls, 1)
+
+    def test_returning_reconnect_can_rearm_but_fault_reconnect_stays_latched(self):
+        returning_hardware = _ConnectableMarvinHardware()
+        returning = MarvinExecutor(
+            hardware_session=returning_hardware, publisher_instance_id="marvin",
+            router_zid="router", coordinator_instance_id="coord",
+            clock=lambda: 100,
+        )
+        returning.on_session_state(SessionState(
+            1, 1, 100, "returning", "disconnect", "coordinator", None, "coord", "router"
+        ))
+        returning.on_arm_command(self._command("left"))
+        returning.on_arm_command(self._command("right"))
+        self.assertTrue(returning.connect())
+        self.assertEqual(returning.phase, "returning")
+        returning.on_session_state(SessionState(
+            1, 2, 100, "idle", "returned", "coordinator", None, "coord", "router"
+        ))
+        self.assertEqual(returning.phase, "armed_idle")
+
+        fault_hardware = _ConnectableMarvinHardware()
+        fault = MarvinExecutor(
+            hardware_session=fault_hardware, publisher_instance_id="marvin",
+            router_zid="router", coordinator_instance_id="coord",
+            clock=lambda: 100,
+        )
+        fault.on_session_state(SessionState(
+            1, 1, 100, "fault", "fault", "coordinator", None, "coord", "router"
+        ))
+        fault.on_arm_command(self._command("left"))
+        fault.on_arm_command(self._command("right"))
+        self.assertTrue(fault.connect())
+        self.assertEqual(fault.phase, "fault_return")
+        fault.on_session_state(SessionState(
+            1, 2, 100, "idle", "reboot-required", "coordinator", None, "coord", "router"
+        ))
+        self.assertEqual(fault.phase, "fault_return")
+
 
     def test_fault_return_consumes_bounded_returning_command(self):
         hardware = _FakeMarvinHardware()
