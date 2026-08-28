@@ -306,6 +306,11 @@ class PolicyProducerNode:
     def tick(self, *, now_ns: int | None = None) -> dict[str, ArmJointProposal]:
         if self._closed:
             return {}
+        if self._session_invalid:
+            if self._last_error is None:
+                self._set_error("session authority is invalid; waiting for a new snapshot")
+            self._publish_status(phase="waiting_session", ready=False, healthy=False)
+            return {}
         now = int(self.clock() if now_ns is None else now_ns)
         runner_healthy = bool(getattr(self.runner, "healthy", True))
         runner_loaded = bool(getattr(self.runner, "loaded", runner_healthy))

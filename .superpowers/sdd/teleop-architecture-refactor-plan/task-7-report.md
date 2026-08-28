@@ -103,3 +103,23 @@ PYTHONPATH=src/pico_body_tianji pixi run python -c 'from pico_body_tianji.produc
 ```
 
 另行运行 `py_compile` 与 `git diff --check` 均无输出且成功。
+
+## Round 2 修复与证据
+
+- 将 `_session_invalid` fail-closed 门禁前移至 `PolicyProducerNode.tick()` 的所有 executor/runner/observation 早退路径之前；identity mismatch、sequence rollback 或 malformed SessionState 后，即使 state 缺失、stale 或 velocity 尚未可估计，也持续 `healthy=false, ready=false` 且不发布 proposal。
+- 只有 router/coordinator identity 正确且 sequence 严格递增的可接受 SessionState 快照才清除该门禁；新增 missing/stale/velocity early-exit、identity mismatch/rollback、权威快照 recovery 行为测试。
+
+命令：
+
+```text
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_policy_producer tests.test_arm_coordinator tests.test_task5_executor_contract -q
+```
+
+实际输出：
+
+```text
+Ran 49 tests in 0.135s
+OK
+```
+
+另行运行 policy `py_compile` 与 `git diff --check` 均无输出且成功。

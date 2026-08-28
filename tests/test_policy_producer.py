@@ -34,8 +34,8 @@ def state(timestamp, positions=None, velocity=None):
     )
 
 
-def session_state(state_name="teleop", timestamp=1_000_000_000):
-    return SessionState(1, 1, timestamp, state_name, "test", "coordinator", 1, "coordinator-instance", ROUTER)
+def session_state(state_name="teleop", timestamp=1_000_000_000, sequence=1, router=ROUTER, publisher="coordinator-instance"):
+    return SessionState(1, sequence, timestamp, state_name, "test", "coordinator", 1, publisher, router)
 
 
 class ActionAdapterTest(unittest.TestCase):
@@ -196,6 +196,32 @@ class PolicyProducerNodeTest(unittest.TestCase):
         self.assertFalse(node.status.healthy)
         self.assertEqual(len(session.publishers["tianji/proposal/arm/right"].values), 0)
         self.assertEqual(len(session.publishers["tianji/proposal/arm/left"].values), 0)
+    def test_session_invalid_gate_precedes_missing_or_stale_state_early_exit(self):
+        for replacement in (
+            None,
+            state(500_000_000, [0.0] * 14, [0.0] * 14),
+            state(1_000_000_000, [0.0] * 14),
+        ):
+            node, _ = self._node()
+            node.on_session_state({"malformed": True})
+            node._state = replacement
+            self.assertEqual(node.tick(now_ns=1_000_000_000), {})
+            self.assertFalse(node.status.healthy)
+            self.assertFalse(node.status.ready)
+
+    def test_session_identity_and_rollback_recover_only_on_new_authority_snapshot(self):
+        node, session = self._node()
+        node.on_session_state(session_state(sequence=2, router="other-router"))
+        self.assertEqual(node.tick(now_ns=1_000_000_000), {})
+        self.assertFalse(node.status.healthy)
+        node.on_session_state(session_state(sequence=0))
+        self.assertEqual(node.tick(now_ns=1_000_000_000), {})
+        self.assertFalse(node.status.healthy)
+        node.on_session_state(session_state(sequence=2))
+        proposals = node.tick(now_ns=1_000_000_000)
+        self.assertTrue(node.status.healthy)
+        self.assertTrue(node.status.ready)
+        self.assertEqual(set(proposals), {"left", "right"})
 
 
 class PolicyCoordinatorPathTest(unittest.TestCase):
