@@ -60,3 +60,11 @@
 - round2 follow-up verification repeated the same focused commands after restoring the periodic authority publish path; both remained green (`10 tests OK`, `Built target arm_ik_producer`).
 
 - round2 final source correction: `e2fdc5d` initializes the independent C++ status publisher before first health publication and refreshes `return_complete=true` each tick with the current coordinator sequence/timestamp. Verification repeated: `10 tests ... OK`; `Built target arm_ik_producer`.
+
+## Fix round 3
+
+- `arm_ik_producer` 的 wire sequence 改为 `std::atomic<uint64_t>`；status、proposal、solved 并发路径均通过 allocator 取局部 sequence，proposal/solved 同一 solve 共用同值，避免 callback/control thread data race。
+- 实际命令与输出：
+  1. `pixi run -e ik-build bash -lc 'cmake --build build/ik --target arm_ik_producer --parallel 4'` → `Built target arm_ik_producer`。
+  2. `pixi run bash -lc 'source scripts/common.sh && activate_bundle_runtime && python -m py_compile src/pico_body_tianji/pico_body_tianji/coordination/arm_command_coordinator.py && python -m unittest tests.test_arm_coordinator'` → `Ran 10 tests ... OK`。
+- 当前仍未闭合的直接要求：formal strict JSON unknown/duplicate 全字段 parser、cross-language process fixture、HostReadiness Marvin canonical 接线、所有旧 launcher/runtime clean rename 与完整 profile authority/query 集成。
