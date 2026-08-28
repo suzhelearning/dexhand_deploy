@@ -236,6 +236,9 @@ public:
     options.official_library_path = env_or("TIANJI_OFFICIAL_IK_LIBRARY");
     options.official_config_path = env_or("TIANJI_OFFICIAL_IK_CONFIG");
     solver_ = create_arm_ik_solver(backend_, options, settings_);
+    status_publisher_ = session_.declare_publisher(zenoh::KeyExpr("tianji/producer/status"));
+    liveliness_token_ = session_.liveliness_declare_token(zenoh::KeyExpr("tj/live/producer/arm/arm_ik_producer/" + instance_));
+    publish_status("");
     for (const std::string side : {"left", "right"}) {
       const auto index = side == "left" ? 0U : 1U;
       proposal_publishers_[index] = session_.declare_publisher(zenoh::KeyExpr("tianji/proposal/arm/" + side));
@@ -246,9 +249,6 @@ public:
     }
     command_subscriber_ = session_.declare_subscriber(
       "tianji/command/arm/**", [this](const zenoh::Sample &sample) { on_command(sample.get_payload().as_string()); }, []() {});
-    status_publisher_ = session_.declare_publisher(zenoh::KeyExpr("tianji/producer/status"));
-    liveliness_token_ = session_.liveliness_declare_token(zenoh::KeyExpr("tj/live/producer/arm/arm_ik_producer/" + instance_));
-    publish_status("");
   }
 
   void run() {
@@ -320,14 +320,19 @@ private:
         publish_status("solver result exceeds maximum_joint_step_rad");
         continue;
       }
-      current_[index] = result.joints_rad;
-      const auto wire_sequence = sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
-      proposal_publishers_[index]->put(zenoh::Bytes(proposal_json(target, result, result.joints_rad, instance_, router_, wire_sequence)));
-      solved_publishers_[index]->put(zenoh::Bytes(solved_json(target, result.achieved_pose, instance_, router_, wire_sequence)));
+      {
+        std::lock_guard<std::mutex> publish_lock(publish_mutex_);
+        const auto wire_sequence = sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto proposal = proposal_json(target, result, result.joints_rad, instance_, router_, wire_sequence);
+        const auto solved = solved_json(target, result.achieved_pose, instance_, router_, wire_sequence);
+        proposal_publishers_[index]->put(zenoh::Bytes(proposal));
+        solved_publishers_[index]->put(zenoh::Bytes(solved));
+      }
     }
   }
 
   void publish_status(const std::string &error) {
+    std::lock_guard<std::mutex> publish_lock(publish_mutex_);
     if (!status_publisher_) return;
     const auto wire_sequence = sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
     status_publisher_->put(zenoh::Bytes("{\"schema_version\":1,\"publisher_instance_id\":" + quote(instance_) + ",\"router_zid\":" + quote(router_) +
@@ -347,6 +352,7 @@ private:
   std::optional<zenoh::Subscriber<void>> command_subscriber_;
   std::optional<zenoh::LivelinessToken> liveliness_token_;
   std::optional<zenoh::Publisher> status_publisher_;
+  std::mutex publish_mutex_;
   std::array<std::optional<Target>, 2> targets_;
   std::array<ArmJointVector, 2> current_{ArmJointVector::Zero(), ArmJointVector::Zero()};
   std::mutex mutex_;

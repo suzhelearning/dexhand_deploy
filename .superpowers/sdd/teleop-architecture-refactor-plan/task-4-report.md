@@ -68,3 +68,12 @@
   1. `pixi run -e ik-build bash -lc 'cmake --build build/ik --target arm_ik_producer --parallel 4'` → `Built target arm_ik_producer`。
   2. `pixi run bash -lc 'source scripts/common.sh && activate_bundle_runtime && python -m py_compile src/pico_body_tianji/pico_body_tianji/coordination/arm_command_coordinator.py && python -m unittest tests.test_arm_coordinator'` → `Ran 10 tests ... OK`。
 - 当前仍未闭合的直接要求：formal strict JSON unknown/duplicate 全字段 parser、cross-language process fixture、HostReadiness Marvin canonical 接线、所有旧 launcher/runtime clean rename 与完整 profile authority/query 集成。
+
+## Fix round 4
+
+- constructor 先声明 `status_publisher_` 与 liveliness，再声明 target/command subscribers，避免 subscriber 回调与 optional publisher 初始化并发。
+- 增加 `publish_mutex_`，覆盖 status/proposal/solved sequence 分配、JSON 构造和 Zenoh put；同一 solve 的 proposal/solved 复用局部序号，并保证 wire publish 顺序。
+- 实际命令与输出：
+  1. `pixi run -e ik-build bash -lc 'cmake --build build/ik --target arm_ik_producer --parallel 4'` → `Built target arm_ik_producer`。
+  2. `pixi run bash -lc 'source scripts/common.sh && activate_bundle_runtime && python -m unittest tests.test_arm_coordinator'` → `Ran 10 tests ... OK`。
+- 保留风险：formal strict JSON unknown/duplicate 全字段 parser、HostReadiness Marvin canonical 接线、clean launcher/runtime cutover、cross-language process fixtures 与完整 profile/query 集成仍未闭合。
