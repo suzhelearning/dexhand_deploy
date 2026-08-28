@@ -4,21 +4,21 @@ import unittest
 
 import numpy as np
 
-from pico_body_tianji.controller_frame import ControllerFrame
-from pico_body_tianji.controller_only.controller_only_mapper import (
-    ControllerOnlyTeleopMapper,
+from pico_body_tianji.sources.pico_controller.controller_frame import ControllerFrame
+from pico_body_tianji.sources.common.target_mapper import (
+    EndEffectorTargetMapper,
 )
-from pico_body_tianji.controller_only.controller_only_source import (
+from pico_body_tianji.sources.pico_controller.source import (
     XRoboControllerOnlySource,
 )
-from pico_body_tianji.controller_only.target_conditioner import (
-    ControllerTargetConditioner,
+from pico_body_tianji.sources.common.target_conditioner import (
+    TargetConditioner,
     TargetConditioningSettings,
 )
 from tianji_world_output.config_loader import TianjiConfig
 
 
-class _ControllerOnlySdk:
+class _ControllerSdk:
     def __init__(self):
         self.opened = False
         self.body_api_calls = 0
@@ -50,10 +50,10 @@ class _ControllerOnlySdk:
         raise AssertionError("controller-only source accessed Body API")
 
 
-class ControllerOnlyMapperTest(unittest.TestCase):
+class TargetMapperTest(unittest.TestCase):
     def setUp(self) -> None:
         self.config = TianjiConfig.load()
-        self.mapper = ControllerOnlyTeleopMapper(
+        self.mapper = EndEffectorTargetMapper(
             self.config,
             rate=90.0,
             min_cutoff=1.0,
@@ -66,7 +66,7 @@ class ControllerOnlyMapperTest(unittest.TestCase):
 
     def test_initial_frame_maps_to_robot_safe_initial_poses(self) -> None:
         initialized = self.mapper.initialize(self.initial_frame)
-        targets = self.mapper.map_frame(self.initial_frame)
+        targets = self.mapper.map_relative_controller_frame(self.initial_frame)
 
         self.assertEqual(
             initialized,
@@ -93,12 +93,12 @@ class ControllerOnlyMapperTest(unittest.TestCase):
 
     def test_hand_motion_changes_target_without_body(self) -> None:
         self.mapper.initialize(self.initial_frame)
-        initial_targets = self.mapper.map_frame(self.initial_frame)
+        initial_targets = self.mapper.map_relative_controller_frame(self.initial_frame)
         moved_frame = ControllerFrame.from_poses(
             [0.12, 0.2, 0.25, 0.0, 0.0, 0.0, 1.0],
             [-0.08, 0.22, 0.3, 0.0, 0.0, 0.0, 1.0],
         )
-        moved_targets = self.mapper.map_frame(moved_frame)
+        moved_targets = self.mapper.map_relative_controller_frame(moved_frame)
 
         self.assertFalse(
             np.array_equal(
@@ -125,7 +125,7 @@ class ControllerOnlyMapperTest(unittest.TestCase):
             maximum_linear_acceleration_m_s2=10.0,
             maximum_angular_acceleration_rad_s2=50.0,
         )
-        conditioner = ControllerTargetConditioner(
+        conditioner = TargetConditioner(
             np.zeros(3), [0.0, 0.0, 0.0, 1.0], settings
         )
         position, quaternion, diagnostics = conditioner.condition(
@@ -139,7 +139,7 @@ class ControllerOnlyMapperTest(unittest.TestCase):
         self.assertTrue(diagnostics.angular_speed_limited)
 
     def test_explicit_home_zsp_overrides_legacy_default(self) -> None:
-        mapper = ControllerOnlyTeleopMapper(
+        mapper = EndEffectorTargetMapper(
             self.config,
             default_zsp_directions={
                 "left": [1.0, 2.0, 3.0],
@@ -147,7 +147,7 @@ class ControllerOnlyMapperTest(unittest.TestCase):
             },
         )
         mapper.initialize(self.initial_frame)
-        targets = mapper.map_frame(self.initial_frame)
+        targets = mapper.map_relative_controller_frame(self.initial_frame)
 
         np.testing.assert_allclose(
             targets.left_default_elbow_direction,
@@ -159,7 +159,7 @@ class ControllerOnlyMapperTest(unittest.TestCase):
         )
 
     def test_source_can_skip_body_api_completely(self) -> None:
-        sdk = _ControllerOnlySdk()
+        sdk = _ControllerSdk()
         source = XRoboControllerOnlySource(sdk=sdk)
         source.open()
         try:

@@ -6,17 +6,17 @@ import numpy as np
 
 from pico_input.incremental_controller import IncrementalController
 
-from ..controller_frame import ControllerFrame
+from ..pico_controller.controller_frame import ControllerFrame
 from .target_conditioner import (
-    ControllerTargetConditioner,
     TargetConditioningDiagnostics,
     TargetConditioningSettings,
+    TargetConditioner,
 )
 
 
 @dataclass(frozen=True)
-class ControllerOnlyTargets:
-    """双手柄独立模式产生的左右机械臂 IK 输入。"""
+class ArmTargetBatch:
+    """双手柄独立模式产生的左右 canonical 机械臂目标。"""
 
     left_pose: np.ndarray
     right_pose: np.ndarray
@@ -26,7 +26,7 @@ class ControllerOnlyTargets:
     right_conditioning: TargetConditioningDiagnostics
 
 
-class ControllerOnlyTeleopMapper:
+class EndEffectorTargetMapper:
     """不依赖 Body/Tracker 的双手柄相对末端映射。"""
 
     def __init__(
@@ -71,7 +71,7 @@ class ControllerOnlyTeleopMapper:
                 maximum_angular_acceleration_rad_s2=10000.0,
             )
         self._conditioners = {
-            side: ControllerTargetConditioner(
+            side: TargetConditioner(
                 config.init_pos[side],
                 config.init_quat[side],
                 conditioning_settings,
@@ -85,10 +85,10 @@ class ControllerOnlyTeleopMapper:
             conditioner.reset()
         return self._controller.initialize(frame.virtual_trackers())
 
-    def map_absolute_poses(
+    def map_absolute_tcp_poses(
         self, left_pose: np.ndarray, right_pose: np.ndarray,
-    ) -> ControllerOnlyTargets:
-        """直接整形 chest 系绝对 TCP 位姿，不经过手柄 Home 相对映射。"""
+    ) -> ArmTargetBatch:
+        """直接整形 Base 系绝对 TCP 位姿，不经过手柄 Home 相对映射。"""
         poses = {}
         conditioning = {}
         for side, pose in (("left", left_pose), ("right", right_pose)):
@@ -100,7 +100,7 @@ class ControllerOnlyTeleopMapper:
             ].condition(values[:3], values[3:])
             poses[side] = np.concatenate((position, quaternion))
             conditioning[side] = diagnostics
-        return ControllerOnlyTargets(
+        return ArmTargetBatch(
             left_pose=poses["left"],
             right_pose=poses["right"],
             left_default_elbow_direction=(
@@ -113,7 +113,7 @@ class ControllerOnlyTeleopMapper:
             right_conditioning=conditioning["right"],
         )
 
-    def map_frame(self, frame: ControllerFrame) -> ControllerOnlyTargets:
+    def map_relative_controller_frame(self, frame: ControllerFrame) -> ArmTargetBatch:
         virtual_trackers = frame.virtual_trackers()
         poses = {}
         conditioning = {}
@@ -135,7 +135,7 @@ class ControllerOnlyTeleopMapper:
             poses[side] = np.concatenate((position, quaternion))
             conditioning[side] = diagnostics
 
-        return ControllerOnlyTargets(
+        return ArmTargetBatch(
             left_pose=poses["left"],
             right_pose=poses["right"],
             left_default_elbow_direction=(

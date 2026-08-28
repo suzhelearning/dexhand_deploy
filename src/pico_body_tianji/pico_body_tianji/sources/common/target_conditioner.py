@@ -107,7 +107,7 @@ class TargetConditioningDiagnostics:
         }
 
 
-class ControllerTargetConditioner:
+class TargetConditioner:
     """将相对手柄位姿变成连续、有限且渐近接近边界的 IK 目标。"""
 
     def __init__(

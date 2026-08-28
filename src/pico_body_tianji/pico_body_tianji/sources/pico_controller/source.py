@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..controller_frame import ControllerFrame
+from .controller_frame import ControllerFrame
 
 
 @dataclass(frozen=True)
-class ControllerOnlySample:
-    """一帧纯手柄 SDK 输入，不包含 Body/Motion Tracker 数据。"""
+class ControllerSample:
+    """一帧 PICO controller 输入，不包含 Body/Motion Tracker 数据。"""
 
     frame: ControllerFrame
     source_timestamp_ns: int
@@ -29,7 +29,7 @@ class XRoboControllerOnlySource:
             self._sdk.init()
             self._opened = True
 
-    def read(self) -> ControllerOnlySample | None:
+    def read(self) -> ControllerSample | None:
         if not self._opened:
             raise RuntimeError(
                 "XRoboControllerOnlySource must be opened before reading"
@@ -42,12 +42,11 @@ class XRoboControllerOnlySource:
         except ValueError:
             return None
 
-        return ControllerOnlySample(
+        return ControllerSample(
             frame=frame,
             source_timestamp_ns=int(self._sdk.get_time_stamp_ns()),
             right_a_pressed=bool(self._sdk.get_A_button()),
         )
-
     def close(self) -> None:
         if self._opened:
             self._sdk.close()

@@ -1,0 +1,336 @@
+"""Coordinator-facing session lifecycle client for canonical sources.
+
+The client is deliberately a small composition primitive: it observes the
+coordinator's state/latches and publishes intents, but never publishes
+SessionState itself.  Every message is decoded through the protocol package;
+unknown or foreign coordinator instances are ignored and cannot authorize
+motion.
+"""
+from __future__ import annotations
+
+import json
+import threading
+import time
+from typing import Any, Callable
+
+from ...protocol import topics
+from ...protocol.messages import LatchedBool, ProtocolError, SessionIntent, SessionState
+from ...zenoh_util import ZenohPub
+
+
+class SessionClient:
+    """Subscribe/query coordinator state before a source may move."""
+
+    def __init__(
+        self,
+        session: Any,
+        *,
+        source: str,
+        publisher_instance_id: str,
+        router_zid: str,
+        expected_coordinator_instance_id: str | None = None,
+        snapshot_timeout_s: float = 1.0,
+        clock: Callable[[], int] = time.monotonic_ns,
+    ) -> None:
+        if not source or not publisher_instance_id or not router_zid:
+            raise ValueError("source, publisher_instance_id and router_zid are required")
+        if snapshot_timeout_s <= 0.0:
+            raise ValueError("snapshot_timeout_s must be positive")
+        self._session = session
+        self.source = source
+        self.publisher_instance_id = publisher_instance_id
+        self.router_zid = router_zid
+        self.expected_coordinator_instance_id = expected_coordinator_instance_id
+        self._snapshot_timeout_s = float(snapshot_timeout_s)
+        self._clock = clock
+        self._intent_publisher = ZenohPub(session, topics.SESSION_INTENT)
+        self._resources: list[Any] = []
+        self._lock = threading.RLock()
+        self._state_event = threading.Event()
+        self._snapshot_event = threading.Event()
+        self._started = False
+        self._snapshot_started_at = 0.0
+        self._snapshot_timed_out = False
+        self._state: SessionState | None = None
+        self._at_home: LatchedBool | None = None
+        self._return_complete: LatchedBool | None = None
+        self._coordinator_identity: str | None = None
+        self._last_coordinator_sequence: dict[str, int] = {}
+        self._next_intent_sequence = 0
+        self._pending_action: str | None = None
+        self._pending_intent_sequence: int | None = None
+        self._pending_deadline = 0.0
+        self._invalid_coordinator = False
+
+    @property
+    def state(self) -> SessionState | None:
+        with self._lock:
+            return self._state
+
+    @property
+    def at_home(self) -> bool | None:
+        with self._lock:
+            return None if self._at_home is None else self._at_home.value
+
+    @property
+    def return_complete(self) -> bool | None:
+        with self._lock:
+            return None if self._return_complete is None else self._return_complete.value
+
+    @property
+    def pending_intent_sequence(self) -> int | None:
+        with self._lock:
+            return self._pending_intent_sequence
+
+    @property
+    def start_authorized(self) -> bool:
+        with self._lock:
+            return self._authorized_state("teleop", "start")
+
+    @property
+    def startup_ready(self) -> bool:
+        """Whether a coordinator snapshot was received without identity errors."""
+        with self._lock:
+            return self._snapshot_event.is_set() and not self._snapshot_timed_out and not self._invalid_coordinator
+
+    @property
+    def snapshot_timed_out(self) -> bool:
+        with self._lock:
+            self._poll_timeout_locked()
+            return self._snapshot_timed_out
+
+    @property
+    def coordinator_instance_id(self) -> str | None:
+        with self._lock:
+            return self._coordinator_identity
+
+    def start(self) -> None:
+        """Declare subscribers first, then request one-shot coordinator snapshots."""
+        with self._lock:
+            if self._started:
+                raise RuntimeError("SessionClient already started")
+            self._started = True
+            self._snapshot_started_at = time.monotonic()
+            self._snapshot_timed_out = False
+            self._snapshot_event.clear()
+        # Subscriber declaration intentionally precedes every query.
+        self._resources.extend(
+            [
+                self._session.declare_subscriber(topics.SESSION_STATE, self._on_state_sample),
+                self._session.declare_subscriber(topics.AT_HOME, self._on_at_home_sample),
+                self._session.declare_subscriber(topics.RETURN_COMPLETE, self._on_return_complete_sample),
+            ]
+        )
+        self._query(topics.SESSION_STATE, self._on_state_reply)
+        self._query(topics.AT_HOME, self._on_at_home_reply)
+        self._query(topics.RETURN_COMPLETE, self._on_return_complete_reply)
+
+    def _query(self, key: str, callback: Callable[[Any], None]) -> None:
+        try:
+            self._session.get(key, callback, timeout=self._snapshot_timeout_s)
+        except TypeError:
+            # Small fakes and older zenoh-python versions may not expose timeout.
+            self._session.get(key, callback)
+        except Exception:
+            # A missing snapshot is fail-closed; the timer below keeps startup blocked.
+            return
+
+    @staticmethod
+    def _payload(value: Any) -> bytes | None:
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value)
+        if isinstance(value, dict):
+            return json.dumps(value, separators=(",", ":")).encode("utf-8")
+        payload = getattr(value, "payload", None)
+        if payload is not None:
+            return bytes(payload)
+        result = getattr(value, "result", None)
+        payload = getattr(result, "payload", None)
+        return None if payload is None else bytes(payload)
+
+    def _on_state_sample(self, sample: Any) -> None:
+        payload = self._payload(sample)
+        if payload:
+            self._on_state_payload(payload)
+
+    def _on_at_home_sample(self, sample: Any) -> None:
+        payload = self._payload(sample)
+        if payload:
+            self._on_latched_payload(payload, is_home=True)
+
+    def _on_return_complete_sample(self, sample: Any) -> None:
+        payload = self._payload(sample)
+        if payload:
+            self._on_latched_payload(payload, is_home=False)
+
+    def _on_state_reply(self, reply: Any) -> None:
+        if getattr(reply, "ok", True) is False:
+            return
+        payload = self._payload(reply)
+        if payload:
+            self._on_state_payload(payload)
+
+    def _on_at_home_reply(self, reply: Any) -> None:
+        if getattr(reply, "ok", True) is False:
+            return
+        payload = self._payload(reply)
+        if payload:
+            self._on_latched_payload(payload, is_home=True)
+
+    def _on_return_complete_reply(self, reply: Any) -> None:
+        if getattr(reply, "ok", True) is False:
+            return
+        payload = self._payload(reply)
+        if payload:
+            self._on_latched_payload(payload, is_home=False)
+
+    def _accept_coordinator(
+        self, instance: str, sequence: int, router: str, channel: str
+    ) -> bool:
+        if router != self.router_zid:
+            self._invalid_coordinator = True
+            return False
+        if self.expected_coordinator_instance_id is not None and instance != self.expected_coordinator_instance_id:
+            self._invalid_coordinator = True
+            return False
+        if self._coordinator_identity is None:
+            self._coordinator_identity = instance
+        elif self._coordinator_identity != instance:
+            self._invalid_coordinator = True
+            return False
+        key = f"{channel}:{instance}"
+        previous = self._last_coordinator_sequence.get(key, -1)
+        if sequence <= previous:
+            return False
+        self._last_coordinator_sequence[key] = sequence
+        return True
+
+    def _on_state_payload(self, payload: bytes) -> None:
+        try:
+            state = SessionState.from_dict(json.loads(payload.decode("utf-8")))
+        except (UnicodeDecodeError, json.JSONDecodeError, ProtocolError, TypeError, ValueError):
+            return
+        with self._lock:
+            if not self._accept_coordinator(
+                state.publisher_instance_id,
+                state.sequence,
+                state.router_zid,
+                "state",
+            ):
+                return
+            self._state = state
+            self._state_event.set()
+            self._snapshot_event.set()
+
+    def _on_latched_payload(self, payload: bytes, *, is_home: bool) -> None:
+        try:
+            latch = LatchedBool.from_dict(json.loads(payload.decode("utf-8")))
+        except (UnicodeDecodeError, json.JSONDecodeError, ProtocolError, TypeError, ValueError):
+            return
+        with self._lock:
+            if not self._accept_coordinator(
+                latch.publisher_instance_id,
+                latch.sequence,
+                latch.router_zid,
+                "at_home" if is_home else "return_complete",
+            ):
+                return
+            if is_home:
+                self._at_home = latch
+            else:
+                self._return_complete = latch
+
+    def _authorized_state(self, state: str, action: str) -> bool:
+        current = self._state
+        pending = self._pending_intent_sequence
+        return (
+            current is not None
+            and current.state == state
+            and pending is not None
+            and current.intent_sequence == pending
+            and self._pending_action == action
+            and self._coordinator_identity is not None
+            and not self._invalid_coordinator
+        )
+
+    def _poll_timeout_locked(self) -> None:
+        if self._started and not self._snapshot_event.is_set() and time.monotonic() - self._snapshot_started_at >= self._snapshot_timeout_s:
+            self._snapshot_timed_out = True
+        if self._pending_action is not None and time.monotonic() >= self._pending_deadline:
+            self._pending_action = None
+            self._pending_intent_sequence = None
+
+    def poll(self) -> None:
+        with self._lock:
+            self._poll_timeout_locked()
+
+    def _request(self, action: str, reason: str, timeout_s: float) -> int:
+        if action not in ("start", "return", "shutdown"):
+            raise ValueError("unsupported session action")
+        if timeout_s <= 0.0:
+            raise ValueError("timeout_s must be positive")
+        with self._lock:
+            self._poll_timeout_locked()
+            if not self._started:
+                raise RuntimeError("SessionClient must be started before requesting intents")
+            self._next_intent_sequence += 1
+            sequence = self._next_intent_sequence
+            timestamp_ns = int(self._clock())
+            intent = SessionIntent(
+                schema_version=1,
+                sequence=sequence,
+                timestamp_ns=timestamp_ns,
+                source=self.source,
+                action=action,
+                reason=str(reason),
+                publisher_instance_id=self.publisher_instance_id,
+                router_zid=self.router_zid,
+            )
+            self._pending_action = action
+            self._pending_intent_sequence = sequence
+            self._pending_deadline = time.monotonic() + float(timeout_s)
+        self._intent_publisher.put_json(intent.to_dict())
+        return sequence
+
+    def request_start(self, reason: str = "operator", timeout_s: float = 1.0) -> int:
+        return self._request("start", reason, timeout_s)
+
+    def request_return(self, reason: str = "source_return", timeout_s: float = 1.0) -> int:
+        return self._request("return", reason, timeout_s)
+
+    def request_shutdown(self, reason: str = "source_shutdown", timeout_s: float = 1.0) -> int:
+        return self._request("shutdown", reason, timeout_s)
+
+    def wait_for_state(self, state: str, *, intent_sequence: int | None = None, timeout_s: float = 1.0) -> bool:
+        deadline = time.monotonic() + float(timeout_s)
+        while time.monotonic() < deadline:
+            with self._lock:
+                self._poll_timeout_locked()
+                current = self._state
+                expected_intent = self._pending_intent_sequence if intent_sequence is None else intent_sequence
+                if (
+                    current is not None
+                    and current.state == state
+                    and current.intent_sequence == expected_intent
+                    and not self._invalid_coordinator
+                ):
+                    return True
+            self._state_event.wait(min(0.01, max(0.0, deadline - time.monotonic())))
+            self._state_event.clear()
+        return False
+
+    def close(self) -> None:
+        for resource in self._resources:
+            try:
+                resource.undeclare()
+            except Exception:
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+        self._resources.clear()
+        self._intent_publisher.close()
+        with self._lock:
+            self._started = False
+            self._pending_action = None
+            self._pending_intent_sequence = None

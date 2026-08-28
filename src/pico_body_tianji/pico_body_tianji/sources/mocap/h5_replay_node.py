@@ -18,7 +18,7 @@ HDF5 路径由 CLI 位置参数选择；左臂不发布目标，保持 Home。
 """
 
 from __future__ import annotations
-
+import os
 import argparse
 import json
 import logging
@@ -30,12 +30,15 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from .controller_only_mapper import (
-    ControllerOnlyTargets,
-    ControllerOnlyTeleopMapper,
-)
-from .controller_only_trace import _assert_replay_graph_is_safe
-from .mocap_h5 import (
+from ...protocol import topics
+from ...protocol.messages import ArmSolvedPose
+from ..common.replay_clock import HoldToRunClock
+from ..common.session_client import SessionClient
+from ..common.target_conditioner import TargetConditioningSettings
+from ..common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
+from ..common.target_publisher import TargetPublisher
+from ..pico_controller.controller_frame import ControllerFrame
+from .h5 import (
     HAND_KEYPOINT_EDGES,
     HandPoseTrajectory,
     MocapRecording,
@@ -44,33 +47,20 @@ from .mocap_h5 import (
     load_mocap_h5,
     synthetic_reference_pose,
 )
-from .mocap_keyboard_step import HoldToRunClock
-from .raw_keyboard import X11KeyState, raw_keyboard
-from .target_conditioner import TargetConditioningSettings
-from ..controller_frame import ControllerFrame
-from ..zenoh_util import (
-    LiveToken,
+from ...zenoh_util import (
     ZenohJsonSub,
-    ZenohPub,
-    ZenohTextSub,
-    key,
     load_node_config,
     load_tianji_config,
     open_session,
     parse_param_override,
-    stamp_now,
 )
+from ..common.keyboard import X11KeyState, raw_keyboard
 
 _LOG = logging.getLogger("mocap_h5_replay")
 
-AT_HOME_KEY = "pico_body_sim/at_home"
-RETURN_COMPLETE_KEY = "pico_body_sim/return_complete"
-SOLVED_POSE_KEY = "pico_body_sim/right_arm/solved_pose"
-MOCAP_FRAME_KEY = "mocap/hands/frame"
-RIGID_BODY_NAMES_KEY = "mocap/rigid_body_names"
-FRAME_ZERO_SKELETON_KEY = "pico_body_sim/frame0_hand_skeleton"
-HAND_KEYPOINTS_KEY = "pico_body_sim/right_hand/keypoints"
-HAND_JOINT_COMMANDS_KEY = "pico_body_sim/right_hand/joint_commands"
+FRAME_ZERO_SKELETON_KEY = topics.FRAME0_HAND_SKELETON
+MOCAP_FRAME_KEY = topics.MOCAP_HANDS_FRAME
+RIGID_BODY_NAMES_KEY = topics.MOCAP_RIGID_BODY_NAMES
 
 _S_DEBOUNCE_S = 0.5
 _SOLVED_STALE_S = 0.5
@@ -210,6 +200,9 @@ class MocapH5ReplayNode:
         params: dict[str, Any],
         recording: MocapRecording,
         *,
+        publisher_instance_id: str,
+        router_zid: str,
+        coordinator_instance_id: str | None = None,
         right_rigid_id: int | str = "tianji_wrist",
         speed: float = 1.0,
         yaw_deg: float = 0.0,
@@ -219,6 +212,8 @@ class MocapH5ReplayNode:
     ) -> None:
         if not np.isfinite(speed) or speed <= 0.0:
             raise ValueError("speed 必须为正有限数值")
+        if not np.isfinite(yaw_deg):
+            raise ValueError("yaw_deg 必须为有限数值")
         if not np.isfinite(rate) or rate <= 0.0:
             raise ValueError("rate 必须为正有限数值")
         if isinstance(right_rigid_id, int):
@@ -332,7 +327,7 @@ class MocapH5ReplayNode:
             self._right_robot_home_tcp_pose,
             self._tcp_to_wrist_pose,
         )
-        self._mapper = ControllerOnlyTeleopMapper(
+        self._mapper = EndEffectorTargetMapper(
             tianji_config,
             rate=rate,
             min_cutoff=float(params["min_cutoff"]),
@@ -381,25 +376,22 @@ class MocapH5ReplayNode:
                 raise ValueError(f"{label} 必须为正有限数值")
         self._required_stable_ticks = max(1, round(stable_seconds * rate))
 
-        self._pose_pub = ZenohPub(
-            session, key("/pico_body/right_arm_target_pose")
+        self._publisher = TargetPublisher(
+            session,
+            source="h5_replay",
+            publisher_instance_id=publisher_instance_id,
+            router_zid=router_zid,
         )
-        self._elbow_pub = ZenohPub(
-            session, key("/pico_body/right_arm_elbow_direction")
+        self._session_client = SessionClient(
+            session,
+            source="h5_replay",
+            publisher_instance_id=publisher_instance_id,
+            router_zid=router_zid,
+            expected_coordinator_instance_id=coordinator_instance_id,
         )
-        self._state_pub = ZenohPub(session, key("/pico_body/teleop_state"))
-        self._status_pub = ZenohPub(session, key("/pico_body/status"))
-        self._frame_zero_skeleton_pub = ZenohPub(
-            session, FRAME_ZERO_SKELETON_KEY
-        )
-        self._keypoints_pub = ZenohPub(session, HAND_KEYPOINTS_KEY)
-        # 直通模式（H5 带离线 retarget 关节角）才需要发布 joint_commands。
-        self._joint_commands_pub = (
-            ZenohPub(session, HAND_JOINT_COMMANDS_KEY)
-            if self._hand_joint_commands_payload is not None
-            else None
-        )
-        self._live = LiveToken(session, "mocap_h5_replay")
+        # Coordinator state/latches are subscribed and queried before any
+        # keyboard event can enter a moving phase.
+        self._session_client.start()
 
         self._lock = threading.RLock()
         self._latest_motive_frame: dict[str, Any] | None = None
@@ -417,26 +409,11 @@ class MocapH5ReplayNode:
         self._rigid_names_sub = ZenohJsonSub(
             session, RIGID_BODY_NAMES_KEY, self._on_rigid_body_names
         )
-        self._at_home = False
-        self._return_complete = False
-        self._solved_pose: np.ndarray | None = None
-        self._solved_received_at = 0.0
-        self._at_home_sub = ZenohTextSub(
-            session, AT_HOME_KEY, self._on_at_home_text
-        )
-        self._return_complete_sub = ZenohTextSub(
-            session,
-            RETURN_COMPLETE_KEY,
-            self._on_return_complete_text,
-        )
         self._solved_sub = ZenohJsonSub(
-            session, SOLVED_POSE_KEY, self._on_solved_pose
+            session, topics.arm_solved_pose("right"), self._on_solved_pose
         )
-        self._session.get(
-            AT_HOME_KEY,
-            self._on_at_home_query,
-            timeout=1.0,
-        )
+        self._solved_target_sequence: int | None = None
+        self._current_target_sequence: int | None = None
 
         self._deadman_error: str | None = None
         if deadman is _CREATE_DEADMAN:
@@ -454,13 +431,14 @@ class MocapH5ReplayNode:
         else:
             self._deadman = deadman  # type: ignore[assignment]
 
+        self._at_home = False
+        self._return_complete = False
         self._phase = "armed"
-        self._phase_started = time.monotonic()
         self._exit_after_return = False
         self._quit = False
         self._last_error: str | None = None
         self._last_s_at = -float("inf")
-        self._cached_targets: ControllerOnlyTargets | None = None
+        self._cached_targets: ArmTargetBatch | None = None
         self._approach_stable_ticks = 0
         self._source_complete = False
         self._final_stable_ticks = 0
@@ -652,10 +630,19 @@ class MocapH5ReplayNode:
         mount_home_pose: np.ndarray,
     ) -> bool:
         try:
-            payload = self._frame_zero_skeleton_payload(
-                wrist_home_pose, mount_home_pose
+            target_wrist_motive = compose_pose(
+                self._frame_zero_pose,
+                self._h5_wrist_to_wuji2_wrist_pose,
             )
-            self._frame_zero_skeleton_pub.put_json(payload)
+            self._publisher.publish_frame0_skeleton_data(
+                side="right",
+                keypoints_world_m=self._frame_zero_keypoints,
+                manus_wrist_pose=self._frame_zero_pose,
+                robot_wrist_home_pose=self._right_robot_home_wrist_pose,
+                target_wrist_pose=target_wrist_motive,
+                tcp_to_wrist_pose=self._tcp_to_wrist_pose,
+                edges=HAND_KEYPOINT_EDGES,
+            )
         except Exception as exc:
             message = str(exc)
             if message != self._last_skeleton_error:
@@ -691,11 +678,18 @@ class MocapH5ReplayNode:
                 self._return_complete = True
 
     def _on_solved_pose(self, payload: dict[str, Any]) -> None:
-        pose = _pose_from_payload(payload)
-        if pose is None:
+        try:
+            solved = ArmSolvedPose.from_dict(payload)
+        except (TypeError, ValueError):
             return
+        if solved.side != "right" or solved.frame_id != "Base_R":
+            return
+        pose = np.concatenate(
+            (np.asarray(solved.position_m), np.asarray(solved.orientation_xyzw))
+        )
         with self._lock:
             self._solved_pose = pose
+            self._solved_target_sequence = solved.target_sequence
             self._solved_received_at = time.monotonic()
 
     def _read_deadman(self) -> bool:
@@ -799,7 +793,6 @@ class MocapH5ReplayNode:
                 wrist_home_pose,
                 self._wrist_to_tcp_pose,
             )
-            self._mapper.initialize(self._frame(virtual_tcp_home_pose))
         except ValueError as exc:
             _LOG.warning(
                 "键盘 s：r_mount/r_wrist/TCP Home 外参无效，拒绝开始：%s",
@@ -824,7 +817,15 @@ class MocapH5ReplayNode:
         self._last_mapped_elapsed_s = -1.0
         self._current_source_elapsed_s = 0.0
         self._current_source_frame = 0
-        self._phase = "approaching"
+        if not self._session_client.startup_ready:
+            _LOG.warning("键盘 s：coordinator snapshot 未就绪，拒绝开始")
+            return
+        try:
+            self._session_client.request_start("h5_s")
+        except RuntimeError as exc:
+            self._last_error = str(exc)
+            return
+        self._phase = "start_pending"
         self._phase_started = time.monotonic()
         self._publish_frame_zero_skeleton(
             wrist_home_pose, mount_home_pose
@@ -854,6 +855,10 @@ class MocapH5ReplayNode:
         self._return_complete = False
         self._exit_after_return = exit_after_return
         self._deadman_pressed = False
+        try:
+            self._session_client.request_return("h5_return")
+        except (RuntimeError, ValueError) as exc:
+            self._last_error = str(exc)
         self._phase = "returning"
         self._phase_started = time.monotonic()
 
@@ -923,7 +928,7 @@ class MocapH5ReplayNode:
                 target_wrist_pose_chest,
                 self._wrist_to_tcp_pose,
             )
-            targets = self._mapper.map_absolute_poses(
+            targets = self._mapper.map_absolute_tcp_poses(
                 self._left_robot_home_tcp_pose,
                 target_tcp_pose_chest,
             )
@@ -943,6 +948,8 @@ class MocapH5ReplayNode:
         targets = self._cached_targets
         solved = self._solved_pose
         if targets is None or solved is None:
+            return False
+        if self._current_target_sequence is None or self._solved_target_sequence != self._current_target_sequence:
             return False
         if now - self._solved_received_at > _SOLVED_STALE_S:
             return False
@@ -968,35 +975,6 @@ class MocapH5ReplayNode:
             <= self._solved_orientation_tolerance_rad
         )
 
-    @staticmethod
-    def _pose_message(pose: np.ndarray, stamp: dict[str, int]) -> dict:
-        return {
-            "stamp": stamp,
-            "frame_id": "right_chest",
-            "position": {
-                "x": float(pose[0]),
-                "y": float(pose[1]),
-                "z": float(pose[2]),
-            },
-            "orientation": {
-                "x": float(pose[3]),
-                "y": float(pose[4]),
-                "z": float(pose[5]),
-                "w": float(pose[6]),
-            },
-        }
-
-    @staticmethod
-    def _vector_message(direction: np.ndarray, stamp: dict[str, int]) -> dict:
-        return {
-            "stamp": stamp,
-            "frame_id": "right_chest",
-            "vector": {
-                "x": float(direction[0]),
-                "y": float(direction[1]),
-                "z": float(direction[2]),
-            },
-        }
 
     def _build_hand_joint_commands_payload(
         self, offline_joints: np.ndarray | None
@@ -1046,48 +1024,74 @@ class MocapH5ReplayNode:
         return relative.astype("<f4")
 
     def _publish_hand_joint_commands(self) -> None:
-        """直通模式：直接发布离线 retarget 的 20 关节角给 viewer/真机。"""
+        """Direct mode emits the typed 20-joint command, never a raw byte topic."""
         payload = getattr(self, "_hand_joint_commands_payload", None)
-        publisher = getattr(self, "_joint_commands_pub", None)
-        if payload is None or publisher is None:
+        if payload is None:
             return
         trajectory = getattr(self, "_trajectory", None)
-        start_frame = (
-            trajectory.start_frame_index if trajectory is not None else 0
-        )
+        start_frame = trajectory.start_frame_index if trajectory is not None else 0
         frame_index = max(self._current_source_frame, start_frame)
-        publisher.put_bytes(payload[frame_index].tobytes())
+        from ...protocol.messages import HAND_JOINT_NAMES
+
+        self._publisher.publish_hand_joint_command(
+            side="right",
+            names=HAND_JOINT_NAMES["right"],
+            position_rad=payload[frame_index],
+            producer="h5_direct",
+        )
 
     def _publish_hand_keypoints(self) -> None:
         payload = getattr(self, "_hand_keypoints_payload", None)
-        publisher = getattr(self, "_keypoints_pub", None)
-        if payload is None or publisher is None:
+        if payload is None:
             return
         trajectory = getattr(self, "_trajectory", None)
-        start_frame = (
-            trajectory.start_frame_index if trajectory is not None else 0
-        )
+        start_frame = trajectory.start_frame_index if trajectory is not None else 0
         frame_index = max(self._current_source_frame, start_frame)
-        publisher.put_bytes(
-            payload[frame_index].tobytes()
+        self._publisher.publish_hand_target(
+            side="right",
+            keypoints_m=payload[frame_index],
+            source_timestamp_ns=int(self._recording.time_ns[frame_index]),
         )
 
     def _publish_cached_targets(self) -> None:
         targets = self._cached_targets
         if targets is None:
             return
-        stamp = stamp_now()
-        self._pose_pub.put_json(
-            self._pose_message(targets.right_pose, stamp)
+        command = self._publisher.publish_arm_target(
+            side="right",
+            position_m=targets.right_pose[:3],
+            orientation_xyzw=targets.right_pose[3:],
+            elbow_reference_direction=targets.right_default_elbow_direction,
+            source_timestamp_ns=int(self._recording.time_ns[self._current_source_frame]),
         )
-        self._elbow_pub.put_json(
-            self._vector_message(
-                targets.right_default_elbow_direction,
-                stamp,
-            )
+        self._current_target_sequence = command.envelope.sequence
+        index = self._current_source_frame
+        right = self._recording.hands["right"]
+        right_valid = bool(right.valid[index])
+        left = self._recording.hands["left"]
+        left_valid = bool(left.valid[index])
+        self._publisher.publish_raw_h5_replay(
+            source_timestamp_ns=int(self._recording.time_ns[index]),
+            hands={
+                "left": {
+                    "valid": left_valid,
+                    "wrist_pose": left.wrist[index].tolist() if left_valid else None,
+                    "keypoints_world_m": left.keypoints_world[index].tolist() if left_valid else None,
+                    "wuji2_joints_rad": None,
+                },
+                "right": {
+                    "valid": right_valid,
+                    "wrist_pose": right.wrist[index].tolist() if right_valid else None,
+                    "keypoints_world_m": right.keypoints_world[index].tolist() if right_valid else None,
+                    "wuji2_joints_rad": (
+                        right.wuji2_joints[index].tolist()
+                        if right_valid and right.wuji2_joints is not None
+                        else None
+                    ),
+                },
+            },
         )
-        if getattr(self, "_hand_joint_commands_payload", None) is not None:
-            # v5 直通模式：H5 自带离线 retarget 关节角，直接驱动手。
+        if self._hand_joint_commands_payload is not None:
             self._publish_hand_joint_commands()
         else:
             self._publish_hand_keypoints()
@@ -1210,7 +1214,6 @@ class MocapH5ReplayNode:
             "body_tracking": "disabled",
             "motion_trackers_required": True,
             "elbow_constraint": "published_default_zsp_backend_selected",
-            "smpl_used": False,
             "at_safe_home": state == "idle" and self._at_home,
             "control_mode": "h5_right_wrist_to_wuji2_wrist_hold_to_run",
             "side": "right",
@@ -1262,11 +1265,15 @@ class MocapH5ReplayNode:
         }
 
     def _publish_state(self, state: str) -> None:
-        self._state_pub.put_text(state)
-        self._status_pub.put_json(self._base_status(state))
+        self._publish_status()
 
     def _tick(self, now: float | None = None) -> bool:
         now = time.monotonic() if now is None else float(now)
+        self._session_client.poll()
+        if self._session_client.at_home is not None:
+            self._at_home = bool(self._session_client.at_home)
+        if self._session_client.return_complete is not None:
+            self._return_complete = bool(self._session_client.return_complete)
         with self._lock:
             if self._phase == "armed":
                 self._read_deadman()
@@ -1287,12 +1294,30 @@ class MocapH5ReplayNode:
                     _LOG.info("已确认 IK 回到安全 Home，退出")
                     return False
                 self._complete_return()
-                _LOG.info("已确认 IK 回到安全 Home；按 s 可再次加载")
+                return True
+            if self._phase == "start_pending":
+                if self._session_client.start_authorized:
+                    try:
+                        self._mapper.initialize(self._frame(self._virtual_tcp_home_pose))
+                    except (TypeError, ValueError) as exc:
+                        self._last_error = str(exc)
+                        self._begin_return(exit_after_return=False)
+                    else:
+                        self._phase = "approaching"
+                        self._phase_started = now
+                elif self._session_client.pending_intent_sequence is None:
+                    # Coordinator reject/timeout is atomic: no stale reference
+                    # may survive into the next start request.
+                    self._phase = "armed"
+                    self._right_rigid_home_pose = None
+                    self._right_marker_home_pose = None
+                    self._right_mount_home_pose = None
+                    self._right_wrist_home_pose = None
+                    self._virtual_tcp_home_pose = None
+                self._publish_state("idle")
                 return True
 
             self._publish_state("teleop")
-
-
             if self._phase == "approaching":
                 pressed = self._read_deadman()
                 if pressed:
@@ -1349,16 +1374,11 @@ class MocapH5ReplayNode:
                             self._final_stable_ticks += 1
                         else:
                             self._final_stable_ticks = 0
-                        if (
-                            self._final_stable_ticks
-                            >= self._required_stable_ticks
-                        ):
+                        if self._final_stable_ticks >= self._required_stable_ticks:
                             self._phase = "completed"
                             self._replay_clock = None
                             _LOG.warning(
-                                "H5 右腕轨迹回放完成并稳定到达末帧，"
-                                "当前保持末帧；按 s 回 Home，或按 q "
-                                "回 Home 后退出。"
+                                "H5 右腕轨迹回放完成并稳定到达末帧，当前保持末帧"
                             )
                     else:
                         self._source_complete = False
@@ -1377,15 +1397,16 @@ class MocapH5ReplayNode:
     def _publish_status(self) -> None:
         with self._lock:
             state = {
-                "armed": "idle",
-                "approaching": "teleop",
-                "ready": "teleop",
-                "replaying": "teleop",
-                "completed": "teleop",
+                "armed": "armed",
+                "start_pending": "start_pending",
+                "approaching": "approaching",
+                "ready": "ready",
+                "replaying": "replaying",
+                "completed": "completed",
                 "returning": "returning",
-            }[self._phase]
-            status = self._base_status(state)
-            status.update(
+            }.get(self._phase, self._phase)
+            diagnostics = self._base_status(state)
+            diagnostics.update(
                 {
                     "frame_index": self._current_source_frame,
                     "frame_count": self._recording.frame_count,
@@ -1394,12 +1415,9 @@ class MocapH5ReplayNode:
                     "source_progress": (
                         1.0
                         if self._trajectory.duration_s <= 0.0
-                        else self._current_source_elapsed_s
-                        / self._trajectory.duration_s
+                        else self._current_source_elapsed_s / self._trajectory.duration_s
                     ),
-                    "interpolated_invalid_frames": (
-                        self._trajectory.interpolated_frame_count
-                    ),
+                    "interpolated_invalid_frames": self._trajectory.interpolated_frame_count,
                     "final_stable_ticks": self._final_stable_ticks,
                     "approach_stable_ticks": self._approach_stable_ticks,
                     "approach_required_stable_ticks": self._required_stable_ticks,
@@ -1409,9 +1427,22 @@ class MocapH5ReplayNode:
                         if self._cached_targets is None
                         else self._cached_targets.right_conditioning.as_dict()
                     ),
+                    "startup_snapshot_ready": self._session_client.startup_ready,
                 }
             )
-            self._status_pub.put_json(status)
+            self._publisher.publish_source_status(
+                component_id="h5_replay",
+                phase=self._phase,
+                ready=(
+                    self._session_client.startup_ready
+                    and self._deadman is not None
+                    and self._last_error is None
+                ),
+                healthy=self._last_error is None,
+                capabilities=["simulation"],
+                error=self._last_error,
+                diagnostics=diagnostics,
+            )
 
     def run(self) -> int:
         tick_interval = 1.0 / self._rate
@@ -1435,31 +1466,20 @@ class MocapH5ReplayNode:
 
     def close(self) -> None:
         self._stop_event.set()
-        try:
-            for resource in (
-                self._motive_frame_sub,
-                self._rigid_names_sub,
-                self._at_home_sub,
-                self._return_complete_sub,
-                self._solved_sub,
-                self._pose_pub,
-                self._elbow_pub,
-                self._state_pub,
-                self._status_pub,
-                self._keypoints_pub,
-                self._frame_zero_skeleton_pub,
-                *(p for p in (self._joint_commands_pub,) if p is not None),
-            ):
+        for resource in (self._motive_frame_sub, self._rigid_names_sub, self._solved_sub):
+            try:
                 resource.close()
+            except Exception:
+                pass
+        try:
+            self._publisher.close()
         finally:
             try:
-                self._live.close()
+                self._session_client.close()
             finally:
-                try:
-                    if self._deadman is not None:
-                        self._deadman.close()
-                finally:
-                    self._session.close()
+                if self._deadman is not None:
+                    self._deadman.close()
+                self._session.close()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1490,17 +1510,11 @@ def _parser() -> argparse.ArgumentParser:
         "--rate", type=float, default=60.0, help="目标映射与发布频率 Hz"
     )
     parser.add_argument(
-        "--connect-endpoint",
-        default="",
-        help="可选 Zenoh Router 端点；默认本机 scouting",
-    )
-    parser.add_argument(
         "--validate-only",
         action="store_true",
         help="只校验和汇总 H5，不连接 Zenoh、不运动",
     )
     return parser
-
 
 def _open_session(endpoint: str):
     if not endpoint:
@@ -1508,9 +1522,7 @@ def _open_session(endpoint: str):
     import zenoh
 
     config = zenoh.Config.from_json5(
-        json.dumps(
-            {"mode": "client", "connect": {"endpoints": [endpoint]}}
-        )
+        json.dumps({"mode": "client", "connect": {"endpoints": [endpoint]}})
     )
     return zenoh.open(config)
 
@@ -1559,14 +1571,21 @@ def main(argv=None) -> int:
         DEFAULT_PARAMETERS,
         overrides,
     )
-    session = _open_session(args.connect_endpoint)
+    session = _open_session(os.environ.get("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447"))
+    instance_id = os.environ.get("TIANJI_COMPONENT_INSTANCE_ID")
+    router_zid = os.environ.get("TIANJI_ROUTER_ZID")
+    if not instance_id or not router_zid:
+        session.close()
+        raise RuntimeError("TIANJI_COMPONENT_INSTANCE_ID and TIANJI_ROUTER_ZID are required")
     node: MocapH5ReplayNode | None = None
     try:
-        _assert_replay_graph_is_safe(session)
         node = MocapH5ReplayNode(
             session,
             params,
             recording,
+            publisher_instance_id=instance_id,
+            router_zid=router_zid,
+            coordinator_instance_id=os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID"),
             right_rigid_id=(
                 int(args.right_rigid_id)
                 if args.right_rigid_id.isdecimal()

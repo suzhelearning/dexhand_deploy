@@ -7,7 +7,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class ControllerFrame:
-    """一帧 PICO 左右手柄位姿，不包含任何 SMPL/Body 数据。"""
+    """一帧 PICO 左右手柄位姿，不包含 Body/Motion 数据。"""
 
     left_pose: np.ndarray
     right_pose: np.ndarray

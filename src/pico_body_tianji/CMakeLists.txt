@@ -215,11 +215,8 @@ install(
 install(DIRECTORY include/ DESTINATION include)
 install(
   PROGRAMS
-    scripts/pico_controller_input
-    scripts/pico_controller_only_input
-    scripts/controller_only_real_diagnostic
+    scripts/pico_controller_source
     scripts/marvin_hardware_bridge
-    scripts/mocap_keyboard_step
     scripts/mocap_live
     scripts/mocap_h5_replay
     scripts/mujoco_joint_viewer.py

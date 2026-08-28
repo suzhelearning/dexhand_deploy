@@ -13,7 +13,7 @@ import numpy as np
 import zenoh
 from scipy.spatial.transform import Rotation
 
-from pico_body_tianji.controller_only.mocap_h5 import (
+from pico_body_tianji.sources.mocap.h5 import (
     HAND_KEYPOINT_EDGES, compose_pose, invert_pose,
 )
 from pico_body_tianji.joint_state_model import urdf_joint_names

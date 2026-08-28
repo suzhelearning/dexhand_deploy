@@ -23,12 +23,12 @@ import numpy as np
 import yaml
 from scipy.spatial.transform import Rotation
 
-from pico_body_tianji.controller_only.mocap_h5 import (
+from pico_body_tianji.sources.mocap.h5 import (
     HAND_KEYPOINT_EDGES,
     compose_pose,
     load_mocap_h5,
 )
-from pico_body_tianji.controller_only.mocap_h5_replay_node import (
+from pico_body_tianji.sources.mocap.h5_replay_node import (
     DEFAULT_PARAMETERS,
     _WUJI2_MOUNT_TO_WRIST_POSE,
 )
