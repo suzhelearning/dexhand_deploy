@@ -103,6 +103,7 @@ class PolicyProducerNode:
         self._closed = False
         self._last_error: str | None = None
         self._session_invalid = False
+        self._session_error: str | None = None
         self._status: ComponentStatus | None = None
         self._last_observation: PolicyObservation | None = None
 
@@ -152,8 +153,13 @@ class PolicyProducerNode:
         healthy: bool | None = None,
         error: str | None = None,
     ) -> ComponentStatus:
+        status_error = self._session_error if self._session_invalid else error
         if healthy is None:
-            healthy = bool(getattr(self.runner, "healthy", True)) and self._last_error is None
+            healthy = (
+                bool(getattr(self.runner, "healthy", True))
+                and self._last_error is None
+                and not self._session_invalid
+            )
         status = ComponentStatus(
             schema_version=1,
             sequence=self._next_sequence(),
@@ -164,9 +170,8 @@ class PolicyProducerNode:
             ready=bool(ready),
             healthy=bool(healthy),
             capabilities=list(self.capabilities),
-            error=error,
+            error=status_error,
             diagnostics={
-                "policy": self.policy_name,
                 "observation_reason": self.observation_builder.last_reason,
                 "coordinator_instance_id": self.coordinator_instance_id,
             },
@@ -230,19 +235,21 @@ class PolicyProducerNode:
             baseline = self._session_baseline
             if baseline is not None:
                 if parsed.publisher_instance_id != baseline[0]:
-                    if self._session_state is not None and self._session_state.state == "teleop":
-                        raise ProtocolError("coordinator instance changed during teleop")
-                elif parsed.sequence < baseline[1]:
+                    raise ProtocolError("coordinator instance changed")
+                if parsed.sequence < baseline[1]:
                     raise ProtocolError("session state sequence rollback")
-                elif parsed.sequence == baseline[1]:
+                if parsed.sequence == baseline[1]:
                     return
             self._session_baseline = (parsed.publisher_instance_id, parsed.sequence)
             self._session_state = parsed
             self._session_invalid = False
+            self._session_error = None
             self._last_error = None
         except (ProtocolError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self._session_state = None
             self._session_invalid = True
+            self._session_error = f"malformed session state: {exc}"
+            self._set_error(self._session_error)
     def on_arm_target(self, side: str, value: ArmTargetCommand | Mapping[str, Any] | Any) -> None:
         try:
             if isinstance(value, ArmTargetCommand):

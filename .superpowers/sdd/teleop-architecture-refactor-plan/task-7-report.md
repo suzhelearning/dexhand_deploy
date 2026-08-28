@@ -123,3 +123,24 @@ OK
 ```
 
 另行运行 policy `py_compile` 与 `git diff --check` 均无输出且成功。
+
+## Round 3 修复与证据
+
+- 新增独立 `_session_error`，`on_session_state()` 对 router/coordinator identity mismatch、sequence rollback、malformed payload 保存具体异常。
+- `_make_status()` 在 session authority 锁存期间始终优先使用该具体错误；即便后续 arm state 触发 missing/stale/velocity-not-ready 早退，也不会被旧 state 或 observation 错误覆盖。
+- 仅同一 coordinator instance 的严格递增 SessionState 快照清除 `_session_invalid` 与 `_session_error`；重复/回退/其它 instance 不恢复。
+
+命令：
+
+```text
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_policy_producer tests.test_arm_coordinator tests.test_task5_executor_contract -q
+```
+
+实际输出：
+
+```text
+Ran 49 tests in 0.140s
+OK
+```
+
+另行运行 policy `py_compile` 与 `git diff --check` 均无输出且成功。

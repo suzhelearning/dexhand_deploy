@@ -193,6 +193,11 @@ class PolicyProducerNodeTest(unittest.TestCase):
         node, session = self._node()
         node.on_session_state({"not": "a SessionState"})
         self.assertEqual(node.tick(now_ns=1_000_000_000), {})
+        reason = node.status.error
+        self.assertIsNotNone(reason)
+        node.on_arm_state(state(1_000_000_001, [0.0] * 14, [0.0] * 14))
+        self.assertEqual(node.tick(now_ns=1_000_000_000), {})
+        self.assertEqual(node.status.error, reason)
         self.assertFalse(node.status.healthy)
         self.assertEqual(len(session.publishers["tianji/proposal/arm/right"].values), 0)
         self.assertEqual(len(session.publishers["tianji/proposal/arm/left"].values), 0)
@@ -210,13 +215,19 @@ class PolicyProducerNodeTest(unittest.TestCase):
             self.assertFalse(node.status.ready)
 
     def test_session_identity_and_rollback_recover_only_on_new_authority_snapshot(self):
-        node, session = self._node()
+        node, _ = self._node()
         node.on_session_state(session_state(sequence=2, router="other-router"))
         self.assertEqual(node.tick(now_ns=1_000_000_000), {})
+        identity_reason = node.status.error
+        self.assertIn("router_zid mismatch", identity_reason)
+        node.on_arm_state(state(1_000_000_001, [0.0] * 14, [0.0] * 14))
+        self.assertEqual(node.tick(now_ns=1_000_000_000), {})
+        self.assertEqual(node.status.error, identity_reason)
         self.assertFalse(node.status.healthy)
         node.on_session_state(session_state(sequence=0))
         self.assertEqual(node.tick(now_ns=1_000_000_000), {})
-        self.assertFalse(node.status.healthy)
+        self.assertIn("sequence rollback", node.status.error)
+        self.assertNotEqual(node.status.error, identity_reason)
         node.on_session_state(session_state(sequence=2))
         proposals = node.tick(now_ns=1_000_000_000)
         self.assertTrue(node.status.healthy)
