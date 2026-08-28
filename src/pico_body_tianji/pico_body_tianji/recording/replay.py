@@ -102,7 +102,10 @@ class _ReplayLifecycle:
         self._started = True
         if self._session_client is not None:
             self._session_client.start()
-        self.publish_status(phase="armed", ready=True, healthy=True)
+        if self._phase == "fault":
+            self.publish_status(phase="fault", ready=False, healthy=False, error="replay is fault-locked")
+        else:
+            self.publish_status(phase="armed", ready=True, healthy=True)
 
     def _send_intent(self, action: str, reason: str) -> int:
         if not self._started: self.start()

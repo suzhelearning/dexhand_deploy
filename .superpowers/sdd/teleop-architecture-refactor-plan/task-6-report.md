@@ -128,3 +128,30 @@ git diff --check
 ```
 
 仍未完成 Task 8 `run_session.sh`/CLI `--record` exit 2、managed-router 多进程接线，以及 Task 9/10 实体设备、急停、servo/feedback/hand-zero 物理验收；本轮未运行 formatter、lint、full suite 或派生子代理。
+## Round 5 修复与验证
+
+- 修复 fault authority 后的启动心跳：`request_return()`/`request_shutdown()` 在 fault-locked replay 尚未启动时仍可发送 intent，但 `_send_intent()`→`start()` 只发布 `phase="fault"`, `ready=false`, `healthy=false` 的 source/producer 状态，不再短暂暴露 `armed`/healthy 解锁状态；后续 tick 继续保持 fault/unhealthy heartbeat。
+- 强化缺失 active hand stream 的 fail-closed 测试：除 liveliness token 为空外，明确断言 source/producer status、arm proposal 与 hand command 均未声明/未产生 payload。
+- 完善 fault lifecycle 测试：return 与 shutdown 分别注入权威 idle、at_home=true、return_complete=true，并观察 `on_return_complete`；两条闭环均保持 `fault`，不触发 completion callback。
+
+验证：
+
+```text
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_session_replay.ReplayLifecycleTest.test_joint_replay_rejects_missing_active_hand_command_stream tests.test_session_replay.ReplayLifecycleTest.test_fault_stays_locked_after_return_and_shutdown_intents
+→ RED：Ran 2 tests，1 failure；fault heartbeat 实际为 `armed`，证明回归测试有效。
+
+修复后：
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_session_replay.ReplayLifecycleTest.test_joint_replay_rejects_missing_active_hand_command_stream tests.test_session_replay.ReplayLifecycleTest.test_fault_stays_locked_after_return_and_shutdown_intents
+→ Ran 2 tests in 0.055s，OK。
+
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_session_h5 tests.test_session_recorder tests.test_session_replay
+→ Ran 12 tests in 0.185s，OK。
+
+PYTHONPATH=src/pico_body_tianji pixi run python -m py_compile src/pico_body_tianji/pico_body_tianji/recording/__init__.py src/pico_body_tianji/pico_body_tianji/recording/session_h5.py src/pico_body_tianji/pico_body_tianji/recording/recorder.py src/pico_body_tianji/pico_body_tianji/recording/replay.py tests/test_session_h5.py tests/test_session_recorder.py tests/test_session_replay.py
+→ 输出为空，无语法错误。
+
+git diff --check
+→ 输出为空。
+```
+
+仍未完成 Task 8 `run_session.sh`/CLI `--record` exit 2、managed-router 多进程接线，以及 Task 9/10 实体设备、急停、servo/feedback/hand-zero 物理验收；本轮未运行 formatter、lint、full suite 或派生子代理。

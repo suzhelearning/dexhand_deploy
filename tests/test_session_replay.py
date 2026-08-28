@@ -98,6 +98,20 @@ class ReplayLifecycleTest(unittest.TestCase):
                     inactive_hand_sides=("right",),
                 )
             self.assertEqual(session.tokens, [])
+            for key in (
+                topics.SOURCE_STATUS,
+                topics.PRODUCER_STATUS,
+                topics.arm_proposal("left"),
+                topics.hand_command("left"),
+                topics.hand_command("right"),
+            ):
+                self.assertNotIn(key, session.publishers)
+                self.assertFalse(
+                    getattr(session.publishers.get(key), "payloads", [])
+                )
+            self.assertFalse(
+                any(publisher.payloads for publisher in session.publishers.values())
+            )
 
     def test_fault_stays_locked_after_return_and_shutdown_intents(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -115,6 +129,8 @@ class ReplayLifecycleTest(unittest.TestCase):
                 active_hand_sides=("right",),
                 inactive_hand_sides=("left",),
             )
+            completed = []
+            node.on_return_complete = lambda: completed.append(True)
             node.on_session_state(
                 SessionState(1, 1, 1, "fault", "unsafe", "coordinator", None, "coordinator", "router")
             )
@@ -122,6 +138,9 @@ class ReplayLifecycleTest(unittest.TestCase):
 
             return_sequence = node.request_return()
             self.assertEqual(node.phase, "fault")
+            self._assert_fault_heartbeats(session)
+            node.tick(now_ns=2)
+            self._assert_fault_heartbeats(session)
             return_intent = json.loads(
                 session.publishers[topics.SESSION_INTENT].payloads[-1]
             )
@@ -149,12 +168,26 @@ class ReplayLifecycleTest(unittest.TestCase):
                     "publisher_instance_id": "coordinator",
                     "router_zid": "router",
                 },
+                kind="at_home",
+            )
+            node.on_latched(
+                {
+                    "schema_version": 1,
+                    "sequence": 4,
+                    "timestamp_ns": 4,
+                    "value": True,
+                    "publisher_instance_id": "coordinator",
+                    "router_zid": "router",
+                },
                 kind="return_complete",
             )
             self.assertEqual(node.phase, "fault")
+            self.assertEqual(completed, [])
 
             shutdown_sequence = node.request_shutdown()
             self.assertEqual(node.phase, "fault")
+            node.tick(now_ns=5)
+            self._assert_fault_heartbeats(session)
             shutdown_intent = json.loads(
                 session.publishers[topics.SESSION_INTENT].payloads[-1]
             )
@@ -163,8 +196,8 @@ class ReplayLifecycleTest(unittest.TestCase):
             node.on_session_state(
                 SessionState(
                     1,
-                    4,
-                    4,
+                    5,
+                    5,
                     "idle",
                     "shutdown",
                     "coordinator",
@@ -173,8 +206,43 @@ class ReplayLifecycleTest(unittest.TestCase):
                     "router",
                 )
             )
+            node.on_latched(
+                {
+                    "schema_version": 1,
+                    "sequence": 6,
+                    "timestamp_ns": 6,
+                    "value": True,
+                    "publisher_instance_id": "coordinator",
+                    "router_zid": "router",
+                },
+                kind="at_home",
+            )
+            node.on_latched(
+                {
+                    "schema_version": 1,
+                    "sequence": 7,
+                    "timestamp_ns": 7,
+                    "value": True,
+                    "publisher_instance_id": "coordinator",
+                    "router_zid": "router",
+                },
+                kind="return_complete",
+            )
             self.assertEqual(node.phase, "fault")
+            self.assertEqual(completed, [])
             node.close()
+
+    def _assert_fault_heartbeats(self, session):
+        source_status = session.publishers[topics.SOURCE_STATUS].payloads
+        producer_status = session.publishers[topics.PRODUCER_STATUS].payloads
+        self.assertTrue(source_status)
+        self.assertTrue(producer_status)
+        for payload in (*source_status, *producer_status):
+            status = json.loads(payload)
+            self.assertEqual(status["phase"], "fault")
+            self.assertFalse(status["ready"])
+            self.assertFalse(status["healthy"])
+
 
 
 
