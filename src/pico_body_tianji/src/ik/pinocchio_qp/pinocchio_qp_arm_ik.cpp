@@ -704,7 +704,7 @@ IkResult PinocchioQpArmIk::solve(
   ArmSide side,
   const Eigen::Isometry3d & target_pose,
   const ArmJointVector & current_joints_rad,
-  const Eigen::Vector3d & elbow_ik_direction) const
+  const Eigen::Vector3d & elbow_reference_direction) const
 {
   if (!target_pose.matrix().allFinite()) {
     throw std::invalid_argument("QP IK 目标位姿含有非有限值");
@@ -825,9 +825,9 @@ IkResult PinocchioQpArmIk::solve(
   std::optional<double> arm_angle_error;
   const bool arm_angle_requested =
     settings.arm_angle_gain > 0.0 &&
-    elbow_ik_direction.allFinite() && elbow_ik_direction.norm() > 1.0e-8;
+    elbow_reference_direction.allFinite() && elbow_reference_direction.norm() > 1.0e-8;
   if (arm_angle_requested) {
-    const Eigen::Vector3d normalized_direction = elbow_ik_direction.normalized();
+    const Eigen::Vector3d normalized_direction = elbow_reference_direction.normalized();
     arm_angle_error = impl_->arm_angle_error(
       side, current_joints_rad, normalized_direction);
     const auto gradient = impl_->arm_angle_gradient(
@@ -900,7 +900,7 @@ IkResult PinocchioQpArmIk::solve(
   std::optional<double> achieved_arm_angle_error;
   if (arm_angle_requested) {
     achieved_arm_angle_error = impl_->arm_angle_error(
-      side, candidate, elbow_ik_direction.normalized());
+      side, candidate, elbow_reference_direction.normalized());
   }
   const Eigen::Vector3d linear_residual =
     jacobian.template topRows<3>() * qp_result.solution - desired_linear;

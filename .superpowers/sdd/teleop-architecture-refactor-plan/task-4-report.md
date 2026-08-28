@@ -77,3 +77,17 @@
   1. `pixi run -e ik-build bash -lc 'cmake --build build/ik --target arm_ik_producer --parallel 4'` → `Built target arm_ik_producer`。
   2. `pixi run bash -lc 'source scripts/common.sh && activate_bundle_runtime && python -m unittest tests.test_arm_coordinator'` → `Ran 10 tests ... OK`。
 - 保留风险：formal strict JSON unknown/duplicate 全字段 parser、HostReadiness Marvin canonical 接线、clean launcher/runtime cutover、cross-language process fixtures 与完整 profile/query 集成仍未闭合。
+
+## Fix round 5
+
+- 修复 `arm_ik_producer` 初始化 authority 竞态：只提前声明 `status_publisher_`；所有左右 proposal/solved output、target subscriber 和按 side 绑定的 final-command subscriber 成功后，才声明 liveliness 并发布首条 ready status。构造失败时不会留下 liveliness/ready authority。
+- 新增 `protocol/json_parser.hpp` 严格 C++ JSON parser：拒绝重复/未知字段、非法 JSON/nonfinite、错误类型、缺失字段、数组 shape、side/frame、identity/router、timestamp、joint names/order、mode 和 rad；producer target/command 均使用正式 parser，不再把 malformed command 默认当 left。
+- Python 新增 `strict_loads`/`parse_message`，Zenoh JSON subscriber 和 coordinator payload 统一拒绝 duplicate/nonfinite JSON；新增 `tests/cpp_protocol_fixture.cpp` 以及 focused Python→C++ target/command、C++→Python proposal/solved/status fixture。
+- coordinator 增加 arm/hand state 与 status 的 `(publisher_instance_id, sequence)` baseline、idle/returning/fault 安全 rebind、teleop 未授权实例变化 fault、hand status/state fresh/identity gate，proposal timestamp fresh 校验，并默认从唯一 `config/coordinator/arm.yaml` 加载八字段；main 通过 `require_single_router` 验证实际 SessionInfo exactly-one。
+- HostReadiness/Marvin 接入 canonical typed arm command/session/status/state、唯一 `config/robot/arm.yaml` 的 rad home/limits/names，连接门、start 门、fault-return 门分离；Marvin main 连接后验证实际 router ZID，SDK 边界继续转换 degree。
+- 三个 IK backend API 与实现统一 `elbow_reference_direction`；新增 `arm_ik_producer` 配置加载校验与 fixture CMake target。
+- 实际验证：
+  1. `pixi run bash -lc 'source scripts/common.sh && activate_bundle_runtime && python -m unittest tests.test_task4_round5 tests.test_arm_coordinator'` → `Ran 14 tests ... OK`（fixture target 构建前）。
+  2. `pixi run -e ik-build bash -lc 'cmake --build build/ik --target arm_ik_producer protocol_cpp_fixture --parallel 4'` → 两个 target 均构建成功。
+  3. fixture 构建后再次运行上述 focused tests → `Ran 7 tests ... OK`。
+- 未完成/风险：仓库仍有 Task 2/5/8 范围的旧 launcher、full-body/step 文档与 runtime 引用；本轮未实现 MuJoCo/Marvin/Wuji 实体 executor/SafetyStop 全链路、managed ACL router 和完整 E2E/物理验收。HostReadiness 旧测试/旧 bridge 配置面需随 Task 2/5 clean-cutover 一并迁移。

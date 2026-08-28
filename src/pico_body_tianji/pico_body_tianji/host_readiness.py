@@ -1,9 +1,27 @@
+"""Marvin canonical connection/start readiness gates.
+
+The bridge consumes the same typed arm command, component status, session state,
+and arm state as the coordinator.  Robot homes, limits, and joint ordering come
+from ``config/robot/arm.yaml`` through :class:`ArmRobotConfig`; this module does
+not carry a second set of robot constants.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
+import time
+from typing import Any, Mapping
 
 import numpy as np
+
+from .coordination.arm_command_coordinator import ArmRobotConfig
+from .protocol.messages import (
+    ARM_JOINT_NAMES,
+    ArmJointCommand,
+    ArmJointState,
+    ComponentStatus,
+    ProtocolError,
+    SessionState,
+)
 
 
 SIDES = ("left", "right")
@@ -18,323 +36,187 @@ class HostReadiness:
 
 
 @dataclass(frozen=True)
-class _TimedCommand:
-    joints_deg: np.ndarray
-    received_at: float
-
-
-@dataclass(frozen=True)
-class _TimedStatus:
-    payload: dict
-    received_at: float
+class _Timed:
+    value: Any
+    received_ns: int
 
 
 class HostReadinessGate:
-    """真机连接前验证同机 IK 主机链路的纯逻辑门。"""
+    """纯 canonical wire 的 Marvin connection/start/fault-return 门。"""
 
     def __init__(
         self,
         *,
-        left_home_deg,
-        right_home_deg,
+        robot_config: ArmRobotConfig | Mapping[str, Any] | str | None = None,
+        router_zid: str = "",
         freshness_timeout_s: float = 1.0,
         command_timeout_s: float = 0.2,
         maximum_pair_skew_s: float = 0.03,
-        home_tolerance_deg: float = 1.0,
-        input_mode: str = "smpl",
-    ):
-        if freshness_timeout_s <= 0.0 or command_timeout_s <= 0.0:
-            raise ValueError("readiness timeouts must be positive")
-        if maximum_pair_skew_s < 0.0 or home_tolerance_deg <= 0.0:
-            raise ValueError("readiness tolerances are invalid")
-        if input_mode not in {"smpl", "controller_only"}:
-            raise ValueError("unsupported host input mode")
-        self._home = {
-            "left": self._joints(left_home_deg, "left_home_deg"),
-            "right": self._joints(right_home_deg, "right_home_deg"),
-        }
-        self._freshness_timeout_s = float(freshness_timeout_s)
-        self._command_timeout_s = float(command_timeout_s)
-        self._maximum_pair_skew_s = float(maximum_pair_skew_s)
-        self._home_tolerance_deg = float(home_tolerance_deg)
-        self._input_mode = input_mode
-        self._commands: dict[str, _TimedCommand | None] = {
-            side: None for side in SIDES
-        }
-        self._teleop_state: tuple[str, float] | None = None
-        self._input_status: _TimedStatus | None = None
-        self._sim_status: _TimedStatus | None = None
-
-    @staticmethod
-    def _joints(values, label: str) -> np.ndarray:
-        joints = np.asarray(values, dtype=np.float64)
-        if joints.shape != (7,) or not np.isfinite(joints).all():
-            raise ValueError(f"{label} must contain seven finite values")
-        return joints.copy()
-
-    @staticmethod
-    def _status(payload, label: str) -> dict:
-        try:
-            parsed = (
-                json.loads(payload)
-                if isinstance(payload, str)
-                else payload
-            )
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{label} is not valid JSON") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError(f"{label} must be a JSON object")
-        return dict(parsed)
-
-    def observe_command(
-        self,
-        side: str,
-        joints_deg,
-        *,
-        frame_id: str,
-        received_at: float,
+        home_tolerance_rad: float | None = None,
     ) -> None:
-        if side not in SIDES:
-            raise ValueError(f"unsupported side: {side!r}")
-        expected_frame = f"{side}_base_marvin_degrees"
-        if frame_id != expected_frame:
-            raise ValueError(
-                f"{side} command frame must be {expected_frame!r}"
-            )
-        self._commands[side] = _TimedCommand(
-            self._joints(joints_deg, f"{side} command"),
-            float(received_at),
-        )
+        if isinstance(robot_config, ArmRobotConfig):
+            self._robot = robot_config
+        elif isinstance(robot_config, Mapping):
+            self._robot = ArmRobotConfig.from_mapping(robot_config)
+        else:
+            self._robot = ArmRobotConfig.load(robot_config)
+        self._router_zid = str(router_zid)
+        for name, value in (
+            ("freshness_timeout_s", freshness_timeout_s),
+            ("command_timeout_s", command_timeout_s),
+        ):
+            if float(value) <= 0.0:
+                raise ValueError(f"{name} must be positive")
+        if float(maximum_pair_skew_s) < 0.0:
+            raise ValueError("maximum_pair_skew_s must be non-negative")
+        tolerance = self._robot.home_tolerance_rad if hasattr(self._robot, "home_tolerance_rad") else home_tolerance_rad
+        self._freshness_timeout_ns = int(float(freshness_timeout_s) * 1e9)
+        self._command_timeout_ns = int(float(command_timeout_s) * 1e9)
+        self._maximum_pair_skew_ns = int(float(maximum_pair_skew_s) * 1e9)
+        self._home_tolerance_rad = float(tolerance if tolerance is not None else np.deg2rad(1.0))
+        if not np.isfinite(self._home_tolerance_rad) or self._home_tolerance_rad <= 0.0:
+            raise ValueError("home_tolerance_rad must be positive and finite")
+        self._components: dict[str, _Timed] = {}
+        self._commands: dict[str, _Timed] = {}
+        self._session_state: _Timed | None = None
+        self._arm_state: _Timed | None = None
+        self._executor_status: _Timed | None = None
+        self._last_error: str | None = None
 
-    def observe_teleop_state(self, state: str, *, received_at: float) -> None:
-        if state not in {"idle", "teleop", "returning"}:
-            raise ValueError(f"unsupported teleop state: {state!r}")
-        self._teleop_state = (state, float(received_at))
+    @staticmethod
+    def _received(received_at: float | int | None) -> int:
+        if received_at is None:
+            return time.monotonic_ns()
+        value = float(received_at)
+        # Existing bridge callbacks use monotonic seconds; canonical callers may
+        # pass an ns integer.  Normalize both without consulting wall clock.
+        return int(value if abs(value) > 1e12 else value * 1e9)
 
-    def observe_input_status(self, payload, *, received_at: float) -> None:
-        self._input_status = _TimedStatus(
-            self._status(payload, "input status"),
-            float(received_at),
-        )
+    def _fresh(self, timed: _Timed | None, now_ns: int, timeout_ns: int | None = None) -> bool:
+        timeout_ns = self._freshness_timeout_ns if timeout_ns is None else timeout_ns
+        return timed is not None and 0 <= now_ns - timed.received_ns <= timeout_ns
 
-    def observe_sim_status(self, payload, *, received_at: float) -> None:
-        self._sim_status = _TimedStatus(
-            self._status(payload, "simulation status"),
-            float(received_at),
-        )
+    @staticmethod
+    def _typed(value: Any, cls: type, field: str) -> Any:
+        try:
+            return value if isinstance(value, cls) else cls.from_dict(value)
+        except (ProtocolError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid {field}: {exc}") from exc
 
-    def evaluate(self, *, now: float) -> HostReadiness:
-        now = float(now)
-        if self._input_status is None or self._sim_status is None:
-            return HostReadiness(False, "host_status_missing")
-        if (
-            now - self._input_status.received_at
-            > self._freshness_timeout_s
-            or now - self._sim_status.received_at
-            > self._freshness_timeout_s
-        ):
-            return HostReadiness(False, "host_status_stale")
-        if self._teleop_state is None:
-            return HostReadiness(False, "teleop_state_missing")
-        if (
-            now - self._teleop_state[1] > self._freshness_timeout_s
-        ):
-            return HostReadiness(False, "teleop_state_stale")
+    def observe_component(self, status: ComponentStatus | Mapping[str, Any], *, received_at: float | int | None = None) -> None:
+        parsed = self._typed(status, ComponentStatus, "component status")
+        if parsed.component_role not in {"source", "producer_arm", "executor_arm"}:
+            raise ValueError(f"unsupported readiness component role: {parsed.component_role}")
+        self._components[parsed.component_role] = _Timed(parsed, self._received(received_at))
+        if parsed.component_role == "executor_arm":
+            self._executor_status = self._components[parsed.component_role]
 
-        sim = self._sim_status.payload
-        if not (
-            sim.get("ik_interface") == "arm_ik_solver_v1"
-            and isinstance(sim.get("ik_backend"), str)
-            and bool(sim.get("ik_backend"))
-            and sim.get("robot_connected") is False
-            and sim.get("scope") == "preview_only"
-        ):
-            return HostReadiness(
-                False, "sim_not_isolated_expected_ik"
-            )
-        if (
-            sim.get("mode") != "idle"
-            or sim.get("at_safe_home") is not True
-        ):
-            return HostReadiness(False, "sim_not_idle_at_home")
+    def observe_command(self, command: ArmJointCommand | Mapping[str, Any], *, received_at: float | int | None = None) -> None:
+        parsed = self._typed(command, ArmJointCommand, "arm command")
+        if parsed.router_zid != self._robot_router():
+            raise ValueError("arm command router_zid mismatch")
+        if tuple(parsed.names) != ARM_JOINT_NAMES[parsed.side]:
+            raise ValueError("arm command joint order mismatch")
+        received_ns = self._received(received_at)
+        if parsed.timestamp_ns > received_ns or received_ns - parsed.timestamp_ns > self._command_timeout_ns:
+            raise ValueError("arm command timestamp is stale")
+        self._commands[parsed.side] = _Timed(parsed, received_ns)
 
-        source = self._input_status.payload
-        if (
-            source.get("state") != "idle"
-            or self._teleop_state[0] != "idle"
-        ):
-            return HostReadiness(False, "host_not_idle")
-        if self._input_mode == "smpl":
-            if not (
-                source.get("source") == "live"
-                and source.get("smpl_source")
-                in {"live", "live_signature_fallback"}
-                and source.get("smpl_used") is True
-                and source.get("at_safe_home") is True
-                and source.get("error") is None
-            ):
-                return HostReadiness(False, "pico_smpl_not_live")
-        elif source.get("input") == "mocap_live":
-            # Motive 刚体仅用于按 s 定零，随后由键盘累计虚拟目标；
-            # 要求新控制模式身份及动捕跟踪器可用于初始参考。
-            if not (
-                source.get("source") == "live"
-                and source.get("mapping")
-                == "controller_relative_end_pose_conditioned_v1"
-                and source.get("control_mode")
-                == "motive_reference_keyboard_step"
-                and source.get("body_tracking") == "disabled"
-                and source.get("motion_trackers_required") is True
-                and source.get("elbow_constraint")
-                == "published_default_zsp_backend_selected"
-                and source.get("smpl_used") is False
-                and source.get("scope") == "mocap_live"
-                and source.get("at_safe_home") is True
-                and source.get("error") is None
-            ):
-                return HostReadiness(False, "mocap_live_not_ready")
-        elif source.get("input") == "mocap_keyboard_step":
-            # mocap 键盘步进主机：确定性逐点验收/标定输入，
-            # 接受离线来源（source=offline_replay），要求
-            # preview-only 身份与就绪字段。
-            if not (
-                source.get("source") == "offline_replay"
-                and source.get("mapping")
-                == "controller_relative_end_pose_conditioned_v1"
-                and source.get("body_tracking") == "disabled"
-                and source.get("motion_trackers_required") is False
-                and source.get("elbow_constraint")
-                == "published_default_zsp_backend_selected"
-                and source.get("smpl_used") is False
-                and source.get("scope") == "mocap_keyboard_step"
-                and source.get("at_safe_home") is True
-                and source.get("error") is None
-            ):
-                return HostReadiness(
-                    False, "mocap_keyboard_step_not_ready"
-                )
-        elif source.get("input") == "mocap_h5_replay":
-            # H5 真机回放仅接受尚未开始、已确认 Home 的低速 wrist
-            # frame0 对齐主机。Motive marker 在连接前必须新鲜有效；
-            # Enter 必须可用且松开，避免桥刚 armed 就开始运动。
-            motive = source.get("motive_right_arm")
-            recording = source.get("recording")
-            right_summary = (
-                recording.get("hands", {}).get("right", {})
-                if isinstance(recording, dict)
-                else {}
-            )
-            speed = source.get("speed")
-            yaw_deg = source.get("yaw_deg")
-            if not (
-                source.get("source") == "offline_replay"
-                and source.get("mapping")
-                == "motive_r_mount_h5_wrist_to_wuji2_r_wrist_beta1"
-                and source.get("control_mode")
-                == "h5_right_wrist_to_wuji2_wrist_hold_to_run"
-                and source.get("body_tracking") == "disabled"
-                and source.get("motion_trackers_required") is True
-                and source.get("elbow_constraint")
-                == "published_default_zsp_backend_selected"
-                and source.get("smpl_used") is False
-                and source.get("scope") == "mocap_replay"
-                and source.get("endpoint") == "wuji2_r_wrist"
-                and source.get("side") == "right"
-                and source.get("phase") == "armed"
-                and source.get("at_safe_home") is True
-                and source.get("deadman_available") is True
-                and source.get("deadman_pressed") is False
-                and source.get("deadman_error") is None
-                and source.get("source_complete") is False
-                and source.get("error") is None
-                and isinstance(motive, dict)
-                and motive.get("tracking_valid") is True
-                and isinstance(motive.get("resolved_id"), int)
-                and not isinstance(motive.get("resolved_id"), bool)
-                and motive.get("resolved_id") > 0
-                and isinstance(right_summary.get("valid_frames"), int)
-                and not isinstance(right_summary.get("valid_frames"), bool)
-                and right_summary.get("valid_frames") > 0
-                and isinstance(speed, (int, float))
-                and not isinstance(speed, bool)
-                and 0.0 < float(speed) <= 0.25
-                and isinstance(yaw_deg, (int, float))
-                and not isinstance(yaw_deg, bool)
-                and float(yaw_deg) == 0.0
-            ):
-                return HostReadiness(False, "mocap_h5_not_ready")
-        elif not (
-            source.get("source") == "live"
-            and source.get("input") == "pico_controllers_only"
-            and source.get("mapping")
-            == "controller_relative_end_pose_conditioned_v1"
-            and source.get("body_tracking") == "disabled"
-            and source.get("motion_trackers_required") is False
-            and source.get("elbow_constraint")
-            == "published_default_zsp_backend_selected"
-            and source.get("smpl_used") is False
-            and source.get("scope") == "controller_only_ik"
-            and source.get("at_safe_home") is True
-            and source.get("error") is None
-        ):
-            return HostReadiness(
-                False, "pico_controller_only_not_live"
-            )
+    def observe_session_state(self, state: SessionState | Mapping[str, Any], *, received_at: float | int | None = None) -> None:
+        parsed = self._typed(state, SessionState, "session state")
+        if parsed.router_zid != self._robot_router():
+            raise ValueError("session state router_zid mismatch")
+        self._session_state = _Timed(parsed, self._received(received_at))
 
-        if any(self._commands[side] is None for side in SIDES):
-            return HostReadiness(False, "command_missing")
-        timestamps = [
-            self._commands[side].received_at for side in SIDES
-        ]
-        if any(
-            now - timestamp > self._command_timeout_s
-            for timestamp in timestamps
-        ):
-            return HostReadiness(False, "command_stale")
-        if (
-            abs(timestamps[0] - timestamps[1])
-            > self._maximum_pair_skew_s
-        ):
-            return HostReadiness(False, "command_pair_unsynchronized")
-        if any(
-            np.max(
-                np.abs(
-                    self._commands[side].joints_deg - self._home[side]
-                ),
-                initial=0.0,
-            )
-            > self._home_tolerance_deg
-            for side in SIDES
-        ):
-            return HostReadiness(False, "command_not_at_home")
+    def observe_arm_state(self, state: ArmJointState | Mapping[str, Any], *, received_at: float | int | None = None) -> None:
+        parsed = self._typed(state, ArmJointState, "arm state")
+        if parsed.router_zid != self._robot_router() or tuple(parsed.names) != self._robot_names():
+            raise ValueError("arm state identity/order mismatch")
+        self._arm_state = _Timed(parsed, self._received(received_at))
+
+    def set_router(self, router_zid: str) -> None:
+        if not router_zid:
+            raise ValueError("router_zid must be non-empty")
+        self._router_zid = router_zid
+
+    def _robot_router(self) -> str:
+        # Set by the bridge/launcher before any wire sample is consumed.  An
+        # unset router is a fail-closed state, never a guessed default.
+        return getattr(self, "_router_zid", "")
+
+    def _robot_names(self) -> tuple[str, ...]:
+        return self._robot.left_joint_names + self._robot.right_joint_names
+
+    def _commands_at_home(self) -> bool:
+        for side in SIDES:
+            timed = self._commands.get(side)
+            if timed is None:
+                return False
+            command = timed.value
+            home = getattr(self._robot, f"{side}_home_rad")
+            if command.mode != "idle" or any(abs(x - y) > self._home_tolerance_rad for x, y in zip(command.position_rad, home)):
+                return False
+        return True
+
+    def _base_connection(self, now_ns: int, required_capability: str) -> HostReadiness:
+        for role in ("source", "producer_arm"):
+            timed = self._components.get(role)
+            if not self._fresh(timed, now_ns):
+                return HostReadiness(False, f"{role} status stale or missing")
+            status = timed.value
+            if not (status.ready and status.healthy and required_capability in status.capabilities):
+                return HostReadiness(False, f"{role} not {required_capability}-capable and healthy")
+        state = self._session_state
+        if not self._fresh(state, now_ns):
+            return HostReadiness(False, "coordinator state stale or missing")
+        if state.value.state != "idle":
+            return HostReadiness(False, "coordinator not idle")
+        if not all(self._fresh(self._commands.get(side), now_ns, self._command_timeout_ns) for side in SIDES):
+            return HostReadiness(False, "coordinator command stale or missing")
+        if not self._commands_at_home():
+            return HostReadiness(False, "coordinator command is not at Home")
+        return HostReadiness(True, "ready")
+
+    def evaluate_connection(self, *, now_ns: int, required_capability: str = "real") -> HostReadiness:
+        decision = self._base_connection(int(now_ns), required_capability)
+        if not decision.ready:
+            return decision
         return HostReadiness(
             True,
-            "ready",
-            left_joints_deg=self._commands["left"].joints_deg.copy(),
-            right_joints_deg=self._commands["right"].joints_deg.copy(),
+            decision.reason,
+            left_joints_deg=np.degrees(self._commands["left"].value.position_rad),
+            right_joints_deg=np.degrees(self._commands["right"].value.position_rad),
         )
 
-    def evaluate_connection(self, *, source_status, arm_producer_status, coordinator_state, arm_command, now_ns, required_capability="real"):
-        """独立连接门：不要求 policy observation 已就绪。"""
-        from .connection_readiness import evaluate_connection
-        return evaluate_connection(
-            source_status=source_status,
-            arm_producer_status=arm_producer_status,
-            coordinator_state=coordinator_state,
-            arm_command=arm_command,
-            now_ns=now_ns,
-            freshness_timeout_s=self._freshness_timeout_s,
-            required_capability=required_capability,
-        )
+    def evaluate_start(self, *, now_ns: int) -> HostReadiness:
+        decision = self._base_connection(int(now_ns), "real")
+        if not decision.ready:
+            return decision
+        if not self._fresh(self._executor_status, int(now_ns)):
+            return HostReadiness(False, "executor status stale or missing")
+        if not (self._executor_status.value.ready and self._executor_status.value.healthy):
+            return HostReadiness(False, "executor not ready and healthy")
+        if not self._fresh(self._arm_state, int(now_ns)):
+            return HostReadiness(False, "arm state stale or missing")
+        home = np.asarray(self._robot.home_all, dtype=np.float64)
+        if np.max(np.abs(np.asarray(self._arm_state.value.position_rad) - home), initial=0.0) > self._home_tolerance_rad:
+            return HostReadiness(False, "arm state is not at Home")
+        return HostReadiness(True, "ready")
 
-    @staticmethod
-    def evaluate_start(*, executor_status, arm_state, coordinator_state, now_ns, freshness_timeout_s=1.0):
-        """独立 start 门：执行器需先报告 fresh state/ready。"""
-        from .connection_readiness import evaluate_start
-        return evaluate_start(
-            executor_status=executor_status,
-            arm_state=arm_state,
-            coordinator_state=coordinator_state,
-            now_ns=now_ns,
-            freshness_timeout_s=freshness_timeout_s,
-        )
+    def evaluate_fault_return(self, *, now_ns: int) -> HostReadiness:
+        state = self._session_state
+        if not self._fresh(state, int(now_ns)) or state.value.state != "fault":
+            return HostReadiness(False, "coordinator is not in fault")
+        commands = [self._commands.get(side) for side in SIDES]
+        if any(not self._fresh(value, int(now_ns), self._command_timeout_ns) for value in commands):
+            return HostReadiness(False, "bounded Home command stale or missing")
+        if any(value.value.mode != "returning" for value in commands):
+            return HostReadiness(False, "fault command must be returning")
+        return HostReadiness(True, "fault_return")
+
+    def evaluate(self, *, now: float) -> HostReadiness:
+        """Compatibility-free canonical connection evaluation in seconds."""
+        return self.evaluate_connection(now_ns=self._received(now), required_capability="real")
+
+
+__all__ = ["HostReadiness", "HostReadinessGate"]

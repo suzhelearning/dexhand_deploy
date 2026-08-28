@@ -398,7 +398,7 @@ IkResult TianjiOfficialArmIk::solve(
   ArmSide side,
   const Eigen::Isometry3d & target_pose,
   const ArmJointVector & current_joints_rad,
-  const Eigen::Vector3d & elbow_ik_direction) const
+  const Eigen::Vector3d & elbow_reference_direction) const
 {
   official_ipc::Request request;
   request.operation = official_ipc::Operation::kSolve;
@@ -407,8 +407,8 @@ IkResult TianjiOfficialArmIk::solve(
   for (Eigen::Index index = 0; index < current_joints_rad.size(); ++index) {
     request.joints_rad[index] = current_joints_rad[index];
   }
-  for (Eigen::Index index = 0; index < elbow_ik_direction.size(); ++index) {
-    request.elbow_direction[index] = elbow_ik_direction[index];
+  for (Eigen::Index index = 0; index < elbow_reference_direction.size(); ++index) {
+    request.elbow_direction[index] = elbow_reference_direction[index];
   }
   const auto exchange = impl_->exchange(request);
   const auto & response = exchange.response;

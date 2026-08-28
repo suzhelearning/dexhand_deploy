@@ -102,6 +102,17 @@ target_link_libraries(
 add_executable(
   arm_ik_producer src/producers/arm_ik_producer_node.cpp
 )
+
+add_executable(
+  protocol_cpp_fixture
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/cpp_protocol_fixture.cpp"
+)
+target_compile_features(protocol_cpp_fixture PUBLIC cxx_std_17)
+target_compile_options(protocol_cpp_fixture PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(
+  protocol_cpp_fixture PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
 add_executable(
   tianji_official_ik_probe
   src/tianji_official/tianji_official_ik_probe.cpp

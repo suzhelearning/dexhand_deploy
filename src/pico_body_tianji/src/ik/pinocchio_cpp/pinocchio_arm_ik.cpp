@@ -305,7 +305,7 @@ struct PinocchioArmIk::Impl
       desired_ik_direction.dot(geometry.axis) * geometry.axis;
     const double desired_norm = desired.norm();
     if (desired_norm < 1.0e-8) {
-      throw std::invalid_argument("SMPL 臂角方向与肩—TCP 轴平行");
+      throw std::invalid_argument("肘部参考方向与肩—TCP 轴平行");
     }
     desired /= desired_norm;
     const double sine = geometry.axis.dot(
@@ -532,7 +532,7 @@ Eigen::Isometry3d PinocchioArmIk::forward(
     impl_->evaluate(side, joints_rad, Eigen::Isometry3d::Identity()).current);
 }
 
-Eigen::Vector3d PinocchioArmIk::elbow_ik_direction(
+Eigen::Vector3d PinocchioArmIk::elbow_reference_direction(
   ArmSide side,
   const ArmJointVector & joints_rad) const
 {
@@ -543,13 +543,13 @@ IkResult PinocchioArmIk::solve(
   ArmSide side,
   const Eigen::Isometry3d & target_pose,
   const ArmJointVector & current_joints_rad,
-  const Eigen::Vector3d & smpl_ik_direction) const
+  const Eigen::Vector3d & elbow_reference_direction) const
 {
   const IkSettings & settings = impl_->settings;
   bool arm_angle_requested =
     settings.arm_angle_gain > 0.0 &&
-    smpl_ik_direction.allFinite() &&
-    smpl_ik_direction.norm() > 1.0e-8;
+    elbow_reference_direction.allFinite() &&
+    elbow_reference_direction.norm() > 1.0e-8;
   if (arm_angle_requested) {
     const Eigen::Vector3d shoulder =
       impl_->shoulder_position(side, current_joints_rad);
@@ -560,11 +560,11 @@ IkResult PinocchioArmIk::solve(
     } else {
       const Eigen::Vector3d normalized_axis = target_axis.normalized();
       const Eigen::Vector3d projected_direction =
-        smpl_ik_direction -
-        smpl_ik_direction.dot(normalized_axis) * normalized_axis;
+        elbow_reference_direction -
+        elbow_reference_direction.dot(normalized_axis) * normalized_axis;
       arm_angle_requested =
         projected_direction.norm() >
-        1.0e-4 * smpl_ik_direction.norm();
+        1.0e-4 * elbow_reference_direction.norm();
     }
   }
   ArmJointVector working = impl_->clamp_to_limits(
@@ -580,7 +580,7 @@ IkResult PinocchioArmIk::solve(
     const std::optional<double> arm_angle_error =
       arm_angle_requested ?
       impl_->try_arm_angle_error(
-      side, working, smpl_ik_direction) :
+      side, working, elbow_reference_direction) :
       std::nullopt;
     const bool arm_angle_active = arm_angle_error.has_value();
     const ArmJacobian jacobian = impl_->jacobian(side, working);
@@ -622,7 +622,7 @@ IkResult PinocchioArmIk::solve(
     if (arm_angle_active) {
       const std::optional<ArmJointVector> arm_gradient =
         impl_->try_arm_angle_error_gradient(
-        side, working, smpl_ik_direction);
+        side, working, elbow_reference_direction);
       if (arm_gradient.has_value()) {
         const ArmJointVector nullspace_gradient =
           nullspace * *arm_gradient;
@@ -692,7 +692,7 @@ IkResult PinocchioArmIk::solve(
       const std::optional<double> candidate_arm_angle_error =
         arm_angle_requested ?
         impl_->try_arm_angle_error(
-        side, candidate, smpl_ik_direction) :
+        side, candidate, elbow_reference_direction) :
         std::nullopt;
       const double candidate_minimum_singular_value =
         impl_->minimum_singular_value(side, candidate);
@@ -748,7 +748,7 @@ IkResult PinocchioArmIk::solve(
   const std::optional<double> final_arm_angle_error =
     arm_angle_requested ?
     impl_->try_arm_angle_error(
-    side, bounded, smpl_ik_direction) :
+    side, bounded, elbow_reference_direction) :
     std::nullopt;
   const bool pose_converged =
     final_evaluation.position_error_m <= settings.position_tolerance_m &&

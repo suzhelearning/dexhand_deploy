@@ -301,7 +301,7 @@ IkResult TianjiOfficialArmIk::solve(
   ArmSide side,
   const Eigen::Isometry3d & target_pose,
   const ArmJointVector & current_joints_rad,
-  const Eigen::Vector3d & elbow_ik_direction) const
+  const Eigen::Vector3d & elbow_reference_direction) const
 {
   const auto solve_started = std::chrono::steady_clock::now();
   if (!finite_pose(target_pose)) {
@@ -348,11 +348,11 @@ IkResult TianjiOfficialArmIk::solve(
       }
       const bool use_elbow_direction =
         impl_->settings.official_use_zsp &&
-        elbow_ik_direction.allFinite() &&
-        elbow_ik_direction.norm() > 1.0e-8;
+        elbow_reference_direction.allFinite() &&
+        elbow_reference_direction.norm() > 1.0e-8;
       attempt.parameters.input_zsp_type = use_elbow_direction ? 1 : 0;
       if (use_elbow_direction) {
-        const Eigen::Vector3d normalized = elbow_ik_direction.normalized();
+        const Eigen::Vector3d normalized = elbow_reference_direction.normalized();
         for (Eigen::Index index = 0; index < normalized.size(); ++index) {
           attempt.parameters.input_zsp_parameter[index] = normalized[index];
         }

@@ -4,12 +4,10 @@ The module deliberately has no Zenoh dependency.  It is the single Python-side
 schema implementation used by publishers, subscribers, recorders, and tests.
 """
 from __future__ import annotations
-
 from dataclasses import dataclass
+import json
 import math
 from typing import Any, Mapping, Sequence
-
-
 SCHEMA_VERSION = 1
 SIDES = ("left", "right")
 ARM_FRAMES = {"left": "Base_L", "right": "Base_R"}
@@ -42,6 +40,45 @@ ALL_ARM_JOINT_NAMES = ARM_JOINT_NAMES["left"] + ARM_JOINT_NAMES["right"]
 
 class ProtocolError(ValueError):
     """Raised when a message is missing, malformed, or unsupported."""
+
+def strict_loads(payload: str | bytes | bytearray) -> dict[str, Any]:
+    """Decode a protocol JSON object without accepting ambiguous wire data.
+
+    ``json.loads`` accepts duplicate object members and non-standard constants
+    by default.  Both are unsafe for schema messages because a producer could
+    hide one value behind another or silently turn NaN into a valid-looking
+    array element.  Keep this decoder at the protocol boundary so every
+    consumer can share the same rejection behavior.
+    """
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ProtocolError(f"duplicate field: {key}")
+            value[key] = item
+        return value
+
+    def reject_constant(value: str) -> Any:
+        raise ProtocolError(f"non-finite JSON constant: {value}")
+
+    try:
+        value = json.loads(
+            payload,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
+    except ProtocolError:
+        raise
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ProtocolError(f"invalid JSON payload: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ProtocolError("protocol payload must be a JSON object")
+    return value
+
+
+def parse_message(payload: str | bytes | bytearray, message_type: Any) -> Any:
+    """Strictly decode ``payload`` and pass it through a typed parser."""
+    return message_type.from_dict(strict_loads(payload))
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -837,7 +874,7 @@ __all__ = [
     "SCHEMA_VERSION", "SIDES", "ARM_FRAMES", "ARM_MODES", "SESSION_ACTIONS",
     "SESSION_STATES", "COMPONENT_ROLES", "HAND_FRAME", "DIAGNOSTIC_FRAME",
     "ARM_JOINT_NAMES", "HAND_JOINT_NAMES", "ALL_ARM_JOINT_NAMES",
-    "ProtocolError", "ProtocolEnvelope", "ArmTargetCommand", "ArmJointProposal",
+    "ProtocolError", "strict_loads", "parse_message", "ProtocolEnvelope", "ArmTargetCommand", "ArmJointProposal",
     "ArmSolvedPose", "ArmJointCommand", "ArmJointState", "HandTargetCommand",
     "HandJointCommand", "HandJointState", "SessionIntent", "SessionState",
     "LatchedBool", "ComponentStatus", "HandExecutorStatus", "SafetyStopRequest",

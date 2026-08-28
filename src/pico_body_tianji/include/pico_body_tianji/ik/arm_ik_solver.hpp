@@ -138,7 +138,7 @@ struct IkResult
 // 坐标与单位契约：
 // - 关节顺序固定为 Joint1_{L,R} ... Joint7_{L,R}，单位为弧度；
 // - 位姿为对应 Base_{L,R} 到 TCP_Link_{L,R} 的变换，平移单位为米；
-// - elbow_ik_direction 位于同一 Base 坐标系，是 libKine zsp_para 约定的
+// - `elbow_reference_direction` 位于同一 Base 坐标系，是 libKine zsp_para 约定的
 //   参考平面方向，而不是物理肩肘偏移方向。
 //
 // solve() 必须总是返回有限的 joints_rad 和 achieved_pose。accepted=true
@@ -157,7 +157,7 @@ public:
     ArmSide side,
     const Eigen::Isometry3d & target_pose,
     const ArmJointVector & current_joints_rad,
-    const Eigen::Vector3d & elbow_ik_direction) const = 0;
+    const Eigen::Vector3d & elbow_reference_direction) const = 0;
 };
 
 }  // namespace pico_body_tianji

@@ -28,6 +28,7 @@ from ..protocol.messages import (
     SessionState,
     HandExecutorStatus,
     HandJointState,
+    strict_loads,
 )
 
 
@@ -132,9 +133,12 @@ class ArmCommandCoordinator:
         self._statuses: dict[tuple[str, str], _Timed] = {}
         self._role_instances: dict[tuple[str, str], str] = {}
         self._arm_state: _Timed | None = None
+        self._arm_state_baseline: tuple[str, int] | None = None
         self._proposals: dict[str, _Timed] = {}
         self._hand_status: dict[str, _Timed] = {}
+        self._hand_status_baseline: dict[str, tuple[str, int]] = {}
         self._hand_state: dict[str, _Timed] = {}
+        self._hand_state_baseline: dict[str, tuple[str, int]] = {}
         self._return_started_ns: int | None = None
         self._return_start_command: dict[str, list[float]] | None = None
         self._safe_command = {"left": list(self.robot.left_home_rad), "right": list(self.robot.right_home_rad)}
@@ -148,12 +152,15 @@ class ArmCommandCoordinator:
     def _coordinator_config(raw: Mapping[str, Any] | str | os.PathLike[str] | None) -> dict[str, float]:
         required = ("rate_hz", "proposal_timeout_s", "maximum_command_step_rad", "home_minimum_duration_s", "home_max_speed_rad_s", "home_tolerance_rad", "state_timeout_s", "hand_return_timeout_s")
         if raw is None:
-            value = {"rate_hz": 90.0, "proposal_timeout_s": 0.2, "maximum_command_step_rad": math.radians(0.76), "home_minimum_duration_s": 2.0, "home_max_speed_rad_s": math.radians(25.0), "home_tolerance_rad": math.radians(1.0), "state_timeout_s": 1.0, "hand_return_timeout_s": 2.0}
-        elif isinstance(raw, Mapping):
+            raw = Path(__file__).resolve().parents[4] / "src" / "pico_body_tianji" / "config" / "coordinator" / "arm.yaml"
+        if isinstance(raw, Mapping):
             value = dict(raw)
         else:
-            import yaml
-            value = yaml.safe_load(Path(raw).read_text(encoding="utf-8"))
+            try:
+                import yaml
+                value = yaml.safe_load(Path(raw).read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise ValueError(f"unable to load coordinator config {raw}: {exc}") from exc
         if not isinstance(value, Mapping) or set(value) != set(required):
             raise ValueError("coordinator config must contain only the eight canonical fields")
         result = {key: float(value[key]) for key in required}
@@ -207,7 +214,6 @@ class ArmCommandCoordinator:
         if expected and (status.component_id != expected.get("logical_id") or status.publisher_instance_id != expected.get("publisher_instance_id") or status.router_zid != expected.get("router_zid", self.router_zid)):
             return False
         return status.ready and status.healthy and self.profile.get("required_capability", "simulation") in status.capabilities
-
     def update_component(self, status: ComponentStatus | Mapping[str, Any], *, received_ns: int | None = None) -> None:
         try:
             parsed = status if isinstance(status, ComponentStatus) else ComponentStatus.from_dict(status)
@@ -219,12 +225,16 @@ class ArmCommandCoordinator:
             return
         key = (parsed.component_role, parsed.component_id)
         previous = self._statuses.get(key)
-        if previous is not None and parsed.sequence <= previous.value.sequence:
-            self._enter_fault(f"component sequence rollback for {parsed.component_role}/{parsed.component_id}")
-            return
         previous_instance = self._role_instances.get(key)
         if previous_instance is not None and previous_instance != parsed.publisher_instance_id:
-            self._enter_fault(f"duplicate authority for {parsed.component_role}/{parsed.component_id}")
+            if self._state.state == "teleop":
+                self._enter_fault(f"duplicate authority for {parsed.component_role}/{parsed.component_id}")
+                return
+            # Launcher-authorized replacement is only safe outside teleop.  A
+            # new instance starts its own (instance, sequence) baseline.
+            previous = None
+        if previous is not None and parsed.sequence <= previous.value.sequence:
+            self._enter_fault(f"component sequence rollback for {parsed.component_role}/{parsed.component_id}")
             return
         self._role_instances[key] = parsed.publisher_instance_id
         self._statuses[key] = _Timed(parsed, self.clock() if received_ns is None else received_ns)
@@ -238,6 +248,19 @@ class ArmCommandCoordinator:
         if parsed.router_zid != self.router_zid or tuple(parsed.names) != ALL_ARM_JOINT_NAMES:
             self._enter_fault("arm state identity/order mismatch")
             return
+        previous = self._arm_state
+        if previous is not None:
+            previous_instance, previous_sequence = self._arm_state_baseline or (
+                previous.value.publisher_instance_id, previous.value.sequence
+            )
+            if parsed.publisher_instance_id != previous_instance:
+                if self._state.state == "teleop":
+                    self._enter_fault("arm executor instance changed during teleop")
+                    return
+            elif parsed.sequence <= previous_sequence:
+                self._enter_fault("arm state sequence rollback")
+                return
+        self._arm_state_baseline = (parsed.publisher_instance_id, parsed.sequence)
         self._arm_state = _Timed(parsed, self.clock() if received_ns is None else received_ns)
 
     def update_hand_executor_status(self, status: HandExecutorStatus | Mapping[str, Any], *, received_ns: int | None = None) -> None:
@@ -250,10 +273,17 @@ class ArmCommandCoordinator:
             self._enter_fault("hand executor router_zid mismatch")
             return
         previous = self._hand_status.get(parsed.side)
-        if previous is not None and previous.value.publisher_instance_id != parsed.publisher_instance_id:
-            if self._state.state not in {"idle", "returning", "fault"}:
-                self._enter_fault("hand executor instance changed during teleop")
+        baseline = self._hand_status_baseline.get(parsed.side)
+        if previous is not None and baseline is not None:
+            previous_instance, previous_sequence = baseline
+            if parsed.publisher_instance_id != previous_instance:
+                if self._state.state == "teleop":
+                    self._enter_fault("hand executor instance changed during teleop")
+                    return
+            elif parsed.sequence <= previous_sequence:
+                self._enter_fault("hand executor status sequence rollback")
                 return
+        self._hand_status_baseline[parsed.side] = (parsed.publisher_instance_id, parsed.sequence)
         self._hand_status[parsed.side] = _Timed(parsed, self.clock() if received_ns is None else received_ns)
 
     def update_hand_state(self, state: HandJointState | Mapping[str, Any], *, received_ns: int | None = None) -> None:
@@ -265,6 +295,22 @@ class ArmCommandCoordinator:
         if parsed.router_zid != self.router_zid:
             self._enter_fault("hand state router_zid mismatch")
             return
+        status = self._hand_status.get(parsed.side)
+        if status is not None and status.value.publisher_instance_id != parsed.publisher_instance_id:
+            self._enter_fault("hand state executor identity mismatch")
+            return
+        previous = self._hand_state.get(parsed.side)
+        baseline = self._hand_state_baseline.get(parsed.side)
+        if previous is not None and baseline is not None:
+            previous_instance, previous_sequence = baseline
+            if parsed.publisher_instance_id != previous_instance:
+                if self._state.state == "teleop":
+                    self._enter_fault("hand state instance changed during teleop")
+                    return
+            elif parsed.sequence <= previous_sequence:
+                self._enter_fault("hand state sequence rollback")
+                return
+        self._hand_state_baseline[parsed.side] = (parsed.publisher_instance_id, parsed.sequence)
         self._hand_state[parsed.side] = _Timed(parsed, self.clock() if received_ns is None else received_ns)
 
     def update_proposal(self, proposal: ArmJointProposal | Mapping[str, Any], *, received_ns: int | None = None) -> bool:
@@ -281,11 +327,22 @@ class ArmCommandCoordinator:
         if status_timed is None or status_timed.value.publisher_instance_id != parsed.publisher_instance_id or status_timed.value.router_zid != parsed.router_zid:
             self._enter_fault("proposal producer authority mismatch")
             return False
-        old = self._proposals.get(parsed.side)
-        if old is not None and parsed.sequence <= old.value.sequence:
-            self._enter_fault("arm proposal sequence rollback")
+        observed_ns = self.clock() if received_ns is None else int(received_ns)
+        if parsed.timestamp_ns > observed_ns or observed_ns - parsed.timestamp_ns > int(self.config["state_timeout_s"] * 1e9):
+            self._enter_fault("arm proposal timestamp stale")
             return False
-        self._proposals[parsed.side] = _Timed(parsed, self.clock() if received_ns is None else received_ns)
+        old = self._proposals.get(parsed.side)
+        if old is not None:
+            old_instance = old.value.publisher_instance_id
+            if parsed.publisher_instance_id != old_instance:
+                if self._state.state == "teleop":
+                    self._enter_fault("arm producer instance changed during teleop")
+                    return False
+                old = None
+            elif parsed.sequence <= old.value.sequence:
+                self._enter_fault("arm proposal sequence rollback")
+                return False
+        self._proposals[parsed.side] = _Timed(parsed, observed_ns)
         return True
 
     def handle_proposal_dict(self, value: Mapping[str, Any]) -> bool:
@@ -310,6 +367,19 @@ class ArmCommandCoordinator:
             if not (status.value.ready and status.value.healthy and status.value.at_zero and not status.value.tracking_allowed):
                 return False
             if any(abs(x) > tolerance for x in state.value.position_rad):
+                return False
+        return True
+
+    def _hand_tracking_fresh(self, now_ns: int) -> bool:
+        """Require matching, fresh hand status and state while teleoperating."""
+        for side in tuple(self.profile.get("hand_sides", ("left", "right"))):
+            status = self._hand_status.get(side)
+            state = self._hand_state.get(side)
+            if not self._fresh(status, now_ns) or not self._fresh(state, now_ns):
+                return False
+            if status.value.publisher_instance_id != state.value.publisher_instance_id:
+                return False
+            if not (status.value.ready and status.value.healthy and status.value.tracking_allowed):
                 return False
         return True
 
@@ -395,8 +465,8 @@ class ArmCommandCoordinator:
             if not self._domain_ready("producer_hand", now_ns):
                 self._enter_returning("producer_hand stale or unhealthy", now_ns)
                 return
-            if not all(self._fresh(self._hand_status.get(side), now_ns) and self._hand_status[side].value.healthy for side in self.profile.get("hand_sides", ("left", "right"))):
-                self._enter_fault("hand executor status stale or unhealthy")
+            if not self._hand_tracking_fresh(now_ns):
+                self._enter_fault("hand executor/status state stale, unhealthy, or identity mismatch")
                 return
         for side in self.profile.get("active_sides", ("left", "right")):
             if not self._fresh(self._proposals.get(side), now_ns):
@@ -540,11 +610,7 @@ class ArmCommandCoordinator:
             raise ProtocolError("Zenoh sample payload is not bytes-like") from exc
         if not raw:
             raise ProtocolError("empty Zenoh sample payload")
-        value = json.loads(raw.decode("utf-8"))
-        if not isinstance(value, Mapping):
-            raise ProtocolError("wire payload must be a JSON object")
-        return value
-
+        return strict_loads(raw)
     def _on_intent_payload(self, sample: Any) -> None:
         try:
             payload = self._payload(sample)
@@ -600,8 +666,9 @@ def main() -> int:
     router = os.environ.get("TIANJI_ROUTER_ZID")
     if not instance or not router:
         raise RuntimeError("TIANJI_COORDINATOR_INSTANCE_ID and TIANJI_ROUTER_ZID are required")
-    from ..zenoh_util import open_session
+    from ..zenoh_util import open_session, require_single_router
     session = open_session(endpoint)
+    router = require_single_router(session, router)
     node = ArmCommandCoordinator(
         session,
         publisher_instance_id=instance,

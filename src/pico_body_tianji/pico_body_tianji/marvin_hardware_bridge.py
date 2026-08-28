@@ -8,6 +8,7 @@ import time
 
 import numpy as np
 
+from .coordination.arm_command_coordinator import ArmRobotConfig
 from .hardware_safety import (
     HardwareSafetyController,
     HardwareSafetySettings,
@@ -19,6 +20,15 @@ from .marvin_hardware import (
     MarvinHardwareSession,
 )
 from .marvin_state import command_states_compatible
+from .protocol import topics
+from .protocol.messages import (
+    ArmJointCommand,
+    ArmJointState,
+    ComponentStatus,
+    ProtocolError,
+    SessionState,
+    strict_loads,
+)
 from .zenoh_util import (
     ZenohJsonSub,
     ZenohPub,
@@ -28,20 +38,13 @@ from .zenoh_util import (
     open_session,
     parse_cli_args,
     parse_param_override,
+    require_single_router,
     stamp_now,
 )
 
-_LOG = logging.getLogger("marvin_hardware_bridge")
-
-SIDES = ("left", "right")
-CONFLICTING_CONTROLLER_NAMES = {
-    "tianji_world_output_node",
-    "tianji_arm_node",
-}
-OUTPUT_STEP_REFERENCE_VELOCITY_RATIO = 10
-
 DEFAULT_PARAMETERS = {
     "robot_ip": "",
+    "arm_config_path": "",
     "rate": 30.0,
     "velocity_ratio": 10,
     "acceleration_ratio": 10,
@@ -56,14 +59,9 @@ DEFAULT_PARAMETERS = {
     "return_minimum_duration_s": 2.0,
     "return_max_speed_deg_s": 10.0,
     "home_tolerance_deg": 1.0,
-    "host_input_mode": "smpl",
     "feedback_hard_limit_padding_deg": 5.0,
-    "left_home_deg": [55.0, -65.0, -70.0, -60.0, 60.0, 0.0, 0.0],
-    "right_home_deg": [-55.0, -65.0, 70.0, -60.0, -60.0, 0.0, 0.0],
-    "lower_limits_deg": [
-        -165.0, -115.0, -165.0, -140.0, -165.0, -55.0, -85.0,
-    ],
-    "upper_limits_deg": [165.0, 115.0, 165.0, 55.0, 165.0, 55.0, 85.0],
+    # Deprecated degree fields may still be present in an old YAML, but are
+    # never read; arm.yaml remains the sole source of robot geometry.
 }
 
 
@@ -153,10 +151,22 @@ class MarvinHardwareBridge:
         if self._rate_hz <= 0.0:
             raise ValueError("rate 必须为正数")
         self._command_timeout_s = float(params["command_timeout_s"])
-        self._left_home = self._parameter_vector("left_home_deg")
-        self._right_home = self._parameter_vector("right_home_deg")
-        self._lower_limits = self._parameter_vector("lower_limits_deg")
-        self._upper_limits = self._parameter_vector("upper_limits_deg")
+        self._robot = ArmRobotConfig.load(params.get("arm_config_path") or None)
+        self._router_zid = str(params.get("router_zid") or "")
+        if not self._router_zid:
+            raise ValueError("router_zid must be supplied by SessionInfo")
+        self._readiness = HostReadinessGate(
+            robot_config=self._robot,
+            freshness_timeout_s=float(params["host_status_timeout_s"]),
+            command_timeout_s=float(params["command_timeout_s"]),
+            maximum_pair_skew_s=float(params["maximum_pair_skew_s"]),
+            home_tolerance_rad=float(params.get("home_tolerance_rad", np.deg2rad(float(params["home_tolerance_deg"])))),
+        )
+        self._readiness.set_router(self._router_zid)
+        self._left_home = np.degrees(np.asarray(self._robot.left_home_rad, dtype=np.float64))
+        self._right_home = np.degrees(np.asarray(self._robot.right_home_rad, dtype=np.float64))
+        self._lower_limits = np.degrees(np.asarray(self._robot.lower_limits_rad, dtype=np.float64))
+        self._upper_limits = np.degrees(np.asarray(self._robot.upper_limits_rad, dtype=np.float64))
         self._robot_ip = str(params["robot_ip"])
         if not self._robot_ip:
             raise ValueError("robot_ip 必须配置为 Marvin 控制器地址")
@@ -166,19 +176,7 @@ class MarvinHardwareBridge:
             velocity_ratio=velocity_ratio,
             reference_velocity_ratio=OUTPUT_STEP_REFERENCE_VELOCITY_RATIO,
             rate_hz=self._rate_hz,
-            maximum_teleop_speed_deg_s=float(
-                params["maximum_teleop_speed_deg_s"]
-            ),
-        )
-
-        self._readiness = HostReadinessGate(
-            left_home_deg=self._left_home,
-            right_home_deg=self._right_home,
-            freshness_timeout_s=float(params["host_status_timeout_s"]),
-            command_timeout_s=float(params["command_timeout_s"]),
-            maximum_pair_skew_s=float(params["maximum_pair_skew_s"]),
-            home_tolerance_deg=float(params["home_tolerance_deg"]),
-            input_mode=str(params["host_input_mode"]),
+            maximum_teleop_speed_deg_s=float(params["maximum_teleop_speed_deg_s"]),
         )
         settings = HardwareSafetySettings(
             command_timeout_s=float(params["command_timeout_s"]),
@@ -296,24 +294,14 @@ class MarvinHardwareBridge:
         for side in SIDES:
             ZenohJsonSub(
                 self._session,
-                key(f"/pico_body_sim/{side}_arm/joint_commands"),
+                topics.arm_command(side),
                 lambda data, side=side: self._on_command(side, data),
             )
-        ZenohTextSub(
-            self._session,
-            key("/pico_body/teleop_state"),
-            self._on_teleop_state,
-        )
-        ZenohTextSub(
-            self._session,
-            key("/pico_body/status"),
-            self._on_input_status,
-        )
-        ZenohTextSub(
-            self._session,
-            key("/pico_body_sim/status"),
-            self._on_sim_status,
-        )
+        ZenohJsonSub(self._session, topics.SESSION_STATE, self._on_session_state)
+        ZenohJsonSub(self._session, topics.SOURCE_STATUS, lambda data: self._on_component_status("source", data))
+        ZenohJsonSub(self._session, topics.PRODUCER_STATUS, lambda data: self._on_component_status("producer_arm", data))
+        ZenohJsonSub(self._session, topics.EXECUTOR_STATUS, lambda data: self._on_component_status("executor_arm", data))
+        ZenohJsonSub(self._session, topics.ARM_STATE, self._on_arm_state)
         self._feedback_publishers = {
             side: ZenohPub(self._session, key(f"/{side}_arm/joint_states"))
             for side in SIDES
@@ -323,70 +311,50 @@ class MarvinHardwareBridge:
         )
 
     def _on_command(self, side: str, data: dict) -> None:
-        now = time.monotonic()
-        stamp = data.get("stamp") or {}
-        stamp_ns = (
-            int(stamp.get("sec", 0)) * 1_000_000_000
-            + int(stamp.get("nanosec", 0))
-        )
-        if not _source_stamp_is_fresh(
-            stamp_ns,
-            time.time_ns(),
-            self._command_timeout_s,
-        ):
-            self._last_error = f"stale_{side}_command_stamp"
-            return
         try:
-            self._readiness.observe_command(
-                side,
-                data["position"],
-                frame_id=data.get("frame_id"),
-                received_at=now,
-            )
+            command = data if isinstance(data, ArmJointCommand) else ArmJointCommand.from_dict(data)
+            if command.side != side:
+                raise ValueError("arm command side does not match topic")
+            received_at = time.monotonic()
+            self._readiness.observe_command(command, received_at=received_at)
             self._safety.observe_command(
                 side,
-                data["position"],
-                frame_id=data.get("frame_id"),
-                received_at=now,
+                np.degrees(np.asarray(command.position_rad, dtype=np.float64)),
+                frame_id=f"{side}_base_marvin_degrees",
+                received_at=received_at,
             )
-        except ValueError as exc:
+        except (ProtocolError, TypeError, ValueError) as exc:
             self._last_error = f"invalid_{side}_command: {exc}"
 
-    def _on_teleop_state(self, state: str) -> None:
-        self._observe_state(state, time.monotonic())
-
-    def _observe_state(self, state: str, received_at: float) -> None:
+    def _on_session_state(self, data: dict) -> None:
         try:
-            self._readiness.observe_teleop_state(
-                state, received_at=received_at
-            )
-            self._safety.observe_teleop_state(
-                state, received_at=received_at
-            )
+            state = data if isinstance(data, SessionState) else SessionState.from_dict(data)
+            received_at = time.monotonic()
+            self._readiness.observe_session_state(state, received_at=received_at)
+            if state.state != "fault":
+                self._safety.observe_teleop_state(state.state, received_at=received_at)
             if self._phase.startswith("armed_"):
-                self._phase = f"armed_{state}"
-        except ValueError as exc:
-            self._last_error = f"invalid_teleop_state: {exc}"
+                self._phase = f"armed_{state.state}"
+            elif state.state == "fault" and self._marvin is not None:
+                self._phase = "fault_return"
+        except (ProtocolError, TypeError, ValueError) as exc:
+            self._last_error = f"invalid_session_state: {exc}"
 
-    def _on_input_status(self, text: str) -> None:
+    def _on_component_status(self, role: str, data: dict) -> None:
         try:
-            # /pico_body/status 只承载 readiness/诊断。teleop 状态唯一
-            # 权威是 /pico_body/teleop_state；若把两个 topic 的 state
-            # 合并，不同 Zenoh publisher 的交叉到达会让旧 idle 覆盖
-            # teleop，触发 idle_command_not_at_home 并锁存回 Home。
-            self._readiness.observe_input_status(
-                text, received_at=time.monotonic()
-            )
-        except ValueError as exc:
-            self._last_error = f"invalid_input_status: {exc}"
+            status = data if isinstance(data, ComponentStatus) else ComponentStatus.from_dict(data)
+            if status.component_role != role:
+                raise ValueError(f"component role mismatch: expected {role}")
+            self._readiness.observe_component(status, received_at=time.monotonic())
+        except (ProtocolError, TypeError, ValueError) as exc:
+            self._last_error = f"invalid_{role}_status: {exc}"
 
-    def _on_sim_status(self, text: str) -> None:
+    def _on_arm_state(self, data: dict) -> None:
         try:
-            self._readiness.observe_sim_status(
-                text, received_at=time.monotonic()
-            )
-        except ValueError as exc:
-            self._last_error = f"invalid_sim_status: {exc}"
+            state = data if isinstance(data, ArmJointState) else ArmJointState.from_dict(data)
+            self._readiness.observe_arm_state(state, received_at=time.monotonic())
+        except (ProtocolError, TypeError, ValueError) as exc:
+            self._last_error = f"invalid_arm_state: {exc}"
 
     def _live_controller_names(self) -> set:
         """liveliness 查询 tj/live/*，2 秒缓存（替代 ros2 node list）。"""
@@ -419,6 +387,14 @@ class MarvinHardwareBridge:
             self._try_start_hardware()
             return
         if self._marvin is None:
+            return
+        if self._phase == "fault_return":
+            readiness = self._readiness.evaluate_fault_return(now_ns=time.monotonic_ns())
+            self._readiness_reason = readiness.reason
+            if not readiness.ready:
+                return
+            self._marvin.send_joint_targets(self._left_home, self._right_home)
+            self._command_count += 1
             return
         self._observe_tick_timing(time.monotonic())
         try:
@@ -480,15 +456,9 @@ class MarvinHardwareBridge:
             self._trip_soft_stop(f"runtime_error: {exc}")
 
     def _try_start_hardware(self) -> None:
-        conflicts = (
-            self._live_controller_names() & CONFLICTING_CONTROLLER_NAMES
+        readiness = self._readiness.evaluate_connection(
+            now_ns=time.monotonic_ns(), required_capability="real"
         )
-        if conflicts:
-            self._readiness_reason = (
-                "conflicting_controller:" + ",".join(sorted(conflicts))
-            )
-            return
-        readiness = self._readiness.evaluate(now=time.monotonic())
         self._readiness_reason = readiness.reason
         if not readiness.ready:
             return
@@ -757,7 +727,8 @@ def main(args=None) -> int:
         overrides,
     )
     session = open_session()
-    node = None
+    router_zid = require_single_router(session, os.environ.get("TIANJI_ROUTER_ZID"))
+    params["router_zid"] = router_zid
     try:
         node = MarvinHardwareBridge(session, params)
         node.run()

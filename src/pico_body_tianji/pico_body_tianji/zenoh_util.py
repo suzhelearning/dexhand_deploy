@@ -18,6 +18,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
+from .protocol.messages import strict_loads
+
 import zenoh
 
 
@@ -149,7 +151,7 @@ class ZenohJsonSub(_SafeSub):
             payload = bytes(sample.payload)
             if not payload:
                 return
-            handler(json.loads(payload.decode("utf-8")))
+            handler(strict_loads(payload))
 
         super().__init__(session, key, decoded)
 

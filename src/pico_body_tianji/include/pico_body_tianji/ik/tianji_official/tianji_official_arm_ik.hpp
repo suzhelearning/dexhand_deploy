@@ -33,7 +33,7 @@ public:
     ArmSide side,
     const Eigen::Isometry3d & target_pose,
     const ArmJointVector & current_joints_rad,
-    const Eigen::Vector3d & elbow_ik_direction) const override;
+    const Eigen::Vector3d & elbow_reference_direction) const override;
 
 private:
   struct Impl;
