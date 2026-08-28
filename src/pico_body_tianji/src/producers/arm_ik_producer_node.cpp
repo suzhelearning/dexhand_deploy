@@ -365,7 +365,16 @@ int main() {
     if (instance.empty() || coordinator.empty() || router.empty()) {
       throw std::invalid_argument("TIANJI_COMPONENT_INSTANCE_ID, TIANJI_COORDINATOR_INSTANCE_ID and TIANJI_ROUTER_ZID are required");
     }
-    zenoh::Session session = zenoh::Session::open(zenoh::Config::create_default());
+    const auto endpoint = read_env("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447");
+    if (endpoint.find('\"') != std::string::npos) throw std::invalid_argument("invalid router endpoint");
+    auto config = zenoh::Config::create_default();
+    config.insert_json5("mode", "\"client\"");
+    config.insert_json5("connect/endpoints", "[\"" + endpoint + "\"]");
+    zenoh::Session session = zenoh::Session::open(std::move(config));
+    const auto routers = session.get_routers_z_id();
+    if (routers.size() != 1 || routers.front().to_string() != router) {
+      throw std::runtime_error("expected exactly one router with matching TIANJI_ROUTER_ZID");
+    }
     pico_body_tianji::ArmIkProducer node(
       session, read_env("TIANJI_IK_BACKEND", "pinocchio_cpp"), instance, router, coordinator);
     node.run();
