@@ -2,7 +2,7 @@
 
 #include <zenoh.hxx>
 #include <Eigen/Geometry>
-#include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -321,16 +321,17 @@ private:
         continue;
       }
       current_[index] = result.joints_rad;
-      ++sequence_;
-      proposal_publishers_[index]->put(zenoh::Bytes(proposal_json(target, result, result.joints_rad, instance_, router_, sequence_)));
-      solved_publishers_[index]->put(zenoh::Bytes(solved_json(target, result.achieved_pose, instance_, router_, sequence_)));
+      const auto wire_sequence = sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
+      proposal_publishers_[index]->put(zenoh::Bytes(proposal_json(target, result, result.joints_rad, instance_, router_, wire_sequence)));
+      solved_publishers_[index]->put(zenoh::Bytes(solved_json(target, result.achieved_pose, instance_, router_, wire_sequence)));
     }
   }
 
   void publish_status(const std::string &error) {
     if (!status_publisher_) return;
+    const auto wire_sequence = sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
     status_publisher_->put(zenoh::Bytes("{\"schema_version\":1,\"publisher_instance_id\":" + quote(instance_) + ",\"router_zid\":" + quote(router_) +
-      ",\"sequence\":" + std::to_string(++sequence_) + ",\"timestamp_ns\":" + std::to_string(now_ns()) +
+      ",\"sequence\":" + std::to_string(wire_sequence) + ",\"timestamp_ns\":" + std::to_string(now_ns()) +
       ",\"component_role\":\"producer_arm\",\"component_id\":\"arm_ik_producer\",\"phase\":\"ready\",\"ready\":true,\"healthy\":" +
       (error.empty() ? "true" : "false") + ",\"capabilities\":[\"simulation\"],\"error\":" + (error.empty() ? "null" : quote(error)) + ",\"diagnostics\":{}}"));
   }
@@ -349,7 +350,7 @@ private:
   std::array<std::optional<Target>, 2> targets_;
   std::array<ArmJointVector, 2> current_{ArmJointVector::Zero(), ArmJointVector::Zero()};
   std::mutex mutex_;
-  std::uint64_t sequence_{0};
+  std::atomic<std::uint64_t> sequence_{0};
 };
 
 }  // namespace
