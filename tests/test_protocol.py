@@ -189,6 +189,39 @@ class ProtocolMessagesTest(unittest.TestCase):
             target_wrist_pose=self.pose, tcp_to_wrist_pose=self.pose,
             publisher_instance_id="diag-1", router_zid="router-1",
         ))
+
+    def test_every_message_parser_rejects_unknown_field(self) -> None:
+        hand_records = {
+            "left": {"valid": False, "wrist_pose": None, "keypoints_world_m": None},
+            "right": {"valid": False, "wrist_pose": None, "keypoints_world_m": None},
+        }
+        messages = [
+            self.envelope,
+            ArmTargetCommand(self.envelope, None, "source", "left", "Base_L", [0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+            ArmJointProposal(1, 1, 1, "ik", "left", None, self.arm_names, [0.0] * 7, {}, "ik-1", "router-1"),
+            ArmSolvedPose(self.envelope, "ik", "right", "Base_R", None, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+            ArmJointCommand(1, 1, 1, "coordinator", "left", "idle", None, None, self.arm_names, [0.0] * 7, "coord-1", "router-1"),
+            ArmJointState(1, 1, 1, "mujoco", self.arm_names + [f"Joint{i}_R" for i in range(1, 8)], [0.0] * 14, None, "exec-1", "router-1"),
+            HandTargetCommand(1, 1, 1, None, "source", "left", "wrist_relative_mediapipe", self.keypoints, "source-1", "router-1"),
+            HandJointCommand(1, 1, 1, "retarget", "left", self.hand_names, [0.0] * 20, "retarget-1", "router-1"),
+            HandJointState(1, 1, 1, "wuji", "left", self.hand_names, [0.0] * 20, None, "wuji-1", "router-1"),
+            SessionIntent(1, 1, 1, "source", "start", "reason", "source-1", "router-1"),
+            SessionState(1, 1, 1, "idle", "reason", "coordinator", None, "coord-1", "router-1"),
+            LatchedBool(1, 1, 1, True, "coord-1", "router-1"),
+            ComponentStatus(1, 1, 1, "source", "source-1", "ready", True, True, ["simulation"], None, {}, "source-1", "router-1"),
+            HandExecutorStatus(1, 1, 1, "left", True, True, True, False, None, "hand-1", "router-1"),
+            SafetyStopRequest(self.envelope, "run-1", "stop"),
+            SafetyStopAck(self.envelope, "arm-1", "run-1", True, "stop"),
+            RawPicoControllerSample(self.envelope, None, self.pose, self.pose, False),
+            RawMocapLiveSample(self.envelope, None, "stream-1", 1, 1, hand_records),
+            RawH5ReplaySample(self.envelope, None, {"left": {**hand_records["left"], "wuji2_joints_rad": None}, "right": {**hand_records["right"], "wuji2_joints_rad": None}}),
+            Frame0HandSkeleton(1, 1, "right", "motive_world", self.keypoints, [[i, i + 1] for i in range(20)], self.pose, self.pose, self.pose, self.pose, 1, "diag-1", "router-1"),
+        ]
+        for message in messages:
+            payload = message.to_dict()
+            payload["unknown_field"] = True
+            with self.assertRaises(ValueError, msg=type(message).__name__):
+                type(message).from_dict(payload)
     def test_rejects_unknown_schema_missing_fields_and_bad_shapes(self) -> None:
         payload = self.envelope.to_dict()
         payload["schema_version"] = 2
@@ -280,24 +313,15 @@ class ProtocolMessagesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             SafetyStopAck(self.envelope, "arm-1", "run-1", False, "operator").validate_for("arm-1", "run-1")
 
+    def test_rejects_nested_non_json_diagnostics_and_topic_side(self) -> None:
+        for invalid in (math.nan, math.inf):
+            with self.assertRaises(ValueError):
+                ComponentStatus(1, 1, 2, "producer_arm", "ik", "ready", True, True, ["simulation"], None, {"nested": {"bad": invalid}}, "ik-1", "router-1")
         with self.assertRaises(ValueError):
             ComponentStatus(1, 1, 2, "producer_arm", "ik", "ready", True, True, ["simulation"], None, {"nested": {"bad": object()}}, "ik-1", "router-1")
-        with self.assertRaises(ValueError):
-            topics.arm_target("bad")
-        with self.assertRaises(ValueError):
-            topics.hand_target("bad")
-        with self.assertRaises(ValueError):
-            topics.arm_proposal("bad")
-        with self.assertRaises(ValueError):
-            topics.arm_solved_pose("bad")
-        with self.assertRaises(ValueError):
-            topics.arm_command("bad")
-        with self.assertRaises(ValueError):
-            topics.hand_command("bad")
-        with self.assertRaises(ValueError):
-            topics.hand_state("bad")
-        with self.assertRaises(ValueError):
-            topics.hand_executor_status("bad")
+        for helper in (topics.arm_target, topics.hand_target, topics.arm_proposal, topics.arm_solved_pose, topics.arm_command, topics.hand_command, topics.hand_state, topics.hand_executor_status):
+            with self.assertRaises(ValueError):
+                helper("bad")
 
     def test_direct_wire_constructor_requires_identity(self) -> None:
         with self.assertRaises(TypeError):
