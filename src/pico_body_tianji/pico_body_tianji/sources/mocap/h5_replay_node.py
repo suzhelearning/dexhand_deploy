@@ -36,7 +36,7 @@ from ..common.replay_clock import HoldToRunClock
 from ..common.session_client import SessionClient
 from ..common.target_conditioner import TargetConditioningSettings
 from ..common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
-from ..common.target_publisher import TargetPublisher
+from ..common.target_publisher import SequenceAllocator, TargetPublisher
 from ..pico_controller.controller_frame import ControllerFrame
 from .h5 import (
     HAND_KEYPOINT_EDGES,
@@ -47,12 +47,14 @@ from .h5 import (
     load_mocap_h5,
     synthetic_reference_pose,
 )
+from .motive import MotiveFrameSource
 from ...zenoh_util import (
     ZenohJsonSub,
     load_node_config,
     load_tianji_config,
     open_session,
     parse_param_override,
+    require_single_router,
 )
 from ..common.keyboard import X11KeyState, raw_keyboard
 
@@ -203,6 +205,7 @@ class MocapH5ReplayNode:
         publisher_instance_id: str,
         router_zid: str,
         coordinator_instance_id: str | None = None,
+        expected_producer_instance_id: str | None = None,
         right_rigid_id: int | str = "tianji_wrist",
         speed: float = 1.0,
         yaw_deg: float = 0.0,
@@ -218,9 +221,10 @@ class MocapH5ReplayNode:
             raise ValueError("rate 必须为正有限数值")
         if isinstance(right_rigid_id, int):
             if right_rigid_id <= 0:
-                raise ValueError("right_rigid_id 必须是正整数或刚体名")
+                raise ValueError("right_rigid_id 必须为正整数或刚体名")
         elif not isinstance(right_rigid_id, str) or not right_rigid_id.strip():
-            raise ValueError("right_rigid_id 必须是正整数或刚体名")
+            raise ValueError("right_rigid_id 必须为正整数或刚体名")
+        self._expected_producer_instance_id = expected_producer_instance_id
         self._session = session
         self._recording = recording
         self._speed = float(speed)
@@ -376,11 +380,13 @@ class MocapH5ReplayNode:
                 raise ValueError(f"{label} 必须为正有限数值")
         self._required_stable_ticks = max(1, round(stable_seconds * rate))
 
+        allocator = SequenceAllocator()
         self._publisher = TargetPublisher(
             session,
             source="h5_replay",
             publisher_instance_id=publisher_instance_id,
             router_zid=router_zid,
+            allocator=allocator,
         )
         self._session_client = SessionClient(
             session,
@@ -388,6 +394,7 @@ class MocapH5ReplayNode:
             publisher_instance_id=publisher_instance_id,
             router_zid=router_zid,
             expected_coordinator_instance_id=coordinator_instance_id,
+            allocator=allocator,
         )
         # Coordinator state/latches are subscribed and queried before any
         # keyboard event can enter a moving phase.
@@ -406,6 +413,7 @@ class MocapH5ReplayNode:
         self._motive_frame_sub = ZenohJsonSub(
             session, MOCAP_FRAME_KEY, self._on_motive_frame
         )
+        self._motive_source = MotiveFrameSource()
         self._rigid_names_sub = ZenohJsonSub(
             session, RIGID_BODY_NAMES_KEY, self._on_rigid_body_names
         )
@@ -430,6 +438,10 @@ class MocapH5ReplayNode:
                 )
         else:
             self._deadman = deadman  # type: ignore[assignment]
+        self._real_preflight_ok = bool(
+            params.get("h5_real_preflight_passed", False)
+            and params.get("hand_real_preflight_passed", False)
+        )
 
         self._at_home = False
         self._return_complete = False
@@ -486,6 +498,11 @@ class MocapH5ReplayNode:
         )
 
     def _on_motive_frame(self, frame: dict[str, Any]) -> None:
+        try:
+            self._motive_source.parse(frame)
+        except (TypeError, ValueError) as exc:
+            self._last_error = str(exc)
+            return
         with self._lock:
             self._latest_motive_frame = frame
             self._motive_received_at = time.monotonic()
@@ -638,7 +655,7 @@ class MocapH5ReplayNode:
                 side="right",
                 keypoints_world_m=self._frame_zero_keypoints,
                 manus_wrist_pose=self._frame_zero_pose,
-                robot_wrist_home_pose=self._right_robot_home_wrist_pose,
+                robot_wrist_home_pose=wrist_home_pose,
                 target_wrist_pose=target_wrist_motive,
                 tcp_to_wrist_pose=self._tcp_to_wrist_pose,
                 edges=HAND_KEYPOINT_EDGES,
@@ -683,6 +700,11 @@ class MocapH5ReplayNode:
         except (TypeError, ValueError):
             return
         if solved.side != "right" or solved.frame_id != "Base_R":
+            return
+        if solved.envelope.router_zid != self._session_client.router_zid:
+            return
+        expected = getattr(self, "_expected_producer_instance_id", None)
+        if expected is not None and solved.envelope.publisher_instance_id != expected:
             return
         pose = np.concatenate(
             (np.asarray(solved.position_m), np.asarray(solved.orientation_xyzw))
@@ -1339,6 +1361,14 @@ class MocapH5ReplayNode:
                         )
                 self._publish_cached_targets()
                 return True
+            if (
+                self._phase in {"approaching", "ready", "replaying", "completed"}
+                and not self._real_preflight_ok
+                and getattr(self, "_real_mode", False)
+            ):
+                self._begin_return(exit_after_return=False)
+                self._publish_state("returning")
+                return True
 
             if self._phase == "ready":
                 self._deadman_pressed = self._read_deadman()
@@ -1378,8 +1408,9 @@ class MocapH5ReplayNode:
                             self._phase = "completed"
                             self._replay_clock = None
                             _LOG.warning(
-                                "H5 右腕轨迹回放完成并稳定到达末帧，当前保持末帧"
+                                "H5 右腕轨迹回放完成并稳定到达末帧，开始请求 return"
                             )
+                            self._begin_return(exit_after_return=False)
                     else:
                         self._source_complete = False
                         self._final_stable_ticks = 0
@@ -1439,7 +1470,14 @@ class MocapH5ReplayNode:
                     and self._last_error is None
                 ),
                 healthy=self._last_error is None,
-                capabilities=["simulation"],
+                capabilities=(
+                    ["simulation", "real"]
+                    if self._real_preflight_ok
+                    and self._speed <= 0.25
+                    and abs(self._yaw_deg) <= 1.0e-12
+                    and self._deadman is not None
+                    else ["simulation"]
+                ),
                 error=self._last_error,
                 diagnostics=diagnostics,
             )
@@ -1574,9 +1612,14 @@ def main(argv=None) -> int:
     session = _open_session(os.environ.get("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447"))
     instance_id = os.environ.get("TIANJI_COMPONENT_INSTANCE_ID")
     router_zid = os.environ.get("TIANJI_ROUTER_ZID")
-    if not instance_id or not router_zid:
+    coordinator_id = os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID")
+    if not instance_id or not router_zid or not coordinator_id:
         session.close()
-        raise RuntimeError("TIANJI_COMPONENT_INSTANCE_ID and TIANJI_ROUTER_ZID are required")
+        raise RuntimeError(
+            "TIANJI_COMPONENT_INSTANCE_ID, TIANJI_ROUTER_ZID and "
+            "TIANJI_COORDINATOR_INSTANCE_ID are required"
+        )
+    require_single_router(session, router_zid)
     node: MocapH5ReplayNode | None = None
     try:
         node = MocapH5ReplayNode(
@@ -1585,7 +1628,7 @@ def main(argv=None) -> int:
             recording,
             publisher_instance_id=instance_id,
             router_zid=router_zid,
-            coordinator_instance_id=os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID"),
+            coordinator_instance_id=coordinator_id,
             right_rigid_id=(
                 int(args.right_rigid_id)
                 if args.right_rigid_id.isdecimal()

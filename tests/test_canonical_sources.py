@@ -180,6 +180,7 @@ class MocapLiveTest(unittest.TestCase):
             session,
             publisher_instance_id="live-instance",
             router_zid="router-zid",
+            coordinator_instance_id="coordinator-instance",
         )
         declared_keys = [key for key, _callback in session.subscribers]
         self.assertIn(topics.MOCAP_ALIGNED_HANDS, declared_keys)

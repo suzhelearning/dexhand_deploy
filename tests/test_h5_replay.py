@@ -89,6 +89,7 @@ class H5CanonicalLifecycleTest(unittest.TestCase):
                 recording,
                 publisher_instance_id="h5-instance",
                 router_zid="router-zid",
+                coordinator_instance_id="coordinator-instance",
                 deadman=_Deadman(),
                 start_keyboard=False,
             )

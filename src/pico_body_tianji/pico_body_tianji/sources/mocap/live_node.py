@@ -20,8 +20,9 @@ from ...protocol import topics
 from ...protocol.messages import ProtocolError
 from ...sources.common.freshness import FreshnessGate
 from ...sources.common.session_client import SessionClient
+from ...sources.common.target_conditioner import TargetConditioningSettings
 from ...sources.common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
-from ...sources.common.target_publisher import TargetPublisher
+from ...sources.common.target_publisher import SequenceAllocator, TargetPublisher
 from ..pico_controller.controller_frame import ControllerFrame
 from ...zenoh_util import (
     ZenohJsonSub,
@@ -30,9 +31,28 @@ from ...zenoh_util import (
     open_session,
     parse_cli_args,
     parse_param_override,
+    require_single_router,
 )
+from ..common.keyboard import raw_keyboard
 
 _LOG = logging.getLogger("mocap_live")
+
+DEFAULT_PARAMETERS = {
+    "rate": 60.0,
+    "stale_timeout": 0.5,
+    "min_cutoff": 1.2,
+    "beta": 0.45,
+    "translation_gain": [1.0, 1.0, 1.0],
+    "rotation_gain": 1.0,
+    "workspace_relative_radii_m": [0.42, 0.38, 0.38],
+    "workspace_soft_zone_ratio": 0.90,
+    "maximum_linear_speed_m_s": 0.36,
+    "maximum_angular_speed_rad_s": 1.55,
+    "maximum_linear_acceleration_m_s2": 3.5,
+    "maximum_angular_acceleration_rad_s2": 9.0,
+    "left_default_elbow_direction": [0.45638698, -0.74604902, -0.48489358],
+    "right_default_elbow_direction": [0.45638698, 0.74604902, -0.48489358],
+}
 
 _FRAME_STALE_S = 0.5
 
@@ -88,17 +108,31 @@ def parse_aligned_hands(payload: bytes | str | Mapping[str, Any]) -> AlignedHand
     missing = required - set(payload)
     if missing:
         raise ValueError(f"aligned hands missing fields: {', '.join(sorted(missing))}")
+    if (
+        not isinstance(payload["stream_instance_id"], str)
+        or not payload["stream_instance_id"]
+        or not isinstance(payload["router_zid"], str)
+        or not payload["router_zid"]
+        or isinstance(payload["stream_sequence"], bool)
+        or not isinstance(payload["stream_sequence"], int)
+        or isinstance(payload["time_ns"], bool)
+        or not isinstance(payload["time_ns"], int)
+        or isinstance(payload["frame_index"], bool)
+        or not isinstance(payload["frame_index"], int)
+        or not isinstance(payload["frame_valid"], bool)
+    ):
+        raise ValueError("aligned hands envelope has invalid field types")
     hands = payload["hands"]
     if not isinstance(hands, Mapping) or set(hands) != {"left", "right"}:
         raise ValueError("aligned hands must contain exactly left and right")
     return AlignedHandFrame(
-        stream_instance_id=str(payload["stream_instance_id"]),
-        stream_sequence=int(payload["stream_sequence"]),
-        frame_index=int(payload["frame_index"]),
-        source_timestamp_ns=int(payload["time_ns"]),
-        frame_valid=bool(payload["frame_valid"]),
+        stream_instance_id=payload["stream_instance_id"],
+        stream_sequence=payload["stream_sequence"],
+        frame_index=payload["frame_index"],
+        source_timestamp_ns=payload["time_ns"],
+        frame_valid=payload["frame_valid"],
         hands={side: _hand(hands[side], side) for side in ("left", "right")},
-        router_zid=str(payload["router_zid"]),
+        router_zid=payload["router_zid"],
     )
 
 
@@ -116,7 +150,7 @@ class MocapLiveNode:
         active_sides: tuple[str, ...] = ("right",),
         clock: Any = time.monotonic,
     ) -> None:
-        params = {"rate": 60.0, "stale_timeout": _FRAME_STALE_S, **(params or {})}
+        params = {**DEFAULT_PARAMETERS, **(params or {})}
         if set(active_sides) not in ({"left"}, {"right"}, {"left", "right"}):
             raise ValueError("active_sides must contain left/right")
         self._active_sides = tuple(active_sides)
@@ -128,24 +162,46 @@ class MocapLiveNode:
         if not np.isfinite(self._stale_timeout_s) or self._stale_timeout_s <= 0.0:
             raise ValueError("stale_timeout must be positive")
         self._session = session
+        allocator = SequenceAllocator()
         self._session_client = SessionClient(
             session,
             source="mocap_live",
             publisher_instance_id=publisher_instance_id,
             router_zid=router_zid,
             expected_coordinator_instance_id=coordinator_instance_id,
+            allocator=allocator,
         )
         self._publisher = TargetPublisher(
             session,
             source="mocap_live",
             publisher_instance_id=publisher_instance_id,
             router_zid=router_zid,
+            allocator=allocator,
         )
         config = load_tianji_config()
         self._config = config
-        self._mapper = EndEffectorTargetMapper(config, rate=self._rate)
-        # Lifecycle barrier: coordinator subscriptions/query snapshot happen
-        # before the aligned-hands subscriber can trigger motion.
+        settings = TargetConditioningSettings(
+            rate_hz=self._rate,
+            translation_gain=params["translation_gain"],
+            rotation_gain=float(params["rotation_gain"]),
+            workspace_relative_radii_m=params["workspace_relative_radii_m"],
+            workspace_soft_zone_ratio=float(params["workspace_soft_zone_ratio"]),
+            maximum_linear_speed_m_s=float(params["maximum_linear_speed_m_s"]),
+            maximum_angular_speed_rad_s=float(params["maximum_angular_speed_rad_s"]),
+            maximum_linear_acceleration_m_s2=float(params["maximum_linear_acceleration_m_s2"]),
+            maximum_angular_acceleration_rad_s2=float(params["maximum_angular_acceleration_rad_s2"]),
+        )
+        self._mapper = EndEffectorTargetMapper(
+            config,
+            rate=self._rate,
+            min_cutoff=float(params["min_cutoff"]),
+            beta=float(params["beta"]),
+            conditioning_settings=settings,
+            default_zsp_directions={
+                side: params[f"{side}_default_elbow_direction"]
+                for side in ("left", "right")
+            },
+        )
         self._session_client.start()
         self._frame_sub = ZenohJsonSub(
             session, topics.MOCAP_ALIGNED_HANDS, self._on_aligned_payload
@@ -153,11 +209,13 @@ class MocapLiveNode:
         self._lock = threading.RLock()
         self._latest: AlignedHandFrame | None = None
         self._received_at = 0.0
+        self._stop_event = threading.Event()
         self._stream_instance_id: str | None = None
         self._stream_sequence = -1
         self._references: dict[str, np.ndarray] = {}
         self._phase = "armed"
         self._last_error: str | None = None
+        self._real_preflight_ok = bool(params.get("real_preflight_passed", False))
         self._closed = False
 
     @property
@@ -253,9 +311,12 @@ class MocapLiveNode:
                 continue
             current = np.asarray(frame.hands[side]["wrist_pose"], dtype=np.float64)
             reference = self._references[side]
-            rotation = self._config.mocap_to_robot @ Rotation.from_quat(current[3:]).as_matrix()
+            delta_rotation = (
+                Rotation.from_quat(reference[3:]).inv()
+                * Rotation.from_quat(current[3:])
+            )
             position = home[:3] + self._config.get_world_to_chest_rotation(side) @ self._config.mocap_to_robot @ (current[:3] - reference[:3])
-            orientation = Rotation.from_matrix(self._config.get_world_to_chest_rotation(side) @ rotation).as_quat()
+            orientation = (Rotation.from_quat(home[3:]) * delta_rotation).as_quat()
             poses[side] = np.concatenate((position, orientation))
         return self._mapper.map_absolute_tcp_poses(poses["left"], poses["right"])
 
@@ -285,11 +346,19 @@ class MocapLiveNode:
                 self._request_return_locked("mocap_stale_or_invalid_side")
                 self._publish_status_locked()
                 return
+            if getattr(self, "_real_mode", False) and not self._real_preflight_ok:
+                self._request_return_locked("mocap_real_capability_lost")
+                self._publish_status_locked()
+                return
             try:
                 targets = self._build_targets(frame)
                 for side in self._active_sides:
                     pose = targets.left_pose if side == "left" else targets.right_pose
-                    elbow = targets.left_default_elbow_direction if side == "left" else targets.right_default_elbow_direction
+                    elbow = (
+                        targets.left_default_elbow_direction
+                        if side == "left"
+                        else targets.right_default_elbow_direction
+                    )
                     self._publisher.publish_arm_target(
                         side=side,
                         position_m=pose[:3],
@@ -326,7 +395,7 @@ class MocapLiveNode:
             phase=self._phase,
             ready=self._session_client.startup_ready and self._last_error is None,
             healthy=self._last_error is None,
-            capabilities=["simulation"],
+            capabilities=["simulation", "real"] if self._real_preflight_ok else ["simulation"],
             error=self._last_error,
             diagnostics={
                 "stream_instance_id": self._stream_instance_id,
@@ -336,11 +405,11 @@ class MocapLiveNode:
                 "watchdog_s": self._stale_timeout_s,
             },
         )
-
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        self._stop_event.set()
         self._frame_sub.close()
         self._publisher.close()
         self._session_client.close()
@@ -368,16 +437,28 @@ def main(argv: list[str] | None = None) -> int:
     params = load_node_config(args.config, "mocap_live", {"rate": 60.0, "stale_timeout": _FRAME_STALE_S}, overrides)
     instance_id = os.environ.get("TIANJI_COMPONENT_INSTANCE_ID")
     router_zid = os.environ.get("TIANJI_ROUTER_ZID")
-    if not instance_id or not router_zid:
-        raise RuntimeError("TIANJI_COMPONENT_INSTANCE_ID and TIANJI_ROUTER_ZID are required")
-    session = open_session()
+    coordinator_id = os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID")
+    endpoint = os.environ.get("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447")
+    if not instance_id or not router_zid or not coordinator_id:
+        raise RuntimeError(
+            "TIANJI_COMPONENT_INSTANCE_ID, TIANJI_ROUTER_ZID and "
+            "TIANJI_COORDINATOR_INSTANCE_ID are required"
+        )
+    session = open_session(endpoint)
+    require_single_router(session, router_zid)
     node = MocapLiveNode(
         session,
         params,
         publisher_instance_id=instance_id,
         router_zid=router_zid,
-        coordinator_instance_id=os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID"),
+        coordinator_instance_id=coordinator_id,
     )
+    keyboard_thread = threading.Thread(
+        target=raw_keyboard,
+        args=(node._on_key, node._stop_event),
+        daemon=True,
+    )
+    keyboard_thread.start()
     try:
         while not node._closed:
             node._tick()

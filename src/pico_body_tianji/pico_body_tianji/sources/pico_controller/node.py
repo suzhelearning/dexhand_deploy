@@ -13,8 +13,15 @@ from ...sources.common.freshness import FreshnessGate
 from ...sources.common.session_client import SessionClient
 from ...sources.common.target_conditioner import TargetConditioningSettings
 from ...sources.common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
-from ...sources.common.target_publisher import TargetPublisher
-from ...zenoh_util import load_node_config, load_tianji_config, open_session, parse_cli_args, parse_param_override
+from ...sources.common.target_publisher import SequenceAllocator, TargetPublisher
+from ...zenoh_util import (
+    load_node_config,
+    load_tianji_config,
+    open_session,
+    parse_cli_args,
+    parse_param_override,
+    require_single_router,
+)
 from .source import ControllerSample, XRoboControllerOnlySource
 
 _LOG = logging.getLogger("pico_controller")
@@ -87,18 +94,21 @@ class PicoControllerSource:
             timeout_seconds=float(params["stale_timeout"]),
             allow_unstamped=bool(params["allow_unstamped_input"]),
         )
+        allocator = SequenceAllocator()
         self._session_client = session_client or SessionClient(
             session,
             source="pico_controller",
             publisher_instance_id=publisher_instance_id,
             router_zid=router_zid,
             expected_coordinator_instance_id=coordinator_instance_id,
+            allocator=allocator,
         )
         self._publisher = target_publisher or TargetPublisher(
             session,
             source="pico_controller",
             publisher_instance_id=publisher_instance_id,
             router_zid=router_zid,
+            allocator=allocator,
         )
         self._phase = "armed"
         self._last_a = False
@@ -211,9 +221,6 @@ class PicoControllerSource:
                 except Exception as exc:
                     self._last_error = str(exc)
                     self._request_return("pico_controller_mapping_error")
-            if pressed and self._teleop_edge_previous:
-                self._request_return("right_controller_a")
-            self._teleop_edge_previous = pressed
             self._publish_status()
             return
 
@@ -285,15 +292,21 @@ def main(argv: list[str] | None = None) -> int:
     params = load_node_config(args.config, "pico_controller", DEFAULT_PARAMETERS, overrides)
     instance_id = os.environ.get("TIANJI_COMPONENT_INSTANCE_ID")
     router_zid = os.environ.get("TIANJI_ROUTER_ZID")
-    if not instance_id or not router_zid:
-        raise RuntimeError("TIANJI_COMPONENT_INSTANCE_ID and TIANJI_ROUTER_ZID are required")
-    session = open_session()
+    coordinator_id = os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID")
+    endpoint = os.environ.get("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447")
+    if not instance_id or not router_zid or not coordinator_id:
+        raise RuntimeError(
+            "TIANJI_COMPONENT_INSTANCE_ID, TIANJI_ROUTER_ZID and "
+            "TIANJI_COORDINATOR_INSTANCE_ID are required"
+        )
+    session = open_session(endpoint)
+    require_single_router(session, router_zid)
     node = PicoControllerSource(
         session,
         params,
         publisher_instance_id=instance_id,
         router_zid=router_zid,
-        coordinator_instance_id=os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID"),
+        coordinator_instance_id=coordinator_id,
     )
     try:
         return node.run()

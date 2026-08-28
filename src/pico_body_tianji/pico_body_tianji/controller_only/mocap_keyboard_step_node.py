@@ -43,15 +43,12 @@ import time
 
 import numpy as np
 
-from .controller_only_mapper import (
-    ControllerOnlyTargets,
-    ControllerOnlyTeleopMapper,
-)
+from ..sources.common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
+from ..sources.common.target_conditioner import TargetConditioningSettings
+from ..sources.pico_controller.controller_frame import ControllerFrame
 from .controller_only_trace import _assert_replay_graph_is_safe
 from .mocap_keyboard_step import AXIS_STEPS, ArrowKeyParser, StepAccumulator
 from .raw_keyboard import raw_keyboard
-from .target_conditioner import TargetConditioningSettings
-from ..controller_frame import ControllerFrame
 from ..zenoh_util import (
     LiveToken,
     ZenohPub,
@@ -158,7 +155,7 @@ class MocapKeyboardStepNode:
             ),
         )
         tianji_config = load_tianji_config()
-        self._mapper = ControllerOnlyTeleopMapper(
+        self._mapper = EndEffectorTargetMapper(
             tianji_config,
             rate=rate,
             min_cutoff=float(params["min_cutoff"]),
@@ -364,7 +361,7 @@ class MocapKeyboardStepNode:
             },
         }
 
-    def _publish_targets(self, targets: ControllerOnlyTargets) -> None:
+    def _publish_targets(self, targets: ArmTargetBatch) -> None:
         stamp = stamp_now()
         for side in self._sides:
             pose = targets.left_pose if side == "left" else targets.right_pose
@@ -397,7 +394,7 @@ class MocapKeyboardStepNode:
         if self._pending_pose is not None:
             # settle：持续映射按键后的目标位姿，直到滤波/整形收敛。
             try:
-                targets = self._mapper.map_frame(
+                targets = self._mapper.map_relative_controller_frame(
                     self._frame(self._pending_pose)
                 )
             except Exception as exc:

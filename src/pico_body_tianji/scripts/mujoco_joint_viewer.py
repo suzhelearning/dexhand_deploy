@@ -13,6 +13,7 @@ import numpy as np
 import zenoh
 from scipy.spatial.transform import Rotation
 
+from pico_body_tianji.protocol.messages import Frame0HandSkeleton, ProtocolError
 from pico_body_tianji.sources.mocap.h5 import (
     HAND_KEYPOINT_EDGES, compose_pose, invert_pose,
 )
@@ -479,30 +480,16 @@ class FrameZeroHandSkeleton:
             return False
         self._pending = None
         try:
-            points_motive = np.asarray(
-                payload["points_motive_world"], dtype=np.float64
-            )
-            home_pose_motive = np.asarray(
-                payload["home_wuji2_wrist_pose_motive"],
-                dtype=np.float64,
-            )
-            manus_wrist_quat_motive = np.asarray(
-                payload["frame0_manus_quat_xyzw"], dtype=np.float64
-            )
-            target_wrist_pose_motive = np.asarray(
-                payload["frame0_wuji2_wrist_pose_motive"],
-                dtype=np.float64,
-            )
-            tcp_to_wrist_pose = np.asarray(
-                payload["tcp_to_wrist_pose_xyzw"], dtype=np.float64
-            )
-            edges = tuple(
-                tuple(int(value) for value in edge)
-                for edge in payload["edges"]
-            )
-        except (KeyError, TypeError, ValueError) as exc:
+            skeleton = Frame0HandSkeleton.from_dict(payload)
+        except (ProtocolError, TypeError, ValueError) as exc:
             _LOG.warning("忽略无效 frame0 骨架消息：%s", exc)
             return False
+        points_motive = np.asarray(skeleton.keypoints_world_m, dtype=np.float64)
+        home_pose_motive = np.asarray(skeleton.robot_wrist_home_pose, dtype=np.float64)
+        manus_wrist_quat_motive = np.asarray(skeleton.manus_wrist_pose[3:], dtype=np.float64)
+        target_wrist_pose_motive = np.asarray(skeleton.target_wrist_pose, dtype=np.float64)
+        tcp_to_wrist_pose = np.asarray(skeleton.tcp_to_wrist_pose, dtype=np.float64)
+        edges = tuple(tuple(int(value) for value in edge) for edge in skeleton.edges)
         if (
             points_motive.shape != (21, 3)
             or home_pose_motive.shape != (7,)
@@ -514,8 +501,6 @@ class FrameZeroHandSkeleton:
             or not np.isfinite(manus_wrist_quat_motive).all()
             or not np.isfinite(target_wrist_pose_motive).all()
             or not np.isfinite(tcp_to_wrist_pose).all()
-            or np.linalg.norm(manus_wrist_quat_motive) < 1.0e-9
-            or np.linalg.norm(target_wrist_pose_motive[3:]) < 1.0e-9
             or edges != HAND_KEYPOINT_EDGES
         ):
             _LOG.warning("忽略形状/拓扑不匹配的 frame0 骨架消息")
@@ -525,7 +510,7 @@ class FrameZeroHandSkeleton:
         self._tcp_to_wrist_pose[3:] /= np.linalg.norm(
             self._tcp_to_wrist_pose[3:]
         )
-        frozen = bool(payload.get("frozen", False))
+        frozen = True
         if not frozen or self._sim_from_motive is None:
             home_position_mj, _home_wrist_rotation = (
                 _frame_from_axis_geoms(
@@ -541,7 +526,7 @@ class FrameZeroHandSkeleton:
                     self._tcp_axis_x_geom_id,
                     self._tcp_axis_z_geom_id,
                     0.025,
-                )
+            )
             )
             rotation_mj_from_motive = _sim_from_motive_rotation(
                 home_tcp_rotation, self._tianji_config

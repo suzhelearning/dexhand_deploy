@@ -46,9 +46,15 @@ def key(name: str) -> str:
     return name.lstrip("/")
 
 
-def open_session() -> zenoh.Session:
-    """打开默认配置的 Zenoh 会话（本机 scouting）。"""
-    return zenoh.open(zenoh.Config())
+def open_session(endpoint: str | None = None) -> zenoh.Session:
+    """Open a client session using the single configured router endpoint."""
+    endpoint = endpoint or os.environ.get(
+        "TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447"
+    )
+    config = zenoh.Config.from_json5(
+        json.dumps({"mode": "client", "connect": {"endpoints": [endpoint]}})
+    )
+    return zenoh.open(config)
 
 
 class LiveToken:
@@ -328,3 +334,18 @@ def parse_param_override(spec: str) -> tuple:
         raise ValueError(f"非法 --param 格式：{spec}（需要 key:=value）")
     key, _, value = spec.partition(":=")
     return key.strip(), value.strip()
+
+def require_single_router(session: object, expected_zid: str | None = None) -> str:
+    """Return the one connected router ZID, failing closed on mismatch."""
+    info = getattr(session, "info", None)
+    routers_zid = getattr(info, "routers_zid", None)
+    if not callable(routers_zid):
+        raise RuntimeError("session.info.routers_zid() is required")
+    routers = [str(value) for value in routers_zid()]
+    if len(routers) != 1 or not routers[0]:
+        raise RuntimeError(f"expected exactly one router ZID, got {len(routers)}")
+    if expected_zid is not None and routers[0] != expected_zid:
+        raise RuntimeError(
+            f"router ZID mismatch: expected {expected_zid!r}, got {routers[0]!r}"
+        )
+    return routers[0]

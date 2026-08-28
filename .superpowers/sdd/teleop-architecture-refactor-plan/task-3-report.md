@@ -62,3 +62,28 @@ PICO 构造 smoke：输出 `armed`，退出码 0。
 2. H5 旧 diagnostics status 内容中仍有 legacy 诊断字段；后续 Task 8 应迁移并收敛字段，不得重新作为 authority。
 3. 恢复的 diagnostics 文件暂在旧 `controller_only` 目录，且其中部分旧 step node import 已迁出的 mapper；Task 8 迁移前不应把这些诊断入口加入产品 launcher。
 4. 本地 fake session focused tests 已覆盖 typed wire/identity/lifecycle；尚未接受真实 Zenoh router 的 query/reconnect/ACL 行为。
+
+## Fix round 1（审查修复）
+
+根据 `task-3-review.md` 完成以下可达修复：
+
+- `live_node.py` 正式入口现在以 `raw_keyboard` 后台线程接收 `s/q`，并在关闭时停止线程；PICO 删除 held-A 的错误 return，A 只用于 start rising edge。
+- `zenoh_util.open_session()` 统一读取 `TIANJI_ROUTER_ENDPOINT`（默认 `tcp/127.0.0.1:7447`），新增 `require_single_router()`；三个 source CLI 要求 component/router/coordinator identity 并验证实际 `session.info.routers_zid()` 恰好一个且匹配。
+- `SessionClient` 强制 `expected_coordinator_instance_id`，并与 `TargetPublisher` 共享 `SequenceAllocator`，避免 intent/data 同一 publisher instance 序号回退；匹配 start 拒绝快照立即清 pending。
+- live 使用 frozen reference 的相对旋转 delta，且从 source 参数构造完整 `TargetConditioningSettings`；real preflight capability 按状态输出并支持运行中 capability loss return。
+- H5 增加 H5/hand real preflight capability 条件、MotiveFrameSource 严格解析、solved router/producer identity 检查、return intent 请求和完成后自动 return；Frame0 发布字段改为 typed canonical 字段。
+- `mujoco_joint_viewer.py` 使用 `Frame0HandSkeleton.from_dict()` 解析 canonical diagnostics 字段，并统一 motive-world home pose；恢复的 step diagnostic node 改为 canonical mapper/conditioner/controller frame imports，避免资产无法 import。
+
+Fix round 1 focused 实际输出：
+
+```text
+............................等待 IK Home、有效 tianji_wrist marker 后按 s；节点推导 wuji2 r_mount/r_wrist Home，并把 H5 wrist frame0 转换到 r_wrist。随后 Enter 保压接近，松开保持；按 r 装载后续轨迹；活动阶段按 s 回 Home，按 q 回 Home 后退出。
+键盘 s：已读取 tianji_wrist marker 并推导 r_mount/r_wrist Home；持续按住 Enter，使 r_wrist 接近 H5 wrist frame0，松开保持。
+.
+----------------------------------------------------------------------
+Ran 29 tests in 0.082s
+
+OK
+```
+
+未完成/风险：SessionClient 尚未完成三类 query reply 的独立 completion/reconnect 重查；H5/live real preflight 依赖 launcher 注入的 preflight 参数，Task 8/5 需接入真实配置扫描；旧 diagnostics 主体仍在 controller_only 待 Task 8 迁目录；原 1035 行 H5 测试已由 canonical 生命周期测试替代，完整几何/terminal/viewer 回归需从历史提交迁移恢复。

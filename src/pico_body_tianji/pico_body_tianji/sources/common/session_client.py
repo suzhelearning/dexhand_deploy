@@ -16,6 +16,7 @@ from typing import Any, Callable
 from ...protocol import topics
 from ...protocol.messages import LatchedBool, ProtocolError, SessionIntent, SessionState
 from ...zenoh_util import ZenohPub
+from .target_publisher import SequenceAllocator
 
 
 class SessionClient:
@@ -31,7 +32,10 @@ class SessionClient:
         expected_coordinator_instance_id: str | None = None,
         snapshot_timeout_s: float = 1.0,
         clock: Callable[[], int] = time.monotonic_ns,
+        allocator: SequenceAllocator | None = None,
     ) -> None:
+        if not expected_coordinator_instance_id:
+            raise ValueError("expected_coordinator_instance_id is required")
         if not source or not publisher_instance_id or not router_zid:
             raise ValueError("source, publisher_instance_id and router_zid are required")
         if snapshot_timeout_s <= 0.0:
@@ -43,6 +47,7 @@ class SessionClient:
         self.expected_coordinator_instance_id = expected_coordinator_instance_id
         self._snapshot_timeout_s = float(snapshot_timeout_s)
         self._clock = clock
+        self._allocator = allocator or SequenceAllocator()
         self._intent_publisher = ZenohPub(session, topics.SESSION_INTENT)
         self._resources: list[Any] = []
         self._lock = threading.RLock()
@@ -56,7 +61,6 @@ class SessionClient:
         self._return_complete: LatchedBool | None = None
         self._coordinator_identity: str | None = None
         self._last_coordinator_sequence: dict[str, int] = {}
-        self._next_intent_sequence = 0
         self._pending_action: str | None = None
         self._pending_intent_sequence: int | None = None
         self._pending_deadline = 0.0
@@ -219,6 +223,13 @@ class SessionClient:
             ):
                 return
             self._state = state
+            if (
+                self._pending_action == "start"
+                and state.intent_sequence == self._pending_intent_sequence
+                and state.state != "teleop"
+            ):
+                self._pending_action = None
+                self._pending_intent_sequence = None
             self._state_event.set()
             self._snapshot_event.set()
 
@@ -273,8 +284,7 @@ class SessionClient:
             self._poll_timeout_locked()
             if not self._started:
                 raise RuntimeError("SessionClient must be started before requesting intents")
-            self._next_intent_sequence += 1
-            sequence = self._next_intent_sequence
+            sequence = self._allocator.next()
             timestamp_ns = int(self._clock())
             intent = SessionIntent(
                 schema_version=1,

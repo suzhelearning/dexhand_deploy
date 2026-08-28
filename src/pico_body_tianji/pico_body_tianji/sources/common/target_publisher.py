@@ -19,6 +19,18 @@ from ...protocol.messages import (
     RawPicoControllerSample,
 )
 from ...zenoh_util import ZenohPub
+class SequenceAllocator:
+    """Monotonic publisher-instance sequence shared by intents and data."""
+
+    def __init__(self, initial: int = 0) -> None:
+        self._value = int(initial)
+        self._lock = __import__("threading").Lock()
+
+    def next(self) -> int:
+        with self._lock:
+            self._value += 1
+            return self._value
+
 
 
 class TargetPublisher:
@@ -36,6 +48,7 @@ class TargetPublisher:
         publisher_instance_id: str,
         router_zid: str,
         clock: Callable[[], int] = time.monotonic_ns,
+        allocator: SequenceAllocator | None = None,
     ) -> None:
         if not source or not publisher_instance_id or not router_zid:
             raise ValueError("source, publisher_instance_id and router_zid are required")
@@ -44,7 +57,7 @@ class TargetPublisher:
         self.publisher_instance_id = publisher_instance_id
         self.router_zid = router_zid
         self._clock = clock
-        self._sequence = 0
+        self._allocator = allocator or SequenceAllocator()
         self._publishers: dict[str, ZenohPub] = {}
 
     @property
@@ -59,7 +72,7 @@ class TargetPublisher:
         return publisher
 
     def _envelope(self) -> ProtocolEnvelope:
-        self._sequence += 1
+        self._sequence = self._allocator.next()
         return ProtocolEnvelope(
             schema_version=1,
             publisher_instance_id=self.publisher_instance_id,
