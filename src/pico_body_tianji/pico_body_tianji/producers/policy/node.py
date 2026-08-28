@@ -102,6 +102,7 @@ class PolicyProducerNode:
         self._started = False
         self._closed = False
         self._last_error: str | None = None
+        self._session_invalid = False
         self._status: ComponentStatus | None = None
         self._last_observation: PolicyObservation | None = None
 
@@ -202,8 +203,10 @@ class PolicyProducerNode:
                 if parsed.publisher_instance_id != baseline[0]:
                     if self._session_state is not None and self._session_state.state == "teleop":
                         raise ProtocolError("arm state executor instance changed during teleop")
-                elif parsed.sequence <= baseline[1]:
+                elif parsed.sequence < baseline[1]:
                     raise ProtocolError("arm state sequence rollback")
+                elif parsed.sequence == baseline[1]:
+                    return
             self._state_baseline = (parsed.publisher_instance_id, parsed.sequence)
             self._state = parsed
             self._last_error = None
@@ -229,28 +232,37 @@ class PolicyProducerNode:
                 if parsed.publisher_instance_id != baseline[0]:
                     if self._session_state is not None and self._session_state.state == "teleop":
                         raise ProtocolError("coordinator instance changed during teleop")
-                elif parsed.sequence <= baseline[1]:
+                elif parsed.sequence < baseline[1]:
                     raise ProtocolError("session state sequence rollback")
+                elif parsed.sequence == baseline[1]:
+                    return
             self._session_baseline = (parsed.publisher_instance_id, parsed.sequence)
             self._session_state = parsed
+            self._session_invalid = False
+            self._last_error = None
         except (ProtocolError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            self._set_error(f"malformed session state: {exc}")
-
+            self._session_state = None
+            self._session_invalid = True
     def on_arm_target(self, side: str, value: ArmTargetCommand | Mapping[str, Any] | Any) -> None:
         try:
             if isinstance(value, ArmTargetCommand):
                 parsed = value
             else:
                 parsed = ArmTargetCommand.from_dict(self._payload(value))
-            if parsed.router_zid != self.router_zid or parsed.side != side:
+            if parsed.envelope.router_zid != self.router_zid or parsed.side != side:
                 raise ProtocolError("arm target identity/side mismatch")
             baseline = self._target_baseline.get(side)
             if baseline is not None:
-                if parsed.publisher_instance_id != baseline[0]:
+                if parsed.envelope.publisher_instance_id != baseline[0]:
                     raise ProtocolError(f"{side} arm target instance changed")
-                if parsed.envelope.sequence <= baseline[1]:
+                if parsed.envelope.sequence < baseline[1]:
                     raise ProtocolError(f"{side} arm target sequence rollback")
-            self._target_baseline[side] = (parsed.envelope.publisher_instance_id, parsed.envelope.sequence)
+                if parsed.envelope.sequence == baseline[1]:
+                    return
+            self._target_baseline[side] = (
+                parsed.envelope.publisher_instance_id,
+                parsed.envelope.sequence,
+            )
             self._targets[side] = parsed
         except (ProtocolError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self._set_error(f"malformed {side} arm target: {exc}")
@@ -323,6 +335,9 @@ class PolicyProducerNode:
             return {}
 
         session_state = self._session_state
+        if self._session_invalid:
+            self._publish_status(phase="waiting_session", ready=False, healthy=False)
+            return {}
         if session_state is None:
             self._publish_status(phase="waiting_session", ready=True, healthy=self._last_error is None)
             return {}
@@ -397,14 +412,27 @@ class PolicyProducerNode:
 
 
 def _load_policy_config() -> dict[str, Any]:
-    path = (
-        Path(__file__).resolve().parents[4]
-        / "src"
-        / "pico_body_tianji"
-        / "config"
-        / "producers"
-        / "policy_hold.yaml"
-    )
+    bundle_root = os.environ.get("PICO_BODY_TIANJI_BUNDLE_ROOT")
+    if bundle_root:
+        path = (
+            Path(bundle_root)
+            / "runtime"
+            / "pico_body_tianji"
+            / "share"
+            / "pico_body_tianji"
+            / "config"
+            / "producers"
+            / "policy_hold.yaml"
+        )
+    else:
+        path = (
+            Path(__file__).resolve().parents[5]
+            / "src"
+            / "pico_body_tianji"
+            / "config"
+            / "producers"
+            / "policy_hold.yaml"
+        )
     try:
         import yaml
         value = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -420,8 +448,12 @@ def main() -> int:
     endpoint = os.environ.get("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447")
     instance = os.environ.get("TIANJI_COMPONENT_INSTANCE_ID")
     router_zid = os.environ.get("TIANJI_ROUTER_ZID")
-    if not instance or not router_zid:
-        raise RuntimeError("TIANJI_COMPONENT_INSTANCE_ID and TIANJI_ROUTER_ZID are required")
+    coordinator_instance = os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID")
+    if not instance or not router_zid or not coordinator_instance:
+        raise RuntimeError(
+            "TIANJI_COMPONENT_INSTANCE_ID, TIANJI_COORDINATOR_INSTANCE_ID and "
+            "TIANJI_ROUTER_ZID are required"
+        )
     config = _load_policy_config()
     session = open_session(endpoint)
     router_zid = require_single_router(session, router_zid)
@@ -431,6 +463,7 @@ def main() -> int:
         publisher_instance_id=instance,
         router_zid=router_zid,
         producer_id=os.environ.get("TIANJI_PRODUCER_ID", "policy_hold"),
+        coordinator_instance_id=coordinator_instance,
         control_rate_hz=float(config.get("rate_hz", 90.0)),
         stale_timeout_s=float(config.get("stale_timeout_s", 0.2)),
         maximum_step_rad=float(config.get("maximum_step_rad", 0.0132645022)),

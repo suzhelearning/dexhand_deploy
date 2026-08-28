@@ -7,7 +7,9 @@ from pico_body_tianji.protocol.messages import (
     ALL_ARM_JOINT_NAMES,
     ARM_JOINT_NAMES,
     ArmJointState,
+    ArmTargetCommand,
     ComponentStatus,
+    ProtocolEnvelope,
     SessionState,
 )
 from pico_body_tianji.producers.policy.contracts import (
@@ -83,6 +85,14 @@ class ObservationBuilderTest(unittest.TestCase):
         observation = builder.build(state(1_500_000_000, [0.5] * 14))
         self.assertIsNotNone(observation)
         self.assertEqual(observation.joint_state.velocity_rad_s, [1.0] * 14)
+    def test_repeated_executor_frame_reuses_fresh_observation(self):
+        builder = ObservationBuilder(stale_timeout_s=0.5, clock=lambda: 1_100_000_000)
+        current = state(1_000_000_000, [0.5] * 14)
+        self.assertIsNone(builder.build(current))
+        observation = builder.build(state(1_050_000_000, [0.6] * 14))
+        repeated = builder.build(state(1_050_000_000, [0.6] * 14), now_ns=1_100_000_000)
+        self.assertIsNotNone(observation)
+        self.assertIs(repeated, observation)
 
     def test_state_stale_or_velocity_gap_is_not_ready(self):
         builder = ObservationBuilder(stale_timeout_s=0.2, clock=lambda: 2_000_000_000)
@@ -166,6 +176,25 @@ class PolicyProducerNodeTest(unittest.TestCase):
         node.tick(now_ns=1_000_000_000)
         self.assertFalse(node.status.healthy)
         self.assertFalse(node.status.ready)
+        self.assertEqual(len(session.publishers["tianji/proposal/arm/left"].values), 0)
+
+    def test_target_identity_uses_envelope_and_propagates_sequence(self):
+        node, _ = self._node()
+        target = ArmTargetCommand(
+            ProtocolEnvelope(1, "source-instance", ROUTER, 77, 1_000_000_000),
+            None, "mocap_live", "right", "Base_R", [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0],
+        )
+        node.on_arm_target("right", target)
+        proposals = node.tick(now_ns=1_000_000_000)
+        self.assertEqual(proposals["right"].target_sequence, 77)
+
+    def test_invalid_session_snapshot_clears_teleop_and_stops_proposals(self):
+        node, session = self._node()
+        node.on_session_state({"not": "a SessionState"})
+        self.assertEqual(node.tick(now_ns=1_000_000_000), {})
+        self.assertFalse(node.status.healthy)
+        self.assertEqual(len(session.publishers["tianji/proposal/arm/right"].values), 0)
         self.assertEqual(len(session.publishers["tianji/proposal/arm/left"].values), 0)
 
 

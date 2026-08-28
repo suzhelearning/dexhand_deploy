@@ -71,3 +71,35 @@ git diff --check
 - 未修改 `ArmIkSolver`、coordinator 状态机或 MuJoCo executor；本任务通过 canonical proposal 接入已有实现。完整 router/ACL、launcher process lifecycle、session HDF5、replay、Wuji/Marvin 和 validation 工具属于批准计划的其它 Task。
 - 未执行 project-wide build/lint/full suite；按任务要求只运行 policy/coordinator/headless focused tests、`py_compile` 与 `git diff --check`。
 - 未进行真实 Marvin/Wuji/PICO/Motive 物理验收；需由操作者按 validation runbook 采集设备证据。
+
+## Round 1 修复与证据
+
+- 修复 CMake `install(PROGRAMS ...)` 的 `DESTINATION lib/${PROJECT_NAME}`。
+- 修复 source checkout 与 installed bundle 的 policy/coordinator config 路径。
+- `ObservationBuilder` 以 `(executor publisher_instance_id, sequence)` 识别重复 frame；fresh duplicate 复用最近 observation，不再因 `delta_ns=0` 错误降级。
+- 修复 arm target 身份读取为 `ArmTargetCommand.envelope.*`，并保留 target sequence。
+- `PolicyProducerNode` 对 coordinator instance、SessionState identity/sequence/malformed 做 fail-closed；非法快照清掉 teleop state，直到接受新权威快照或重启。
+
+命令：
+
+```text
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_policy_producer tests.test_arm_coordinator tests.test_task5_executor_contract -q
+```
+
+实际输出：
+
+```text
+Ran 47 tests in 0.130s
+OK
+```
+
+配置路径 smoke：
+
+```text
+PYTHONPATH=src/pico_body_tianji pixi run python -c 'from pico_body_tianji.producers.policy.contracts import ActionAdapter; print(ActionAdapter().maximum_step_rad)'
+0.0132645022
+PYTHONPATH=src/pico_body_tianji pixi run python -c 'from pico_body_tianji.producers.policy.node import _load_policy_config; print(_load_policy_config())'
+{'policy': 'hold', 'rate_hz': 90.0, 'stale_timeout_s': 0.2, 'maximum_step_rad': 0.0132645022, 'capabilities': ['simulation']}
+```
+
+另行运行 `py_compile` 与 `git diff --check` 均无输出且成功。

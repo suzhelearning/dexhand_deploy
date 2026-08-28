@@ -114,6 +114,7 @@ class ObservationBuilder:
         self.velocity_interval_ns = int(float(velocity_interval_s) * 1e9)
         self.clock = clock
         self._previous: ArmJointState | None = None
+        self._previous_token: tuple[str, int] | None = None
         self._last_observation: PolicyObservation | None = None
         self._last_reason = "not observed"
 
@@ -131,6 +132,7 @@ class ObservationBuilder:
 
     def reset(self) -> None:
         self._previous = None
+        self._previous_token = None
         self._last_observation = None
         self._last_reason = "reset"
 
@@ -153,13 +155,16 @@ class ObservationBuilder:
         state = self._coerce_state(joint_state)
         now = int(self.clock() if now_ns is None else now_ns)
         age = now - int(state.timestamp_ns)
-        # A future timestamp is not a fresh state: accepting it would make an
-        # untrusted producer control the local freshness clock.
+        token = (state.publisher_instance_id, state.sequence)
         if age < 0 or age > self.stale_timeout_ns:
             self._last_observation = None
             self._last_reason = f"state stale (age_ns={age})"
             self._previous = state
+            self._previous_token = token
             return None
+        if token == self._previous_token and self._last_observation is not None:
+            self._last_reason = "ready (repeated state frame)"
+            return self._last_observation
 
         velocity = state.velocity_rad_s
         if velocity is None:
@@ -168,12 +173,14 @@ class ObservationBuilder:
                 self._last_observation = None
                 self._last_reason = "velocity unavailable; need adjacent state"
                 self._previous = state
+                self._previous_token = token
                 return None
             delta_ns = int(state.timestamp_ns) - int(previous.timestamp_ns)
             if delta_ns <= 0 or delta_ns > self.velocity_interval_ns:
                 self._last_observation = None
                 self._last_reason = f"velocity interval invalid ({delta_ns} ns)"
                 self._previous = state
+                self._previous_token = token
                 return None
             velocity = [
                 (float(current) - float(old)) / (delta_ns / 1e9)
@@ -183,6 +190,7 @@ class ObservationBuilder:
                 self._last_observation = None
                 self._last_reason = "estimated velocity is non-finite"
                 self._previous = state
+                self._previous_token = token
                 return None
             state = replace(state, velocity_rad_s=velocity)
 
@@ -192,11 +200,13 @@ class ObservationBuilder:
             self._last_observation = None
             self._last_reason = "joint position is malformed"
             self._previous = state
+            self._previous_token = token
             return None
         if len(velocity) != 14 or not all(math.isfinite(x) for x in velocity):
             self._last_observation = None
             self._last_reason = "joint velocity is malformed"
             self._previous = state
+            self._previous_token = token
             return None
 
         if arm_targets is not None:
@@ -204,6 +214,7 @@ class ObservationBuilder:
         observation = PolicyObservation(state, arm_targets, session_state)
         self._previous = state
         self._last_observation = observation
+        self._previous_token = token
         self._last_reason = "ready"
         return observation
 
@@ -256,7 +267,11 @@ class ActionAdapter:
 
     @staticmethod
     def _load_default_step() -> float:
-        path = Path(__file__).resolve().parents[4] / "src" / "pico_body_tianji" / "config" / "coordinator" / "arm.yaml"
+        bundle_root = os.environ.get("PICO_BODY_TIANJI_BUNDLE_ROOT")
+        if bundle_root:
+            path = Path(bundle_root) / "runtime" / "pico_body_tianji" / "share" / "pico_body_tianji" / "config" / "coordinator" / "arm.yaml"
+        else:
+            path = Path(__file__).resolve().parents[5] / "src" / "pico_body_tianji" / "config" / "coordinator" / "arm.yaml"
         try:
             import yaml
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
