@@ -84,7 +84,7 @@ public:
     if (integer_field("schema_version") != 1) throw std::invalid_argument("unsupported arm target schema");
     Target target;
     target.instance = string_field("publisher_instance_id");
-    target.router = string_field("router_zid");
+    (void)string_field("source");
     target.side = string_field("side");
     target.frame = string_field("frame_id");
     target.sequence = integer_field("sequence");
@@ -119,7 +119,32 @@ private:
       if (end == text_.size()) throw std::invalid_argument("unterminated string " + field);
       return text_.substr(begin, end - begin + 1);
     }
+    if (text_[begin] == '[' || text_[begin] == '{') {
+      const char opening = text_[begin];
+      const char closing = opening == '[' ? ']' : '}';
+      int depth = 0;
+      bool quoted = false;
+      bool escaped = false;
+      for (end = begin; end < text_.size(); ++end) {
+        const char c = text_[end];
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (c == '\\') escaped = true;
+          else if (c == '"') quoted = false;
+        } else if (c == '"') {
+          quoted = true;
+        } else if (c == opening) {
+          ++depth;
+        } else if (c == closing && --depth == 0) {
+          ++end;
+          break;
+        }
+      }
+      if (depth != 0) throw std::invalid_argument("unterminated array " + field);
+      return text_.substr(begin, end - begin);
+    }
     while (end < text_.size() && text_[end] != ',' && text_[end] != '}') ++end;
+    while (end > begin && std::isspace(static_cast<unsigned char>(text_[end - 1]))) --end;
     return text_.substr(begin, end - begin);
   }
 
@@ -220,7 +245,8 @@ public:
     }
     command_subscriber_ = session_.declare_subscriber(
       "tianji/command/arm/**", [this](const zenoh::Sample &sample) { on_command(sample.get_payload().as_string()); }, []() {});
-    status_publisher_ = session_.declare_publisher(zenoh::KeyExpr("tianji/producer/status"));
+    liveliness_token_ = session_.liveliness_declare_token(zenoh::KeyExpr("tj/live/producer/arm/arm_ik_producer/" + instance_));
+    publish_status("");
   }
 
   void run() {
@@ -234,8 +260,15 @@ private:
   void on_target(std::size_t index, const std::string &payload) {
     try {
       auto parsed = JsonTargetParser(payload).parse();
+      const std::string expected_side = index == 0 ? "left" : "right";
+      if (parsed.side != expected_side) throw std::invalid_argument("target side does not match topic");
       if (parsed.router != router_) throw std::invalid_argument("target router mismatch");
+      if (parsed.timestamp_ns > now_ns()) throw std::invalid_argument("target timestamp is in the future");
       std::lock_guard<std::mutex> lock(mutex_);
+      if (last_target_sequence_[index].has_value() && parsed.sequence <= *last_target_sequence_[index]) {
+        throw std::invalid_argument("target sequence rollback");
+      }
+      last_target_sequence_[index] = parsed.sequence;
       targets_[index] = std::move(parsed);
     } catch (const std::exception &error) {
       publish_status(std::string("target rejected: ") + error.what());
@@ -268,6 +301,7 @@ private:
   }
 
   void tick() {
+    publish_status("");
     std::lock_guard<std::mutex> lock(mutex_);
     for (std::size_t index = 0; index < 2; ++index) {
       if (!targets_[index].has_value()) continue;
@@ -304,9 +338,11 @@ private:
   IkSettings settings_{};
   std::unique_ptr<ArmIkSolver> solver_;
   std::array<std::optional<zenoh::Publisher>, 2> proposal_publishers_;
+  std::array<std::optional<std::uint64_t>, 2> last_target_sequence_;
   std::array<std::optional<zenoh::Publisher>, 2> solved_publishers_;
   std::array<std::optional<zenoh::Subscriber<void>>, 2> target_subscribers_;
   std::optional<zenoh::Subscriber<void>> command_subscriber_;
+  std::optional<zenoh::LivelinessToken> liveliness_token_;
   std::optional<zenoh::Publisher> status_publisher_;
   std::array<std::optional<Target>, 2> targets_;
   std::array<ArmJointVector, 2> current_{ArmJointVector::Zero(), ArmJointVector::Zero()};

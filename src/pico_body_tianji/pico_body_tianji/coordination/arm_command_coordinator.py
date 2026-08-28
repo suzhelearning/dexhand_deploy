@@ -136,6 +136,7 @@ class ArmCommandCoordinator:
         self._hand_status: dict[str, _Timed] = {}
         self._hand_state: dict[str, _Timed] = {}
         self._return_started_ns: int | None = None
+        self._return_start_command: dict[str, list[float]] | None = None
         self._safe_command = {"left": list(self.robot.left_home_rad), "right": list(self.robot.right_home_rad)}
         self._fault_reason: str | None = None
         self._publishers: dict[str, Any] = {}
@@ -202,6 +203,9 @@ class ArmCommandCoordinator:
         if len(entries) != 1:
             return False
         status = entries[0].value
+        expected = self.profile.get("authorities", {}).get(role, {}) if isinstance(self.profile.get("authorities", {}), Mapping) else {}
+        if expected and (status.component_id != expected.get("logical_id") or status.publisher_instance_id != expected.get("publisher_instance_id") or status.router_zid != expected.get("router_zid", self.router_zid)):
+            return False
         return status.ready and status.healthy and self.profile.get("required_capability", "simulation") in status.capabilities
 
     def update_component(self, status: ComponentStatus | Mapping[str, Any], *, received_ns: int | None = None) -> None:
@@ -214,8 +218,12 @@ class ArmCommandCoordinator:
             self._enter_fault("component router_zid mismatch")
             return
         key = (parsed.component_role, parsed.component_id)
-        previous = self._role_instances.get(key)
-        if previous is not None and previous != parsed.publisher_instance_id:
+        previous = self._statuses.get(key)
+        if previous is not None and parsed.sequence <= previous.value.sequence:
+            self._enter_fault(f"component sequence rollback for {parsed.component_role}/{parsed.component_id}")
+            return
+        previous_instance = self._role_instances.get(key)
+        if previous_instance is not None and previous_instance != parsed.publisher_instance_id:
             self._enter_fault(f"duplicate authority for {parsed.component_role}/{parsed.component_id}")
             return
         self._role_instances[key] = parsed.publisher_instance_id
@@ -269,8 +277,9 @@ class ArmCommandCoordinator:
             self._enter_fault("arm proposal identity mismatch")
             return False
         role = ("producer_arm", parsed.producer)
-        if role not in self._statuses:
-            self._enter_fault("proposal producer is not registered")
+        status_timed = self._statuses.get(role)
+        if status_timed is None or status_timed.value.publisher_instance_id != parsed.publisher_instance_id or status_timed.value.router_zid != parsed.router_zid:
+            self._enter_fault("proposal producer authority mismatch")
             return False
         old = self._proposals.get(parsed.side)
         if old is not None and parsed.sequence <= old.value.sequence:
@@ -330,6 +339,14 @@ class ArmCommandCoordinator:
     def handle_intent(self, intent: Any) -> IntentResult:
         action, sequence, reason = getattr(intent, "action", None), getattr(intent, "sequence", None), getattr(intent, "reason", "")
         now_ns = self.clock()
+        if self._state.state == "fault":
+            rejected = self._make_state("fault", self._fault_reason or "fault latched", sequence)
+            self._publish("state", rejected.to_dict())
+            return IntentResult(False, rejected, "fault latched; restart required")
+        if action == "start" and self._state.state != "idle":
+            rejected = self._make_state(self._state.state, "start requires idle", sequence)
+            self._publish("state", rejected.to_dict())
+            return IntentResult(False, rejected, "start requires idle")
         if action == "start":
             ready, why = self._start_ready(now_ns)
             if not ready:
@@ -347,6 +364,7 @@ class ArmCommandCoordinator:
         if action in ("return", "shutdown"):
             self._sequence += 1
             self._return_started_ns = now_ns
+            self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
             self._state = self._make_state("returning", reason or action, sequence)
             self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
             self._publish("state", self._state.to_dict())
@@ -359,6 +377,7 @@ class ArmCommandCoordinator:
             return
         self._sequence += 1
         self._return_started_ns = now_ns
+        self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
         self._state = self._make_state("returning", reason, self._state.intent_sequence)
         self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
 
@@ -376,21 +395,32 @@ class ArmCommandCoordinator:
 
     def _enter_fault(self, reason: str) -> None:
         self._fault_reason = reason
+        if self._return_start_command is None:
+            self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
+        if self._return_started_ns is None:
+            self._return_started_ns = self.clock()
         if self._state.state != "fault":
             self._sequence += 1
             self._state = self._make_state("fault", reason, self._state.intent_sequence)
             self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
-
     def _command(self, side: str, sequence: int, timestamp_ns: int) -> ArmJointCommand:
         mode = "teleop" if self._state.state == "teleop" else ("idle" if self._state.state == "idle" else "returning")
         proposal = self._proposals.get(side)
         proposal_seq = target_seq = None
-        position = list(getattr(self.robot, f"{side}_home_rad"))
+        home = list(getattr(self.robot, f"{side}_home_rad"))
+        position = home
         if mode == "teleop" and side in set(self.profile.get("active_sides", ("left", "right"))):
             if proposal is not None and self._fresh(proposal, timestamp_ns):
                 candidate = proposal.value
                 position = list(candidate.position_rad)
                 proposal_seq, target_seq = candidate.sequence, candidate.target_sequence
+        elif mode == "returning":
+            start = (self._return_start_command or self._safe_command)[side]
+            elapsed = max(0.0, (timestamp_ns - (self._return_started_ns or timestamp_ns)) / 1e9)
+            distance = max(abs(x - y) for x, y in zip(start, home))
+            duration = max(self.config["home_minimum_duration_s"], distance / self.config["home_max_speed_rad_s"])
+            fraction = min(1.0, elapsed / duration)
+            position = [x + fraction * (y - x) for x, y in zip(start, home)]
         self._safe_command[side] = position
         return ArmJointCommand(1, sequence, timestamp_ns, "coordinator", side, mode, proposal_seq, target_seq, list(ARM_JOINT_NAMES[side]), position, self.publisher_instance_id, self.router_zid)
 
@@ -408,6 +438,26 @@ class ArmCommandCoordinator:
                 return
             if any(abs(x - old) > self.config["maximum_command_step_rad"] for x, old in zip(candidate.position_rad, self._safe_command[side])):
                 self._enter_fault("proposal exceeds maximum command step")
+    def _check_teleop_health(self, now_ns: int) -> None:
+        if self._state.state != "teleop":
+            return
+        for role in ("source", "producer_arm"):
+            if not self._domain_ready(role, now_ns):
+                self._enter_returning(f"{role} stale or unhealthy", now_ns)
+                return
+        if not self._domain_ready("executor_arm", now_ns) or not self._fresh(self._arm_state, now_ns):
+            self._enter_fault("executor arm/state stale or unhealthy")
+            return
+        if self._hand_enabled():
+            if not self._domain_ready("producer_hand", now_ns):
+                self._enter_returning("producer_hand stale or unhealthy", now_ns)
+                return
+            if not all(self._fresh(self._hand_status.get(side), now_ns) and self._hand_status[side].value.healthy for side in self.profile.get("hand_sides", ("left", "right"))):
+                self._enter_fault("hand executor status stale or unhealthy")
+                return
+        for side in self.profile.get("active_sides", ("left", "right")):
+            if not self._fresh(self._proposals.get(side), now_ns):
+                self._enter_returning("arm proposal timeout", now_ns)
                 return
 
     def tick(self, *, now_ns: int | None = None) -> dict[str, ArmJointCommand]:
@@ -425,21 +475,18 @@ class ArmCommandCoordinator:
         self._sequence += 1
         timestamp_ns = now_ns
         commands = {side: self._command(side, self._sequence, timestamp_ns) for side in ("left", "right")}
-        if self._state.state == "returning" and self._return_ready(now_ns):
+        if self._state.state == "returning" and self._return_ready(now_ns) and all(command.position_rad == list(getattr(self.robot, f"{side}_home_rad")) for side, command in commands.items()):
             self._state = self._make_state("idle", "return complete", self._state.intent_sequence)
             self._at_home = LatchedBool(1, self._sequence, timestamp_ns, True, self.publisher_instance_id, self.router_zid)
             self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, True, self.publisher_instance_id, self.router_zid)
         else:
-            self._at_home = LatchedBool(1, self._sequence, timestamp_ns, self._state.state == "idle", self.publisher_instance_id, self.router_zid)
-        self._state = SessionState(1, self._sequence, timestamp_ns, self._state.state, self._state.reason, "coordinator", self._state.intent_sequence, self.publisher_instance_id, self.router_zid)
-        for side, command in commands.items():
-            self._publish(side, command.to_dict())
-        self._publish("state", self._state.to_dict())
-        self._publish("home", self._at_home.to_dict())
-        self._publish("complete", self._return_complete.to_dict())
+            self._at_home = LatchedBool(1, self._sequence, timestamp_ns, all(command.position_rad == list(getattr(self.robot, f"{side}_home_rad")) for side, command in commands.items()), self.publisher_instance_id, self.router_zid)
+            if not self._return_complete.value:
+                self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, False, self.publisher_instance_id, self.router_zid)
         return commands
+
     def start(self) -> None:
-        """订阅 intent/status/state/proposal，再以 control rate 驱动 tick。"""
+        """订阅所有 authority 输入后，以 coordinator control rate 刷新输出。"""
         if self.session is None:
             raise RuntimeError("coordinator requires a Zenoh session")
         callbacks = [
@@ -450,6 +497,10 @@ class ArmCommandCoordinator:
             (topics.ARM_STATE, self._on_arm_state_payload),
             (topics.ARM_PROPOSAL.format(side="left"), self._on_proposal_payload),
             (topics.ARM_PROPOSAL.format(side="right"), self._on_proposal_payload),
+            (topics.HAND_EXECUTOR_STATUS.format(side="left"), self._on_hand_executor_status_payload),
+            (topics.HAND_EXECUTOR_STATUS.format(side="right"), self._on_hand_executor_status_payload),
+            (topics.HAND_STATE.format(side="left"), self._on_hand_state_payload),
+            (topics.HAND_STATE.format(side="right"), self._on_hand_state_payload),
         ]
         resources = [self.session.declare_subscriber(key, callback) for key, callback in callbacks]
         try:
@@ -465,38 +516,58 @@ class ArmCommandCoordinator:
                 except Exception:
                     pass
 
-    def _payload(self, sample: Any) -> Mapping[str, Any] | None:
+    def _payload(self, sample: Any) -> Mapping[str, Any]:
         payload = getattr(sample, "payload", sample)
         if isinstance(payload, Mapping):
             return payload
-        if isinstance(payload, (bytes, bytearray, memoryview)):
-            value = json.loads(bytes(payload).decode("utf-8"))
-            return value if isinstance(value, Mapping) else None
-        return None
+        try:
+            raw = bytes(payload)
+        except (TypeError, ValueError) as exc:
+            raise ProtocolError("Zenoh sample payload is not bytes-like") from exc
+        if not raw:
+            raise ProtocolError("empty Zenoh sample payload")
+        value = json.loads(raw.decode("utf-8"))
+        if not isinstance(value, Mapping):
+            raise ProtocolError("wire payload must be a JSON object")
+        return value
 
     def _on_intent_payload(self, sample: Any) -> None:
-        payload = self._payload(sample)
-        if payload is not None:
-            try:
-                from ..protocol.messages import SessionIntent
-                self.handle_intent(SessionIntent.from_dict(payload))
-            except (ProtocolError, TypeError, ValueError):
-                self._enter_fault("malformed session intent")
+        try:
+            payload = self._payload(sample)
+            from ..protocol.messages import SessionIntent
+            self.handle_intent(SessionIntent.from_dict(payload))
+        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+            self._enter_fault("malformed session intent")
 
+
+    def _on_hand_executor_status_payload(self, sample: Any) -> None:
+        try:
+            self.update_hand_executor_status(self._payload(sample))
+        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+            self._enter_fault("malformed hand executor status")
+
+    def _on_hand_state_payload(self, sample: Any) -> None:
+        try:
+            self.update_hand_state(self._payload(sample))
+        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+            self._enter_fault("malformed hand state")
     def _on_component_payload(self, sample: Any) -> None:
-        payload = self._payload(sample)
-        if payload is not None:
-            self.update_component(payload)
+        try:
+            self.update_component(self._payload(sample))
+        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+            self._enter_fault("malformed component status")
 
     def _on_arm_state_payload(self, sample: Any) -> None:
-        payload = self._payload(sample)
-        if payload is not None:
-            self.update_arm_state(payload)
+        try:
+            self.update_arm_state(self._payload(sample))
+        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+            self._enter_fault("malformed arm state")
 
     def _on_proposal_payload(self, sample: Any) -> None:
-        payload = self._payload(sample)
-        if payload is not None:
-            self.update_proposal(payload)
+        try:
+            self.update_proposal(self._payload(sample))
+        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+            self._enter_fault("malformed arm proposal")
 
     def close(self) -> None:
         for item in (*self._publishers.values(), *self._queryables):

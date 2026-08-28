@@ -34,3 +34,14 @@
 - C++ producer 当前使用轻量 canonical JSON parser/Zenoh wiring，未完成跨语言 process-level router smoke；需要后续正式 protocol fixture 与 managed ACL router 验证。
 - hand producer/status 的完整 profile exactly-one 与执行器重连闭环仍需 Task 5/8 进程级验证；Python coordinator 已提供 typed hand gate 基础。
 - 历史 H5 1035-line parity 仍按 Task 3 裁决由 Task 10 扩展，未在本 focused 范围宣称完整回归。
+
+## Fix round 1
+
+- 修复 coordinator 对真实 `zenoh.Sample.payload` 的 bytes 解包；dispatch 对 intent/status/arm state/proposal 及 hand status/state 均接入，解码失败进入 fault，不再静默丢消息。
+- IK producer 增加 canonical target 数组边界解析、schema/source/side/frame/future-time/sequence 校验；按 rate 发布 healthy/ready typed status，并声明 producer liveliness token。
+- coordinator 增加 bounded Home 轨迹（`home_minimum_duration_s` 与 `home_max_speed_rad_s`）、fault latch（fault 中 intent 不得解除、fault 不 complete）、executor/state stale fault 与 hand producer return 分流；补充 authority instance 与 sequence 检查。
+- 修正 return-complete latch 在普通 idle/teleop tick 的 sequence 刷新，避免合法 channel snapshot 被 sequence=0 永久拒绝；新增 hand dispatch callback。
+- 实际命令与输出：
+  1. `pixi run bash -lc 'source scripts/common.sh && activate_bundle_runtime && python -m unittest tests.test_arm_coordinator'` → `Ran 10 tests ... OK`。
+  2. `pixi run -e ik-build bash -lc 'cmake --build build/ik --target arm_ik_producer --parallel 4'` → `Built target arm_ik_producer`。
+- 尚未完成：C++ 仍需后续替换为仓库统一正式 JSON parser/完整 cross-language process fixture；HostReadiness 对 Marvin 的生产调用、非默认 router SessionInfo exactly-one、所有历史 launcher/runtime 调用点和完整 hand/executor process smoke 仍需后续修复。

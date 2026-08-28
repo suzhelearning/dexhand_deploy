@@ -98,6 +98,7 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
 
     def test_invalid_proposal_latches_fault_and_returns_bounded_home(self):
         self.coordinator._state = self.coordinator._make_state("teleop", "active", 1)
+        self.coordinator._safe_command["right"] = [x + 0.4 for x in self.coordinator.robot.right_home_rad]
         # Protocol rejects NaN before coordinator; direct malformed ingress is faulted.
         self.coordinator.handle_proposal_dict({"schema_version": 1, "sequence": 3,
             "timestamp_ns": 1_000_000_000, "producer": "ik", "side": "right",
@@ -107,13 +108,15 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
         self.assertEqual(self.coordinator.state.state, "fault")
         command = self.coordinator.tick()["right"]
         self.assertEqual(command.mode, "returning")
-        self.assertEqual(command.position_rad, list(self.coordinator.robot.right_home_rad))
+        self.assertNotEqual(command.position_rad, list(self.coordinator.robot.right_home_rad))
 
     def test_stale_proposal_enters_bounded_returning(self):
         self.coordinator._state = self.coordinator._make_state("teleop", "active", 2)
+        self.coordinator._safe_command["right"] = [x + 0.4 for x in self.coordinator.robot.right_home_rad]
         self.coordinator.update_component(_status("source", "src", 1_000_000_000))
         self.coordinator.update_component(_status("producer_arm", "ik", 1_000_000_000))
         self.coordinator.update_component(_status("executor_arm", "mujoco", 1_000_000_000))
+        self.coordinator.update_arm_state(_arm_state(1_000_000_000, self.coordinator.robot.home_all))
         commands = self.coordinator.tick(now_ns=2_000_000_000)
         self.assertEqual(self.coordinator.state.state, "returning")
         self.assertTrue(all(command.mode == "returning" for command in commands.values()))
