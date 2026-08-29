@@ -686,6 +686,7 @@ def main() -> int:
     session = open_session(endpoint)
     router = require_single_router(session, router)
     hand_mode = os.environ.get("TIANJI_HAND_MODE", "disabled")
+    coordinator_config = os.environ.get("TIANJI_COORDINATOR_CONFIG")
     node = ArmCommandCoordinator(
         session,
         publisher_instance_id=instance,
@@ -697,6 +698,7 @@ def main() -> int:
             "hand_enabled": hand_mode != "disabled",
             "hand_sides": tuple(filter(None, os.environ.get("TIANJI_ACTIVE_HAND_SIDES", os.environ.get("TIANJI_ACTIVE_SIDES", "left,right")).split(","))),
         },
+        coordinator_config=coordinator_config,
     )
     try:
         node.start()

@@ -188,6 +188,10 @@ launch() {
   done
 }
 base_env=("TIANJI_ROUTER_ENDPOINT=${TIANJI_ROUTER_ENDPOINT}" "TIANJI_ROUTER_ZID=${TIANJI_ROUTER_ZID}" "TIANJI_COORDINATOR_INSTANCE_ID=${coordinator_id}" "TIANJI_RUN_ID=${run_id}" "TIANJI_REQUIRED_CAPABILITY=${required_capability}" "TIANJI_HAND_MODE=${hand_mode}" "TIANJI_HAND_PRODUCER_ID=${hand_producer_id}" "TIANJI_HAND_PRODUCER_INSTANCE_ID=${hand_producer_instance}" "TIANJI_ARM_PRODUCER_INSTANCE_ID=${arm_producer_instance}")
+if [[ -n "${record_path}" ]]; then
+  launch recorder "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="$(new_instance_id)" TIANJI_RECORD_PATH="${record_path}" TIANJI_RECORD_SOURCE_TYPE="${source_id}" python -m pico_body_tianji.recording.session_recorder
+fi
+launch coordinator "${base_env[@]}" TIANJI_COORDINATOR_INSTANCE_ID="${coordinator_id}" TIANJI_COORDINATOR_CONFIG="$(canonical_config "${coordinator_config}")" python "${BUNDLE_ROOT}/src/pico_body_tianji/scripts/arm_command_coordinator"
 source_args=("${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${source_instance}" TIANJI_SOURCE_INSTANCE_ID="${source_instance}" TIANJI_PRODUCER_INSTANCE_ID="${hand_producer_instance}" bash "${SCRIPT_DIR}/run_source.sh" --source "${source_id}" --config "$(canonical_config "${source_config}")")
 if [[ "${source_id}" == h5_replay ]]; then
   source_args+=(-- "${input_path}")

@@ -46,6 +46,7 @@ from .h5 import (
     load_mocap_h5,
     synthetic_reference_pose,
 )
+from .motive import MotiveFrame, MotiveFrameSource
 from ...protocol.messages import ArmSolvedPose, HAND_JOINT_NAMES, ProtocolError, ComponentStatus
 from ..common.real_admission import RealCapabilityInput, parse_real_capability
 from ...zenoh_util import (
@@ -1544,11 +1545,17 @@ class MocapH5ReplayNode:
                 diagnostics=diagnostics,
             )
             if self._direct_hand_status_pub is not None:
+                direct_ready = (
+                    self._deadman is not None
+                    and self._last_error is None
+                    and self._phase in {"armed", "start_pending", "approaching", "ready", "replaying", "returning"}
+                )
                 direct = ComponentStatus(
                     1, self._publisher.sequence, time.monotonic_ns(), "producer_hand", "h5_direct",
-                    self._phase, self._phase in {"armed", "start_pending", "ready", "replaying"},
-                    self._last_error is None, ["simulation"], self._last_error,
-                    {"mode": "direct"}, self._publisher.publisher_instance_id, self._publisher.router_zid,
+                    self._phase, direct_ready, self._last_error is None,
+                    ["simulation"] + (["real"] if real_ok else []), self._last_error,
+                    {"mode": "direct", "real_capability_error": real_reason},
+                    self._publisher.publisher_instance_id, self._publisher.router_zid,
                 )
                 self._direct_hand_status_pub.put_json(direct.to_dict())
 
