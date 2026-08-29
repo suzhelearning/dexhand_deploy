@@ -378,6 +378,26 @@ class Task5ExecutorContractTest(unittest.TestCase):
         self.assertIsNone(executor.arm_state.velocity_rad_s)
         self.assertTrue(any(topic == "tianji/executor/hand/left/status" for topic, _ in session.published))
         self.assertTrue(any(topic == "tianji/executor/hand/right/status" for topic, _ in session.published))
+    def test_mujoco_hand_overlay_consumes_commands_without_hand_authority(self):
+        session, model, data = _FakeSession(), _FakeModel(), _FakeData()
+        executor = MujocoExecutor(
+            session=session, model=model, data=data,
+            publisher_instance_id="mujoco", router_zid="router",
+            coordinator_instance_id="coord", hand_sides=("right",),
+            hand_overlay=True,
+        )
+        command = HandJointCommand(
+            1, 1, 1, "wuji_retarget_right", "right",
+            list(executor.hand_config.joint_names), [0.1] * 20, "wuji-instance", "router"
+        )
+        self.assertTrue(executor.on_hand_command(command))
+        executor.tick(now_ns=2)
+        self.assertTrue(np.allclose(data.qpos[34:54], 0.1))
+        published_topics = {topic for topic, _ in session.published}
+        self.assertNotIn("tianji/state/hand/right", published_topics)
+        self.assertNotIn("tianji/executor/hand/right/status", published_topics)
+        self.assertIn("tianji/executor/status", published_topics)
+
 
     def test_mujoco_safety_stop_freezes_qpos_and_requires_restart(self):
         session, model, data = _FakeSession(), _FakeModel(), _FakeData()

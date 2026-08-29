@@ -136,3 +136,52 @@ PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest \
 ```
 
 未完成/限制：未启动外部 acquisition ACL/router，未进行真实 H5/Marvin/Wuji/急停及 DISPLAY overlay 验收；上述两个旧 viewer 测试需后续迁移到 canonical diagnostics 入口。未运行 full suite、formatter 或 lint。
+
+## Round 5 final fix
+
+- `_matches_authority()` 现在按 `active_hand_sides`（兼容 `hand_sides`/`active_sides`）解析 side map；side-less `producer_hand` 的共享 `h5_direct`/`joint_replay` status 只接受 profile active side 已授权的完整 `(logical_id, publisher_instance_id, router_zid)`。coordinator 自身、source `SessionIntent` 和 arm `ArmJointState` 同样强制绑定完整 authorities map，伪造同 router 的 publisher 不会改变会话或 arm-state baseline。
+- `session_recorder` 将受管 SIGTERM/SIGINT 的正常退出与 flush/Zenoh/其他异常分离；异常路径调用 `abort()` 并重新抛出，HDF5 始终保持 `complete=false`，正常受管退出才 close 为 complete。
+- MuJoCo `hand_overlay` 实现为 arm executor 内的 passive hand command subscriber/qpos mapper：按 profile 启用 hand sides 和 GUI/headless render loop，但不声明或发布 hand state/status/liveliness authority；Wuji 仍是唯一 hand executor。
+- deploy/doctor 旧入口检查改为精确的 `pico_controller_input*`、`pico_link_probe*`、`mocap_keyboard_step*`、旧 viewer、`tianji_kinematic_sim*` 等；Python 同步排除旧包和 pycache，CMake 排除旧 package/config mode，deploy 明确清掉 staging/runtime 的旧 config 目录。canonical `pico_controller_source` 保留。
+- canonical diagnostics viewer 测试迁移到 `pico_body_tianji.diagnostics.mujoco_h5_wrist_replay`，保留坐标系回归和 passive viewer opt-in 覆盖；新增 shared producer、authority spoof、recorder exception、overlay no-duplicate 测试。
+
+Round 5 RED：
+
+```text
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest \
+  tests.test_arm_coordinator.ArmCommandCoordinatorAuthorityRound5Test \
+  tests.test_session_recorder.SessionRecorderTest.test_unexpected_flush_exception_aborts_and_keeps_recording_incomplete \
+  tests.test_task5_executor_contract.Task5ExecutorContractTest.test_mujoco_hand_overlay_consumes_commands_without_hand_authority \
+  tests.test_task8_config_launcher.Task8ConfigTreeTest.test_session_launcher_wires_authorities_and_enables_passive_mujoco_hand_overlay
+FAILED (failures=4, errors=1)
+```
+
+Round 5 GREEN / focused evidence：
+
+```text
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest \
+  tests.test_task8_config_launcher tests.test_session_recorder tests.test_arm_coordinator \
+  tests.test_task5_executor_contract tests.test_session_h5 tests.test_session_replay \
+  tests.test_h5_replay tests.test_mocap_h5_replay tests.test_mocap_h5_wrist_replay \
+  tests.test_mocap_h5 tests.test_task3_round4
+Ran 108 tests in 2.241s
+OK
+
+bash -n scripts/*.sh
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m py_compile <round5 affected modules>
+git diff --check
+# 全部通过
+
+pixi run -e ik-build cmake -S src/pico_body_tianji -B build/task8-cmake \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/staging/ik"
+pixi run -e ik-build cmake --build build/task8-cmake --parallel 2
+pixi run -e ik-build cmake --install build/task8-cmake
+# configure/build/install 全部通过；仅 Pinocchio/Boost CMP0167 开发警告
+
+TIANJI_OFFICIAL_SDK_ROOT="$PWD/runtime/tianji_official" \
+  bash scripts/deploy_ik_runtime.sh
+# 部署通过；canonical runtime/staging 同步，旧入口/config mode 清理，
+# RUNTIME_TREE_SHA256 重算
+```
+
+未完成/限制：仍未启动外部 acquisition ACL/router，未进行真实 H5、Marvin/Wuji、急停和 DISPLAY 物理验收；这些属于 Task9/人工设备检查点。未运行 formatter、lint 或 full suite。

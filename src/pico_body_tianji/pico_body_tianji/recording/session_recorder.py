@@ -50,9 +50,10 @@ def main() -> int:
     }
     for signum in old_handlers:
         signal.signal(signum, request_shutdown)
-    session = open_session()
+    session = None
     node = None
     try:
+        session = open_session()
         router = require_single_router(session, expected_router or None)
         node = SessionRecorderNode(
             session,
@@ -65,10 +66,32 @@ def main() -> int:
         )
         while not stop_event.wait(1.0):
             node.flush()
-    finally:
+        # Close the Zenoh session before committing complete=true. If closing
+        # transport fails, the exception path below aborts the HDF5 recording.
+        if session is not None:
+            session.close()
+            session = None
         if node is not None:
             node.close()
-        session.close()
+            node = None
+    except BaseException:
+        if node is not None:
+            try:
+                node.abort()
+            except BaseException:
+                pass
+        if session is not None:
+            try:
+                session.close()
+            except BaseException:
+                pass
+        raise
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except BaseException:
+                pass
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
     return 0

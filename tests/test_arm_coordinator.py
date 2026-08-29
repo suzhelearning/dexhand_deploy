@@ -9,6 +9,7 @@ from pico_body_tianji.protocol.messages import (
     ArmJointState,
     ComponentStatus,
     LatchedBool,
+    SessionIntent,
     SessionState,
 )
 from pico_body_tianji.coordination.arm_command_coordinator import ArmCommandCoordinator
@@ -159,6 +160,62 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
         self.assertGreater(self.coordinator.return_complete.sequence, first_sequence)
 
 
+class ArmCommandCoordinatorAuthorityRound5Test(unittest.TestCase):
+    def setUp(self):
+        disabled = {
+            "logical_id": "disabled",
+            "publisher_instance_id": "disabled",
+            "router_zid": "router-1",
+            "enabled": False,
+        }
+        self.authorities = {
+            "source": {"logical_id": "src", "publisher_instance_id": "src-instance", "router_zid": "router-1"},
+            "producer_arm": {"logical_id": "ik", "publisher_instance_id": "ik-instance", "router_zid": "router-1"},
+            "producer_hand": {
+                "left": {"logical_id": "h5_direct", "publisher_instance_id": "hand-instance", "router_zid": "router-1"},
+                "right": {"logical_id": "h5_direct", "publisher_instance_id": "hand-instance", "router_zid": "router-1"},
+            },
+            "coordinator_arm": {"logical_id": "arm", "publisher_instance_id": "coord-1", "router_zid": "router-1"},
+            "executor_arm": {"logical_id": "mujoco", "publisher_instance_id": "mujoco-instance", "router_zid": "router-1"},
+            "executor_hand": {"left": disabled, "right": disabled},
+        }
+        self.coordinator = ArmCommandCoordinator(
+            session=None,
+            publisher_instance_id="coord-1",
+            router_zid="router-1",
+            profile={
+                "active_sides": ["right"],
+                "active_hand_sides": ["left", "right"],
+                "hand_sides": ["left", "right"],
+                "required_capability": "simulation",
+                "authorities": self.authorities,
+            },
+            clock=lambda: 1_000_000_000,
+        )
+
+    def test_shared_side_less_hand_producer_matches_only_active_profile_sides(self):
+        self.assertTrue(self.coordinator._matches_authority(
+            "producer_hand", "h5_direct", "hand-instance", "router-1"
+        ))
+        self.assertTrue(self.coordinator._matches_authority(
+            "producer_hand", "h5_direct", "hand-instance", "router-1", side="right"
+        ))
+        self.assertFalse(self.coordinator._matches_authority(
+            "producer_hand", "h5_direct", "other-instance", "router-1"
+        ))
+
+    def test_foreign_same_router_intent_and_arm_state_are_rejected(self):
+        intent = SessionIntent(1, 1, 1_000_000_000, "src", "start", "forged", "foreign", "router-1")
+        result = self.coordinator.handle_intent(intent)
+        self.assertFalse(result.accepted)
+        self.assertNotEqual(self.coordinator.state.state, "teleop")
+        state = _arm_state(1_000_000_000, self.coordinator.robot.home_all)
+        forged_state = ArmJointState(
+            state.schema_version, state.sequence, state.timestamp_ns, state.executor,
+            state.names, state.position_rad, state.velocity_rad_s, "foreign", "router-1"
+        )
+        self.coordinator.update_arm_state(forged_state)
+        self.assertIsNone(self.coordinator._arm_state)
 from pico_body_tianji.connection_readiness import evaluate_connection, evaluate_fault_return, evaluate_start
 
 

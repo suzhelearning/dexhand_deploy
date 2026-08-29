@@ -247,8 +247,15 @@ install(
 install(
   DIRECTORY pico_body_tianji
   DESTINATION lib/python3.10/site-packages
+  PATTERN "full_body" EXCLUDE
+  PATTERN "controller_only" EXCLUDE
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
 )
 install(
   DIRECTORY assets config
   DESTINATION share/${PROJECT_NAME}
+  PATTERN "mode" EXCLUDE
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
 )

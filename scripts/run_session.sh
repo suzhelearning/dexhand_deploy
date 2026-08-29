@@ -298,8 +298,8 @@ fi
 source_args+=("${extra_args[@]}")
 launch_arm_executor() {
   local hand_args=()
-  if [[ "${hand_executor}" == mujoco && -n "${active_hand_sides}" ]]; then
-    hand_args+=(--hand-sides "${active_hand_sides}")
+  if [[ "${hand_overlay}" == mujoco && -n "${active_hand_sides}" ]]; then
+    hand_args+=(--hand-sides "${active_hand_sides}" --hand-overlay)
   else
     # Wuji is the sole hand executor authority for hand-enabled sim/replay.
     hand_args+=(--hand-sides "")

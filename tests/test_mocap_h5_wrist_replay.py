@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
-import sys
 import unittest
 
 import mujoco
@@ -14,23 +12,10 @@ from tianji_world_output.config_loader import get_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "src/pico_body_tianji/scripts"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
-
-
 def _load_replay_module():
-    path = SCRIPTS / "mujoco_h5_wrist_replay.py"
-    spec = importlib.util.spec_from_file_location(
-        "mujoco_h5_wrist_replay_test_module", path
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"无法加载回放脚本：{path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    from pico_body_tianji.diagnostics import mujoco_h5_wrist_replay
 
-
+    return mujoco_h5_wrist_replay
 class MocapH5WristReplayCoordinateTest(unittest.TestCase):
     def test_motive_world_axes_follow_config_not_marker_axes(self) -> None:
         replay = _load_replay_module()

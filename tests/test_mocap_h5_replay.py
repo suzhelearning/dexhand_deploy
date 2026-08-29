@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
-import logging
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -142,61 +138,23 @@ class H5TerminalRegressionTest(unittest.TestCase):
 
 
 class Frame0ViewerRegressionTest(unittest.TestCase):
-    @staticmethod
-    def _viewer_module():
-        path = (
-            Path(__file__).resolve().parents[1]
-            / "src/pico_body_tianji/scripts/mujoco_joint_viewer.py"
-        )
-        spec = importlib.util.spec_from_file_location("viewer_regression", path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"无法加载 viewer：{path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
+    def test_canonical_diagnostic_validate_only_is_passive(self) -> None:
+        from pico_body_tianji.diagnostics import mujoco_h5_wrist_replay as viewer
 
-    def test_apply_latest_consumes_canonical_target_and_solved(self) -> None:
-        viewer = self._viewer_module()
-        skeleton = viewer.FrameZeroHandSkeleton.__new__(
-            viewer.FrameZeroHandSkeleton
-        )
-        envelope = ProtocolEnvelope(1, "producer-instance", "router", 3, 4)
-        target = ArmTargetCommand(
-            envelope=envelope,
-            source_timestamp_ns=None,
-            source="mocap_h5_replay",
-            side="right",
-            frame_id="Base_R",
-            position_m=[0.1, 0.2, 0.3],
-            orientation_xyzw=[0.0, 0.0, 0.0, 1.0],
-            elbow_reference_direction=[0.0, 1.0, 0.0],
-        )
-        solved = ArmSolvedPose(
-            envelope=envelope,
-            producer="ik",
-            side="right",
-            frame_id="Base_R",
-            target_sequence=3,
-            position_m=[0.11, 0.2, 0.3],
-            orientation_xyzw=[0.0, 0.0, 0.0, 1.0],
-        )
-        skeleton._pending_target = target.to_dict()
-        skeleton._pending_solved = solved.to_dict()
-        self.assertTrue(skeleton._apply_pending_producer_messages())
-        np.testing.assert_allclose(
-            skeleton._target_tcp_pose_chest, [0.1, 0.2, 0.3, 0, 0, 0, 1]
-        )
-        np.testing.assert_allclose(
-            skeleton._solved_tcp_pose_chest, [0.11, 0.2, 0.3, 0, 0, 0, 1]
-        )
+        recording = SimpleNamespace(output_hz=60.0, summary=lambda: {"frames": 1})
+        with patch.object(viewer, "load_mocap_h5", return_value=recording):
+            with patch.object(viewer, "_run_viewer") as run_viewer:
+                self.assertEqual(viewer.main(["/tmp/input.h5", "--validate-only"]), 0)
+        run_viewer.assert_not_called()
 
-    def test_viewer_default_frame0_topic_is_canonical(self) -> None:
-        viewer = self._viewer_module()
-        with patch.object(viewer, "parse_cli_args", return_value=SimpleNamespace()):
-            # Static source contract is checked by the parser declaration below;
-            # direct topic value is part of the public viewer launcher contract.
-            self.assertIn("tianji/diagnostics/h5/frame0_hand_skeleton", viewer.topics.FRAME0_HAND_SKELETON)
+    def test_canonical_diagnostic_viewer_is_opt_in(self) -> None:
+        from pico_body_tianji.diagnostics import mujoco_h5_wrist_replay as viewer
 
+        recording = SimpleNamespace(output_hz=60.0, summary=lambda: {"frames": 1})
+        with patch.object(viewer, "load_mocap_h5", return_value=recording):
+            with patch.object(viewer, "_run_viewer") as run_viewer:
+                self.assertEqual(viewer.main(["/tmp/input.h5", "--viewer"]), 0)
+        run_viewer.assert_called_once_with(recording)
 
 if __name__ == "__main__":
     unittest.main()

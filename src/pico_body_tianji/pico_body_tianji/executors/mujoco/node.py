@@ -156,6 +156,7 @@ class MujocoExecutor:
         coordinator_instance_id: str,
         hand_config: WujiHandConfig | Mapping[str, Any] | str | os.PathLike[str] | None = None,
         hand_sides: tuple[str, ...] = SIDES,
+        hand_overlay: bool = False,
         run_id: str | None = None,
         safety_supervisor_instance_id: str | None = None,
         command_timeout_s: float = 0.2,
@@ -183,6 +184,7 @@ class MujocoExecutor:
             else WujiHandConfig.load(hand_config)
         )
         self.hand_sides = tuple(hand_sides)
+        self.hand_overlay = bool(hand_overlay)
         if any(side not in SIDES for side in self.hand_sides):
             raise ValueError("hand_sides must contain left/right")
         self._arm_addresses = {
@@ -303,9 +305,10 @@ class MujocoExecutor:
             "status": _declare_publisher(self.session, topics.EXECUTOR_STATUS),
             "safety_ack": _declare_publisher(self.session, topics.safety_ack(self.publisher_instance_id)),
         }
-        for side in self.hand_sides:
-            self._publishers[f"hand_state_{side}"] = _declare_publisher(self.session, topics.hand_state(side))
-            self._publishers[f"hand_status_{side}"] = _declare_publisher(self.session, topics.hand_executor_status(side))
+        if not self.hand_overlay:
+            for side in self.hand_sides:
+                self._publishers[f"hand_state_{side}"] = _declare_publisher(self.session, topics.hand_state(side))
+                self._publishers[f"hand_status_{side}"] = _declare_publisher(self.session, topics.hand_executor_status(side))
         if hasattr(self.session, "get"):
             self._query_coordinator_snapshot()
 
@@ -543,7 +546,7 @@ class MujocoExecutor:
         return ComponentStatus(
             1, self._status_sequence, int(self.clock()), "executor_arm", "mujoco",
             phase, ready and self._healthy, healthy and self._healthy, ["simulation"], self._last_error,
-            {"headless": True, "safety_locked": self._safety_locked},
+            {"headless": True, "safety_locked": self._safety_locked, "hand_overlay": self.hand_overlay},
             self.publisher_instance_id, self.router_zid,
         )
 
@@ -560,6 +563,8 @@ class MujocoExecutor:
             self._session_received_ns is not None
             and 0 <= now - self._session_received_ns <= self._snapshot_timeout_ns
         )
+        if self.hand_overlay:
+            return
         for side in self.hand_sides:
             state = self.hand_state(side)
             self._publish(f"hand_state_{side}", state.to_dict())
@@ -626,11 +631,23 @@ class MujocoExecutor:
         if rate_hz <= 0.0:
             raise ValueError("rate_hz must be positive")
         period = 1.0 / float(rate_hz)
-        next_tick = time.monotonic()
-        while True:
-            next_tick += period
-            self.tick()
-            time.sleep(max(0.0, next_tick - time.monotonic()))
+        if headless:
+            next_tick = time.monotonic()
+            while True:
+                next_tick += period
+                self.tick()
+                time.sleep(max(0.0, next_tick - time.monotonic()))
+            return
+        try:
+            import mujoco.viewer
+        except ImportError as exc:
+            raise RuntimeError("mujoco.viewer is required for the non-headless overlay") from exc
+        with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
+            while viewer.is_running():
+                started = time.monotonic()
+                self.tick()
+                viewer.sync()
+                time.sleep(max(0.0, period - (time.monotonic() - started)))
     def close(self) -> None:
         if self._liveliness_token is not None:
             try:
@@ -646,16 +663,15 @@ class MujocoExecutor:
                     pass
         self._subscriptions.clear()
         self._publishers.clear()
-
-
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="canonical MuJoCo executor")
     parser.add_argument("--headless", action="store_true", help="run without mujoco.viewer")
+    parser.add_argument("--hand-overlay", action="store_true", help="consume hand commands without publishing hand authority")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--urdf", type=Path, default=None)
     parser.add_argument("--rate", type=float, default=60.0)
     parser.add_argument("--run-id", default="")
-    parser.add_argument("--hand-sides", default=None, help="comma-separated hand sides; empty disables MuJoCo hand authority")
+    parser.add_argument("--hand-sides", default=None, help="comma-separated hand sides; empty disables MuJoCo hand overlay")
     parser.add_argument("--publisher-instance-id", default=os.environ.get("TIANJI_COMPONENT_INSTANCE_ID", "mujoco"))
     parser.add_argument("--coordinator-instance-id", default=os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID", "coordinator"))
     return parser.parse_args(argv)
@@ -678,6 +694,8 @@ def main(argv: list[str] | None = None) -> int:
             args.hand_sides = configured_sides
         else:
             args.hand_sides = ",".join(str(side) for side in configured_sides)
+    if not args.hand_overlay and configured.get("hand_overlay") == "mujoco":
+        args.hand_overlay = True
     hand_sides = tuple(side.strip() for side in str(args.hand_sides).split(",") if side.strip())
     if any(side not in SIDES for side in hand_sides):
         raise SystemExit("--hand-sides must contain only left/right")
@@ -699,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
             router_zid=router,
             coordinator_instance_id=args.coordinator_instance_id,
             hand_sides=hand_sides,
+            hand_overlay=args.hand_overlay,
             run_id=args.run_id or None,
             safety_supervisor_instance_id=os.environ.get("TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID"),
         )

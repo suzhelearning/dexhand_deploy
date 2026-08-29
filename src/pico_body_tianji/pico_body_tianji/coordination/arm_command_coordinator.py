@@ -131,6 +131,15 @@ class ArmCommandCoordinator:
             # Direct unit users may construct a coordinator without launcher
             # wiring; the production entry point always supplies this map.
             self.authorities = None
+        if self.authorities is not None:
+            coordinator_authority = self.authorities["coordinator_arm"]
+            if (
+                not coordinator_authority.get("enabled", True)
+                or coordinator_authority["logical_id"] != "arm"
+                or coordinator_authority["publisher_instance_id"] != publisher_instance_id
+                or coordinator_authority["router_zid"] != router_zid
+            ):
+                raise ValueError("coordinator identity does not match coordinator_arm authority")
         self.robot = robot_config if isinstance(robot_config, ArmRobotConfig) else (ArmRobotConfig.from_mapping(robot_config) if isinstance(robot_config, Mapping) else ArmRobotConfig.load(robot_config))
         self.config = self._coordinator_config(coordinator_config)
         self._sequence = 0
@@ -197,6 +206,24 @@ class ArmCommandCoordinator:
                 result[role] = identity(raw, role)
         return result
 
+    def _profile_hand_sides(self) -> tuple[str, ...]:
+        configured = self.profile.get(
+            "active_hand_sides",
+            self.profile.get("hand_sides", self.profile.get("active_sides", ("left", "right"))),
+        )
+        if isinstance(configured, str):
+            configured = configured.split(",")
+        return tuple(side for side in configured if side in ("left", "right"))
+
+    @staticmethod
+    def _identity_matches(expected: Mapping[str, Any], logical_id: str, instance: str, router: str) -> bool:
+        return (
+            bool(expected.get("enabled", True))
+            and logical_id == expected.get("logical_id")
+            and instance == expected.get("publisher_instance_id")
+            and router == expected.get("router_zid")
+        )
+
     def _expected_authority(self, role: str, side: str | None = None) -> Mapping[str, Any] | None:
         if self.authorities is None:
             return None
@@ -206,21 +233,31 @@ class ArmCommandCoordinator:
         return value if isinstance(value, Mapping) else None
 
     def _matches_authority(self, role: str, logical_id: str, instance: str, router: str, *, side: str | None = None) -> bool:
-        expected = self._expected_authority(role, side)
-        if expected is None and self.authorities is not None:
-            value = self.authorities.get(role)
-            if isinstance(value, Mapping) and "logical_id" not in value and side is None:
-                return any(
-                    self._matches_authority(role, logical_id, instance, router, side=candidate)
-                    for candidate in ("left", "right")
+        if self.authorities is None:
+            return True
+        value = self.authorities.get(role)
+        if (
+            role in {"producer_hand", "executor_hand"}
+            and isinstance(value, Mapping)
+            and "logical_id" not in value
+        ):
+            if side is not None:
+                expected = value.get(side)
+                return isinstance(expected, Mapping) and self._identity_matches(
+                    expected, logical_id, instance, router
                 )
-        if expected is None:
-            return self.authorities is None
-        return (
-            bool(expected.get("enabled", True))
-            and logical_id == expected.get("logical_id")
-            and instance == expected.get("publisher_instance_id")
-            and router == expected.get("router_zid")
+            # A shared ComponentStatus has no side on the wire. It is valid
+            # only when its identity is authorized for an active hand side;
+            # this allows h5_direct/JointReplay to publish once while keeping
+            # per-side executor authorities strict.
+            return any(
+                isinstance(expected := value.get(candidate), Mapping)
+                and self._identity_matches(expected, logical_id, instance, router)
+                for candidate in self._profile_hand_sides()
+            )
+        expected = self._expected_authority(role, side)
+        return isinstance(expected, Mapping) and self._identity_matches(
+            expected, logical_id, instance, router
         )
 
 
@@ -284,7 +321,7 @@ class ArmCommandCoordinator:
     def _domain_ready(self, role: str, now_ns: int) -> bool:
         side_map = self.authorities is not None and role in {"producer_hand", "executor_hand"} and isinstance(self.authorities.get(role), Mapping) and "logical_id" not in self.authorities[role]
         if side_map:
-            for side in tuple(self.profile.get("hand_sides", ("left", "right"))):
+            for side in self._profile_hand_sides():
                 expected = self._expected_authority(role, side)
                 matches = [
                     timed for (entry_role, entry_id), timed in self._statuses.items()
@@ -340,6 +377,11 @@ class ArmCommandCoordinator:
             return
         if parsed.router_zid != self.router_zid or tuple(parsed.names) != ALL_ARM_JOINT_NAMES:
             self._enter_fault("arm state identity/order mismatch")
+            return
+        if not self._matches_authority(
+            "executor_arm", parsed.executor, parsed.publisher_instance_id, parsed.router_zid
+        ):
+            self._enter_fault("arm state executor authority mismatch")
             return
         previous = self._arm_state
         if previous is not None:
@@ -465,10 +507,14 @@ class ArmCommandCoordinator:
         return all(abs(x - y) <= self.config["home_tolerance_rad"] for x, y in zip(self._arm_state.value.position_rad, self.robot.home_all))
 
     def _hand_enabled(self) -> bool:
-        return bool(self.profile.get("hand_enabled") or self.profile.get("hand_sides"))
+        return bool(
+            self.profile.get("hand_enabled")
+            or self.profile.get("active_hand_sides")
+            or self.profile.get("hand_sides")
+        )
 
     def _hand_at_zero_ready(self, now_ns: int) -> bool:
-        sides = tuple(self.profile.get("hand_sides", ("left", "right")))
+        sides = self._profile_hand_sides()
         tolerance = float(self.profile.get("zero_tolerance_rad", 0.05))
         for side in sides:
             status = self._hand_status.get(side)
@@ -483,7 +529,7 @@ class ArmCommandCoordinator:
 
     def _hand_tracking_fresh(self, now_ns: int) -> bool:
         """Require matching, fresh hand status and state while teleoperating."""
-        for side in tuple(self.profile.get("hand_sides", ("left", "right"))):
+        for side in self._profile_hand_sides():
             status = self._hand_status.get(side)
             state = self._hand_state.get(side)
             if not self._fresh(status, now_ns) or not self._fresh(state, now_ns):
@@ -518,8 +564,19 @@ class ArmCommandCoordinator:
         )
 
     def handle_intent(self, intent: Any) -> IntentResult:
-        action, sequence, reason = getattr(intent, "action", None), getattr(intent, "sequence", None), getattr(intent, "reason", "")
+        action = getattr(intent, "action", None)
+        sequence = getattr(intent, "sequence", None)
+        reason = getattr(intent, "reason", "")
+        source = getattr(intent, "source", None)
+        intent_instance = getattr(intent, "publisher_instance_id", None)
+        intent_router = getattr(intent, "router_zid", None)
         now_ns = self.clock()
+        if self.authorities is not None and not self._matches_authority(
+            "source", source, intent_instance, intent_router
+        ):
+            rejected = self._make_state(self._state.state, "intent source authority mismatch", sequence)
+            self._publish("state", rejected.to_dict())
+            return IntentResult(False, rejected, "intent source authority mismatch")
         if self._state.state == "fault":
             rejected = self._make_state("fault", self._fault_reason or "fault latched", sequence)
             self._publish("state", rejected.to_dict())
@@ -641,7 +698,7 @@ class ArmCommandCoordinator:
             if not self._domain_ready("producer_hand", now_ns):
                 self._enter_returning("producer_hand stale or unhealthy", now_ns)
                 return
-            if not all(self._fresh(self._hand_status.get(side), now_ns) and self._hand_status[side].value.healthy for side in self.profile.get("hand_sides", ("left", "right"))):
+            if not all(self._fresh(self._hand_status.get(side), now_ns) and self._hand_status[side].value.healthy for side in self._profile_hand_sides()):
                 self._enter_fault("hand executor status stale or unhealthy")
                 return
         for side in self.profile.get("active_sides", ("left", "right")):

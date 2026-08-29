@@ -75,12 +75,26 @@ class Task8ConfigTreeTest(unittest.TestCase):
                 self.assertIn(value["hand_overlay"], {"none", "mujoco"})
                 self.assertNotEqual(value["hand_executor"], value["hand_overlay"])
 
-    def test_session_launcher_wires_authorities_and_disables_mujoco_hand_overlay(self) -> None:
+    def test_session_launcher_wires_authorities_and_enables_passive_mujoco_hand_overlay(self) -> None:
         launcher = (SCRIPTS / "run_session.sh").read_text(encoding="utf-8")
         self.assertIn("TIANJI_AUTHORITIES", launcher)
         self.assertIn("TIANJI_RECORDING_CONFIG=", launcher)
-        self.assertIn('hand_args+=(--hand-sides "")', launcher)
+        self.assertIn('hand_args+=(--hand-sides "${active_hand_sides}" --hand-overlay)', launcher)
         self.assertIn('hand_executor}" == wuji_hand2', launcher)
+    def test_deploy_and_doctor_match_only_deleted_entries(self) -> None:
+        deploy = (SCRIPTS / "deploy_ik_runtime.sh").read_text(encoding="utf-8")
+        doctor = (SCRIPTS / "doctor.sh").read_text(encoding="utf-8")
+        for script in (deploy, doctor):
+            self.assertIn("pico_controller_input*", script)
+            self.assertIn("pico_link_probe*", script)
+            self.assertIn("mocap_keyboard_step*", script)
+            self.assertIn("tianji_kinematic_sim*", script)
+            self.assertNotIn('"/pico_controller_*"', script)
+        self.assertIn("pico_controller_source", doctor)
+        cmake = (ROOT / "src" / "pico_body_tianji" / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('PATTERN "full_body" EXCLUDE', cmake)
+        self.assertIn('PATTERN "controller_only" EXCLUDE', cmake)
+        self.assertIn("--delete-excluded", deploy)
 
 
 class Task8LauncherTest(unittest.TestCase):

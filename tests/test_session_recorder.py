@@ -138,6 +138,66 @@ class SessionRecorderTest(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.wait()
+    def test_unexpected_flush_exception_aborts_and_keeps_recording_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "marker.json"
+            config = Path(__file__).parents[1] / "src" / "pico_body_tianji" / "config" / "recording" / "session.yaml"
+            code = textwrap.dedent(
+                """
+                import json
+                import os
+                import pico_body_tianji.recording.session_recorder as module
+
+                marker = os.environ["MARKER"]
+                class FakeSession:
+                    def close(self):
+                        pass
+                class FakeNode:
+                    def __init__(self, *args, **kwargs):
+                        with open(marker, "w", encoding="utf-8") as handle:
+                            json.dump({"closed": False, "aborted": False}, handle)
+                    def flush(self):
+                        raise RuntimeError("flush failed")
+                    def close(self):
+                        with open(marker, "r+", encoding="utf-8") as handle:
+                            value = json.load(handle)
+                            value["closed"] = True
+                            handle.seek(0)
+                            json.dump(value, handle)
+                            handle.truncate()
+                    def abort(self):
+                        with open(marker, "r+", encoding="utf-8") as handle:
+                            value = json.load(handle)
+                            value["aborted"] = True
+                            handle.seek(0)
+                            json.dump(value, handle)
+                            handle.truncate()
+                module.open_session = lambda: FakeSession()
+                module.require_single_router = lambda session, expected: "router"
+                module.SessionRecorderNode = FakeNode
+                module.main()
+                """
+            )
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PYTHONPATH": str(Path(__file__).parents[1] / "src" / "pico_body_tianji")
+                    + os.pathsep
+                    + env.get("PYTHONPATH", ""),
+                    "TIANJI_RECORD_PATH": str(Path(directory) / "session.h5"),
+                    "TIANJI_RECORD_SOURCE_TYPE": "pico_controller",
+                    "TIANJI_COMPONENT_INSTANCE_ID": "recorder-instance",
+                    "TIANJI_ROUTER_ZID": "router",
+                    "TIANJI_RECORDING_CONFIG": str(config),
+                    "MARKER": str(marker),
+                }
+            )
+            process = subprocess.Popen([sys.executable, "-c", code], env=env)
+            process.wait(timeout=3)
+            value = json.loads(marker.read_text(encoding="utf-8"))
+            self.assertNotEqual(process.returncode, 0)
+            self.assertTrue(value["aborted"])
+            self.assertFalse(value["closed"])
 
 
 if __name__ == "__main__":

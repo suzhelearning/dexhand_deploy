@@ -34,6 +34,7 @@ SDK_LIBRARY="${SDK_SOURCE_ROOT}/kinematicsSDK/libKine.so"
 SDK_CONFIG="${SDK_SOURCE_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
 RUNTIME_SHARE="${BUNDLE_ROOT}/runtime/pico_body_tianji/share/pico_body_tianji"
 SOURCE_CONFIG="${BUNDLE_ROOT}/src/pico_body_tianji/config"
+STAGING_CONFIG="${BUNDLE_ROOT}/staging/ik/share/pico_body_tianji/config"
 RUNTIME_CONFIG="${RUNTIME_SHARE}/config"
 SOURCE_ASSETS="${BUNDLE_ROOT}/src/pico_body_tianji/assets"
 RUNTIME_ASSETS="${RUNTIME_SHARE}/assets"
@@ -73,10 +74,13 @@ shopt -s nullglob
 for cleanup_root in "${RUNTIME_BIN}" "${STAGING_BIN}"; do
   for stale in \
     "${cleanup_root}"/marvin_hardware_* \
-    "${cleanup_root}"/mocap_keyboard_* \
+    "${cleanup_root}"/controller_only* \
+    "${cleanup_root}"/pico_controller_input* \
+    "${cleanup_root}"/pico_link_probe* \
+    "${cleanup_root}"/mocap_keyboard_step* \
     "${cleanup_root}"/mujoco_joint_viewer* \
-    "${cleanup_root}"/controller_* \
-    "${cleanup_root}"/tianji_kinematic_*; do
+    "${cleanup_root}"/mujoco_h5_wrist_replay* \
+    "${cleanup_root}"/tianji_kinematic_sim*; do
     rm -f -- "${stale}"
   done
 done
@@ -117,7 +121,9 @@ mkdir -p \
   "${RUNTIME_ASSETS}"
 mkdir -p "${RUNTIME_PYTHON}" "${STAGING_PYTHON}"
 for python_root in "${RUNTIME_PYTHON}" "${STAGING_PYTHON}"; do
-  rsync -a --delete \
+  rsync -a --delete --delete-excluded \
+    --exclude '__pycache__/' --exclude '*.pyc' \
+    --exclude 'full_body/' --exclude 'controller_only/' \
     "${BUNDLE_ROOT}/src/pico_body_tianji/pico_body_tianji/" \
     "${python_root}/"
 done
@@ -180,6 +186,9 @@ done
 rsync -a --delete \
   "${SOURCE_CONFIG}/" \
   "${RUNTIME_CONFIG}/"
+for obsolete_config in "${STAGING_CONFIG}/mode" "${RUNTIME_CONFIG}/mode"; do
+  rm -rf -- "${obsolete_config}"
+done
 if ! diff -qr -- "${SOURCE_CONFIG}" "${RUNTIME_CONFIG}" >/dev/null; then
   printf '%s\n' '错误：src 与 runtime 的 config 目录部署后仍不一致。' >&2
   exit 1
