@@ -328,9 +328,14 @@ class MarvinExecutor:
                 # waiting.  It is safer to switch to the coordinator-owned
                 # bounded return path than to wait for source readiness.
                 if current_state == "fault":
-                    fault_reconnect = True
-                    bounded_reconnect = True
-                    break
+                    if self._readiness.fault_return_ready(now_ns=now):
+                        fault_reconnect = True
+                        bounded_reconnect = True
+                        break
+                    self._last_error = "fault reconnect requires fresh bounded returning command"
+                    time.sleep(0.02)
+                    now = int(self.clock())
+                    continue
                 if self._admission_ok() and self._readiness.connection_ready(now_ns=now):
                     break
                 if time.monotonic() >= deadline:
@@ -496,15 +501,34 @@ class MarvinExecutor:
     def _controlled_return(self, now_ns: int) -> None:
         if self._hardware is None or self._safety_locked:
             return
-        # The coordinator owns the bounded Home trajectory.  Marvin must not
-        # synthesize a direct Home step here: doing so would bypass the
-        # authority and let a stale/foreign state move the robot.
-        if not self._command_pair_fresh(int(now_ns)) or any(
-            command.mode != "returning" for command in self._commands.values()
+        if self._command_pair_fresh(int(now_ns)) and all(
+            command.mode == "returning" for command in self._commands.values()
         ):
-            self._last_error = "coordinator bounded returning command stale or missing"
+            self._send_commands(self._commands["left"], self._commands["right"])
             return
-        self._send_commands(self._commands["left"], self._commands["right"])
+        # Normal command/coordinator timeout has a local bounded-home
+        # failsafe.  A latched coordinator fault never uses this fallback.
+        if self._session_state is not None and self._session_state.state == "fault":
+            self._last_error = "fault-return command stale or missing"
+            return
+        if self._feedback is None:
+            self._last_error = "controlled return feedback unavailable"
+            return
+        current = np.concatenate([self._feedback.left_joints_deg, self._feedback.right_joints_deg])
+        home = np.degrees(np.asarray(self.robot.home_all, dtype=np.float64))
+        step = float(self.params["return_max_speed_deg_s"]) / self._rate_hz
+        target = current + np.clip(home - current, -step, step)
+        left = ArmJointCommand(
+            1, self._state_sequence, int(now_ns), "coordinator", "left",
+            "returning", None, None, list(ARM_JOINT_NAMES["left"]),
+            np.radians(target[:7]).tolist(), self.coordinator_instance_id, self.router_zid,
+        )
+        right = ArmJointCommand(
+            1, self._state_sequence, int(now_ns), "coordinator", "right",
+            "returning", None, None, list(ARM_JOINT_NAMES["right"]),
+            np.radians(target[7:]).tolist(), self.coordinator_instance_id, self.router_zid,
+        )
+        self._send_commands(left, right)
 
     def _trip_soft_stop(self, reason: str) -> None:
         self._last_error = reason

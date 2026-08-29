@@ -826,6 +826,48 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
     finally:
         if transport is not None:
             transport.close()
+    # Give executor callbacks one bounded control interval to publish their
+    # unhealthy/locked status.  Evidence is read from captured wire files;
+    # missing status or post-stop motion is recorded as a failed gate.
+    time.sleep(0.2)
+    def _records(name: str) -> list[dict[str, Any]]:
+        try:
+            return [
+                json.loads(line)
+                for line in (bundle / name).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except (OSError, json.JSONDecodeError, TypeError):
+            return []
+    status_rows = _records("status.jsonl")
+    protocol_rows = _records("protocol.jsonl")
+    executor_rows = {
+        executor_id: [
+            row for row in status_rows
+            if str(row.get("publisher_instance_id", "")) == executor_id
+            and row.get("component_role") in {"executor_arm", "executor_hand"}
+        ]
+        for executor_id in ids
+    }
+    unhealthy = all(any(row.get("healthy") is False for row in rows) for rows in executor_rows.values())
+    def _locked(row: Mapping[str, Any]) -> bool:
+        diagnostics = row.get("diagnostics")
+        diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+        return bool(
+            diagnostics.get("safety_locked") is True
+            or (row.get("tracking_allowed") is False and row.get("healthy") is False)
+        )
+    locked = all(any(_locked(row) for row in rows) for rows in executor_rows.values())
+    post_stop_motion = any(
+        str(row.get("topic", "")).startswith("tianji/command/")
+        and int(row.get("timestamp_ns", row.get("time_ns", 0))) > request.envelope.timestamp_ns
+        for row in protocol_rows
+    )
+    evidence = {
+        "same_tick_ack": result.accepted,
+        "unhealthy": unhealthy,
+        "no_motion_commands": not post_stop_motion,
+    }
     _write_status(
         status,
         event="safety_stop",
@@ -836,8 +878,9 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
         expected_executor_ids=ids,
         acked_executor_ids=list(result.acked_executor_ids),
         ack_complete=result.accepted,
-        new_motion_commands_after_stop=None,
-        lockout=True,
+        new_motion_commands_after_stop=post_stop_motion,
+        lockout=locked,
+        executor_safety_evidence=evidence,
     )
     if not result.accepted:
         _write_operator_event(

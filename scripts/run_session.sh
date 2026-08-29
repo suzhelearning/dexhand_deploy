@@ -318,6 +318,17 @@ base_env=(
   "TIANJI_ARM_PRODUCER_INSTANCE_ID=${arm_producer_instance}"
   "TIANJI_AUTHORITIES=${TIANJI_AUTHORITIES}"
 )
+if [[ "${required_capability}" == real ]]; then
+  # Real admission is process-issued and fail-closed.  Speed/yaw are fixed by
+  # the profile; deadman and preflight remain false unless an authorized
+  # launcher has supplied a typed result.
+  base_env+=(
+    "TIANJI_REAL_SPEED=${TIANJI_REAL_SPEED:-1}"
+    "TIANJI_REAL_YAW_DEG=${TIANJI_REAL_YAW_DEG:-nan}"
+    "TIANJI_REAL_DEADMAN_AVAILABLE=${TIANJI_REAL_DEADMAN_AVAILABLE:-0}"
+    "TIANJI_REAL_PREFLIGHT_PASSED=${TIANJI_REAL_PREFLIGHT_PASSED:-0}"
+  )
+fi
 if [[ -n "${record_path}" ]]; then
   launch recorder "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${recorder_instance}" TIANJI_RECORD_PATH="${record_path}" TIANJI_RECORD_SOURCE_TYPE="${source_id}" TIANJI_RECORDING_CONFIG="$(canonical_config recording/session.yaml)" python -m pico_body_tianji.recording.session_recorder
 fi

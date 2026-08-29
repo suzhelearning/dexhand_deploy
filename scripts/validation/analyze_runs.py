@@ -225,6 +225,8 @@ def _verify_capture(bundle: Path, manifest: Mapping[str, Any]) -> tuple[list[dic
             router = row.get("router_zid")
             if not router or router != manifest["router_zid"]:
                 raise AnalysisError(f"{name} router_zid is missing or differs from manifest")
+            if topic.startswith("tianji/") and _authority_for_row(row, manifest) is None:
+                raise AnalysisError(f"{name} publisher authority violation for {topic}")
     return captures["protocol.jsonl"], captures["liveliness.jsonl"]
 
 
@@ -403,17 +405,25 @@ def _h5_mask(group: Any, path: str, manifest: Mapping[str, Any]) -> np.ndarray:
     logical = group.attrs.get("logical_id")
     if isinstance(logical, bytes):
         logical = logical.decode()
-    if logical is not None and not any(str(authority["logical_id"]) == str(logical) for authority in authorities):
+    expected_logical = {str(authority["logical_id"]) for authority in authorities}
+    # Arm final-command wire producer is the coordinator; its launcher
+    # logical id is the arm-domain authority.
+    if role := next((authority.get("component_role") for authority in authorities), None):
+        if role == "coordinator_arm" and path.startswith("joint/command/arm"):
+            expected_logical.add("coordinator")
+    if logical is not None and str(logical) not in expected_logical:
         raise AnalysisError(f"HDF5 {path} logical authority mismatch")
     instances = np.asarray(group["publisher_instance_id"][:]) if "publisher_instance_id" in group else np.asarray([], dtype=object)
-    allowed = {str(authority["publisher_instance_id"]) for authority in authorities}
     values = np.asarray([
         value.decode() if isinstance(value, (bytes, np.bytes_)) else str(value)
         for value in instances
     ])
     if len(values) != count:
         raise AnalysisError(f"HDF5 {path} publisher identity length mismatch")
-    return np.isin(values, tuple(allowed))
+    allowed = {str(authority["publisher_instance_id"]) for authority in authorities}
+    if not np.isin(values, tuple(allowed)).all():
+        raise AnalysisError(f"HDF5 {path} publisher authority violation")
+    return np.ones(count, dtype=bool)
 
 
 def _masked(group: Any, name: str, mask: np.ndarray) -> np.ndarray:

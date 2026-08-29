@@ -72,6 +72,7 @@ class PicoControllerSource:
             raise ValueError("real_capability must be typed runtime input, not YAML mapping")
         self._real_capability_error: str | None = None
         rate = float(params["rate"])
+        self._rate = rate
         self._require_reliable_timestamp = bool(params["require_reliable_timestamp"])
         config = load_tianji_config()
         self._mapper = EndEffectorTargetMapper(

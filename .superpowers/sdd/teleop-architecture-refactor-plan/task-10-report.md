@@ -34,6 +34,15 @@
 - `PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_task8_config_launcher -v && python3 -m py_compile ... && git diff --check`
   - 结果：8 个 Task8 配置/launcher 测试通过；语法与差异检查通过。
 - 运行时文件检查：canonical runtime 中旧入口文件/旧配置目录均不存在。
+## Task10 round1 follow-up
+
+- Parent review identified missing PICO `self._rate`, which is now restored; source entry retains explicit `router_zid` and the one-tick interval path.
+- Real child environment now explicitly carries speed, yaw, deadman availability, and preflight predicates with fail-closed defaults; no profile can self-admit real capability from YAML.
+- Marvin fault reconnect now requires a fresh bounded returning command even after a fault arrives during the connection wait; normal timeout still uses bounded local Home failsafe, while latched fault does not.
+- HDF5 arm-command logical identity accepts the wire-level `coordinator` producer under the `arm` coordinator authority; foreign HDF5 publishers raise authority violation. Managed safety-stop evidence records captured same-tick acknowledgement, executor unhealthy/lockout, and post-stop motion evidence rather than synthesizing success.
+- Canonical Wuji dry-run test now includes a process-level managed typed-transport smoke (skips honestly when router/binary is unavailable) plus finite/shape, invalid-input, and translation-invariance regressions.
+- Round1 command: `PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_task5_executor_contract.MarvinExecutorSafetyTest tests.test_validation_tools tests.e2e_wuji_hand2_dry -v`
+  - Result: 37 tests executed passed; managed process class skipped because `zenohd`/router was unavailable.
 ## 未能执行与外部阻塞
 
 - acquisition `pixi run test` 未在本次修改中触碰；历史 ledger 记录其 151 tests 中仅有用户 dirty baseline 导致的 2 个 `tests/test_object_offset.py` offset 失败，采集仓库用户修改未覆盖。
