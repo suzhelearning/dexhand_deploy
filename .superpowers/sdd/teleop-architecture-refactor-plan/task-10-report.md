@@ -69,6 +69,13 @@
 
 - Additional round2 focused command: `py_compile` (Python sources), `PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_task5_executor_contract tests.test_validation_tools -v`, `bash -n ...`, `git diff --check`.
   - Result: 52 tests passed; all syntax/shell/diff checks passed.
+## Task10 round4 follow-up
+
+- 修复 Python Wuji executor 的 ComponentStatus 构造与 `commands_sent` 计数，真实 device.send 成功后才递增；MuJoCo 同样报告已应用 command counter。
+- real attestation 改为 launcher 生成 run/router/supervisor-bound nonce 文件：输入 scanner 文件只读、不覆盖，普通同UID JSON和环境变量无法直接通过。
+- SafetyStop 等待全部 arm/hand ack；session 未 ready 不发布；same-tick 窗口按当前 executor 最大 control rate 的 1.5 tick margin，而非固定 200ms。
+- focused command：`PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_task5_executor_contract tests.test_validation_tools -v`
+  - Result：52 tests passed；`py_compile`、`bash -n`、`git diff --check`均通过。
 ## 未能执行与外部阻塞
 
 - acquisition `pixi run test` 未在本次修改中触碰；历史 ledger 记录其 151 tests 中仅有用户 dirty baseline 导致的 2 个 `tests/test_object_offset.py` offset 失败，采集仓库用户修改未覆盖。

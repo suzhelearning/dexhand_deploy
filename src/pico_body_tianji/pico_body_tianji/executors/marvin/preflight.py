@@ -26,7 +26,8 @@ def trusted_real_capability() -> RealCapabilityInput:
             return denied
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict) or set(value) != {
-            "run_id", "router_zid", "validation_supervisor_instance_id", "capability"
+            "run_id", "router_zid", "validation_supervisor_instance_id",
+            "launcher_nonce", "capability"
         }:
             return denied
         if value["run_id"] != os.environ.get("TIANJI_RUN_ID", ""):
@@ -36,6 +37,8 @@ def trusted_real_capability() -> RealCapabilityInput:
         if value["validation_supervisor_instance_id"] != os.environ.get(
             "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID", ""
         ):
+            return denied
+        if value["launcher_nonce"] != os.environ.get("TIANJI_REAL_PREFLIGHT_NONCE", ""):
             return denied
         return RealCapabilityInput.from_mapping(value["capability"])
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):

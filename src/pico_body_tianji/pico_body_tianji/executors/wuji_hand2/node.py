@@ -158,6 +158,7 @@ class WujiHandExecutor:
         self._baseline: tuple[str, int] | None = None
         self._target_baseline: tuple[str, int] | None = None
         self._sequence = 0
+        self._commands_sent = 0
         self._status_sequence = 0
         self._safety_locked = False
         self._safety_ack: SafetyStopAck | None = None
@@ -399,7 +400,6 @@ class WujiHandExecutor:
             self._last_error = f"real capability denied: {exc}"
             return False
 
-
     def _send(self, values: Sequence[float]) -> None:
         values = self.config.validate_positions(values)
         self._qpos = list(values)
@@ -407,6 +407,7 @@ class WujiHandExecutor:
             send = getattr(self.device, "send", None)
             if callable(send):
                 send(list(values))
+                self._commands_sent += 1
     def tick(self, *, now_ns: int | None = None) -> HandJointCommand | None:
         now_ns = int(self.clock()) if now_ns is None else int(now_ns)
         self._sequence += 1
@@ -481,7 +482,7 @@ class WujiHandExecutor:
                 1, self._status_sequence, now, role, component_id,
                 self.mode, healthy, healthy,
                 ["simulation"] if self.dry_run else ["real"], self._last_error,
-                {"side": self.side, "mode": self.mode, "at_zero": self.at_zero, "tracking_allowed": tracking},
+                {"side": self.side, "mode": self.mode, "at_zero": self.at_zero, "tracking_allowed": tracking, "commands_sent": self._commands_sent},
                 publisher_instance_id, self.router_zid,
             )
             _put(self._publishers.get("component"), component.to_dict())

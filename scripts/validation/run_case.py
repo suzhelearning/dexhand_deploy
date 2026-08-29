@@ -32,6 +32,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from pico_body_tianji.config_loader import DEFAULT_ROUTER_ENDPOINT, canonical_config_root
 from pico_body_tianji.protocol.messages import ProtocolEnvelope, SafetyStopAck, SafetyStopRequest
+from pico_body_tianji.sources.common.real_admission import RealCapabilityInput
 
 MATRIX_PATH = canonical_config_root() / "validation" / "test_matrix.yaml"
 MATRIX_SCHEMA = "tianji-validation-matrix"
@@ -410,6 +411,36 @@ def _hashes() -> dict[str, str]:
     }
 
 
+def _bind_real_preflight(
+    source_path: Path,
+    bound_path: Path,
+    *,
+    run_id: str,
+    supervisor: str,
+    router_zid: str,
+) -> str:
+    """Bind a root-owned scanner result to this run without mutating it."""
+    stat = source_path.stat()
+    if source_path.is_symlink() or not source_path.is_file() or stat.st_uid != 0 or stat.st_mode & 0o022:
+        raise PermissionError("real preflight source must be a root-owned protected regular file")
+    value = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping) or set(value) != {"scanner_id", "capability"} or not str(value["scanner_id"]).strip():
+        raise PermissionError("real preflight source is not a scanner attestation")
+    capability = RealCapabilityInput.from_mapping(value["capability"])
+    bound_path.write_text(json.dumps({
+        "run_id": run_id,
+        "router_zid": router_zid,
+        "validation_supervisor_instance_id": supervisor,
+        "launcher_nonce": nonce,
+        "capability": {
+            "speed": float(capability.speed),
+            "yaw_deg": float(capability.yaw_deg),
+            "deadman_available": capability.deadman_available,
+            "preflight_passed": capability.preflight_passed,
+        },
+    }, separators=(",", ":")), encoding="utf-8")
+    return nonce
+
 def _write_status(stream: Any, *, event: str, component: str, supervisor: str, run_id: str, **fields: Any) -> None:
     record = {
         "schema_version": 1,
@@ -769,7 +800,7 @@ def _build_manifest(case_id: str, case: Mapping[str, Any], profile: str, run_id:
         "hostname": socket.gethostname(),
         "os": platform.platform(),
         "source_config": source,
-        "fake": bool(args.fake),
+        "real_preflight_file": str(getattr(args, "real_preflight_file", "") or ""),
         "headless": bool(args.headless),
         "started_at": started,
         "ended_at": None,
@@ -865,14 +896,27 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
     finally:
         if transport is not None:
             transport.close()
-    # Give executor callbacks one bounded control interval to publish their
-    # unhealthy/locked status.  Evidence is read from captured wire files;
-    # missing status or post-stop SDK motion is unverified and cannot pass.
-    time.sleep(0.2)
+    # Give executors at most one control tick plus scheduling margin.  A
+    # fixed 200ms window would incorrectly classify several control ticks as
+    # same-tick evidence.
+    profile_config = _profile_config(str(manifest.get("profile", "")))
+    rates: list[float] = []
+    for config_name in (profile_config.get("arm_executor_config"), "executors/wuji_hand2.yaml"):
+        if not config_name:
+            continue
+        try:
+            config = yaml.safe_load((canonical_config_root() / str(config_name)).read_text(encoding="utf-8")) or {}
+            rate = float(config.get("rate_hz", 0.0))
+            if rate > 0.0 and math.isfinite(rate):
+                rates.append(rate)
+        except (OSError, TypeError, ValueError, yaml.YAMLError):
+            continue
+    max_rate = max(rates, default=60.0)
+    tick_window_ns = int(1.5e9 / max_rate)
+    time.sleep(max(0.05, 2.0 * tick_window_ns / 1e9))
     status_rows = _records("status.jsonl")
     protocol_rows = _records("protocol.jsonl")
     request_time = int(result.request.envelope.timestamp_ns)
-    tick_window_ns = 200_000_000
     executor_rows = {
         executor_id: [
             row for row in status_rows
@@ -1070,7 +1114,7 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
         "TIANJI_VALIDATION_IK_BACKEND": str(manifest.get("ik_backend") or ""),
         "TIANJI_VALIDATION_PRODUCER": str(manifest.get("producer") or ""),
         "TIANJI_REAL_PREFLIGHT_FILE": str(getattr(args, "real_preflight_file", "") or ""),
-        "MARVIN_ROBOT_IP": str(manifest.get("robot_ip") or ""),
+        "TIANJI_REAL_PREFLIGHT_NONCE": str(getattr(args, "real_preflight_nonce", "") or ""),
     })
     log_path = bundle / "logs" / "session.log"
     with log_path.open("w", encoding="utf-8") as log:
@@ -1173,6 +1217,16 @@ def run_case(args: argparse.Namespace) -> int:
     router_zid = "fake-router-unverified" if args.fake else os.environ.get("TIANJI_ROUTER_ZID", "")
     if not router_zid:
         raise RuntimeError("router ZID unavailable; run the managed router before validation")
+    if capability == "real":
+        bound_attestation = bundle / "real-preflight.json"
+        args.real_preflight_nonce = _bind_real_preflight(
+            Path(args.real_preflight_file).expanduser(),
+            bound_attestation,
+            run_id=run_id,
+            supervisor=supervisor,
+            router_zid=router_zid,
+        )
+        args.real_preflight_file = str(bound_attestation)
     manifest = _build_manifest(args.case, case, case["profile"], run_id, supervisor, router_zid, started, args)
     (bundle / "manifest.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
     (bundle / "operator_events.jsonl").touch()
