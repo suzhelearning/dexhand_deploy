@@ -85,15 +85,14 @@ class Task8ConfigTreeTest(unittest.TestCase):
         deploy = (SCRIPTS / "deploy_ik_runtime.sh").read_text(encoding="utf-8")
         doctor = (SCRIPTS / "doctor.sh").read_text(encoding="utf-8")
         for script in (deploy, doctor):
-            self.assertIn("pico_controller_input*", script)
-            self.assertIn("pico_link_probe*", script)
-            self.assertIn("mocap_keyboard_step*", script)
-            self.assertIn("tianji_kinematic_sim*", script)
-            self.assertNotIn('"/pico_controller_*"', script)
+            self.assertIn("arm_ik_producer", script)
+            self.assertIn("mujoco_executor", script)
+            self.assertNotIn("legacy", script.lower())
         self.assertIn("pico_controller_source", doctor)
         cmake = (ROOT / "src" / "pico_body_tianji" / "CMakeLists.txt").read_text(encoding="utf-8")
-        self.assertIn('PATTERN "full_body" EXCLUDE', cmake)
-        self.assertIn('PATTERN "controller_only" EXCLUDE', cmake)
+        python_install = cmake.split("install(\n  DIRECTORY pico_body_tianji", 1)[1].split("install(\n  DIRECTORY assets", 1)[0]
+        self.assertIn('PATTERN "__pycache__" EXCLUDE', python_install)
+        self.assertNotIn('PATTERN "mode"', python_install)
         self.assertIn("--delete-excluded", deploy)
 
 

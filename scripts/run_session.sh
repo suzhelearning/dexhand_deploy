@@ -115,6 +115,7 @@ esac
 case "${source_name}" in
   target) source_id=target_replay ;;
   joint|joint_real) source_id=joint_replay ;;
+  mocap_calibration) source_id=diagnostic_mocap_calibration ;;
   *) source_id="${source_name}" ;;
 esac
 if [[ "${source_id}" == h5_replay ]]; then

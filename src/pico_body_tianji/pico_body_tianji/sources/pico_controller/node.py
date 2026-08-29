@@ -10,6 +10,7 @@ from tianji_world_output.config_loader import TianjiConfig
 
 from ...protocol import topics
 from ...sources.common.freshness import FreshnessGate
+from ...sources.common.real_admission import RealCapabilityInput, parse_real_capability
 from ...sources.common.session_client import SessionClient
 from ...sources.common.target_conditioner import TargetConditioningSettings
 from ...sources.common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
@@ -31,6 +32,7 @@ DEFAULT_PARAMETERS = {
     "stale_timeout": 0.5,
     "require_reliable_timestamp": True,
     "allow_unstamped_input": False,
+    "real_mode": False,
     "min_cutoff": 1.0,
     "beta": 0.7,
     "translation_gain": [0.75, 0.75, 0.75],
@@ -55,17 +57,21 @@ class PicoControllerSource:
         params: dict[str, Any] | None = None,
         *,
         publisher_instance_id: str,
-        router_zid: str,
         coordinator_instance_id: str | None = None,
         source: XRoboControllerOnlySource | None = None,
         session_client: SessionClient | None = None,
         target_publisher: TargetPublisher | None = None,
+        real_capability: RealCapabilityInput | Any | None = None,
     ) -> None:
         params = {**DEFAULT_PARAMETERS, **(params or {})}
+        self._real_mode = bool(params["real_mode"]) or os.environ.get("TIANJI_REQUIRED_CAPABILITY") == "real"
+        self._real_capability = real_capability
+        if self._real_mode and real_capability is None:
+            raise ValueError("real mode requires typed real_capability input")
+        if real_capability is not None and not isinstance(real_capability, RealCapabilityInput) and not callable(real_capability):
+            raise ValueError("real_capability must be typed runtime input, not YAML mapping")
+        self._real_capability_error: str | None = None
         rate = float(params["rate"])
-        if rate <= 0.0:
-            raise ValueError("rate must be positive")
-        self._rate = rate
         self._require_reliable_timestamp = bool(params["require_reliable_timestamp"])
         config = load_tianji_config()
         self._mapper = EndEffectorTargetMapper(
@@ -134,6 +140,24 @@ class PicoControllerSource:
     def target_publisher(self) -> TargetPublisher:
         return self._publisher
 
+    def _real_capability_snapshot(self) -> tuple[bool, str | None]:
+        if not getattr(self, "_real_mode", False):
+            self._real_capability_error = None
+            return True, None
+        if getattr(self, "_real_capability", None) is None:
+            self._real_capability_error = "typed real capability input missing"
+            return False, self._real_capability_error
+        try:
+            capability = parse_real_capability(self._real_capability)
+        except Exception as exc:
+            self._real_capability_error = str(exc)
+            return False, self._real_capability_error
+        if not capability.admitted:
+            self._real_capability_error = "real capability preflight denied"
+            return False, self._real_capability_error
+        self._real_capability_error = None
+        return True, None
+
     def _request_return(self, reason: str) -> None:
         if self._phase in ("returning", "fault"):
             return
@@ -180,14 +204,20 @@ class PicoControllerSource:
         else:
             self._last_source_state = "unavailable"
             self._last_a = False
+        real_ok, _ = self._real_capability_snapshot()
+        signal_live = signal_live and real_ok
         pressed = bool(sample.right_a_pressed) if sample is not None else False
 
         if self._phase == "armed":
             rising = pressed and not self._edge_previous
             self._edge_previous = pressed
             if rising and signal_live and self._session_client.startup_ready:
-                self._session_client.request_start("right_controller_a")
-                self._phase = "start_pending"
+                try:
+                    self._session_client.request_start("right_controller_a")
+                except (RuntimeError, TimeoutError, ValueError) as exc:
+                    self._last_error = f"controller start rejected: {exc}"
+                else:
+                    self._phase = "start_pending"
             self._publish_status()
             return
 
@@ -252,19 +282,21 @@ class PicoControllerSource:
         )
 
     def _publish_status(self) -> None:
+        real_ok, real_reason = self._real_capability_snapshot()
+        error = self._last_error or real_reason
         self._publisher.publish_source_status(
-            component_id="pico_controller",
+            capabilities=["simulation"] + (["real"] if real_ok and getattr(self, "_real_mode", False) else []),
             phase=self._phase,
-            ready=self._session_client.startup_ready and self._last_error is None,
-            healthy=self._last_error is None and self._phase != "fault",
-            capabilities=["simulation", "real"],
-            error=self._last_error,
+            ready=self._session_client.startup_ready and error is None and real_ok,
+            healthy=error is None and self._phase != "fault",
+            error=error,
             diagnostics={
                 "source_state": self._last_source_state,
                 "source_timestamp_ns": self._last_source_timestamp_ns,
                 "right_a_pressed": self._last_a,
                 "return_timed_out": self._return_timed_out,
                 "return_intent_baseline": self._session_client.return_intent_baseline,
+                "real_capability_error": real_reason,
             },
         )
 
@@ -275,9 +307,11 @@ class PicoControllerSource:
         self._session_client.start()
         self._started = True
         self._publish_status()
-
     def run(self) -> int:
         self.start()
+        if self._closed:
+            return 0
+        interval = 1.0 / self._rate
         next_tick = time.monotonic()
         while not self._closed:
             now = time.monotonic()
@@ -315,12 +349,18 @@ def main(argv: list[str] | None = None) -> int:
         )
     session = open_session(endpoint)
     require_single_router(session, router_zid)
+    real_capability = None
+    if os.environ.get("TIANJI_REQUIRED_CAPABILITY") == "real":
+        from ...executors.marvin.preflight import trusted_real_capability
+        params["real_mode"] = True
+        real_capability = trusted_real_capability
     node = PicoControllerSource(
         session,
         params,
         publisher_instance_id=instance_id,
         router_zid=router_zid,
         coordinator_instance_id=coordinator_id,
+        real_capability=real_capability,
     )
     try:
         return node.run()

@@ -1,12 +1,10 @@
 """Zenoh 通讯公共层（替代 ROS 2 rclpy 链路）。
 
-契约（zenoh-migration-contract）：
-- key 表达式沿用原 ROS 话题路径，如 /pico_body/left_arm_target_pose
-- Pose/Vector/JointState 消息用 JSON（UTF-8）；String/Bool 用裸文本
-- stamp 为 {"sec": int, "nanosec": int}，缺失或 0 表示未打时间戳
-- 存活注册：tj/live/<node-name>
-- 事件 + 初始值（原 transient_local latched）用 LatchedKey：PUT 更新存储，
-  GET 返回最近值；订阅者启动时可主动 get 一次
+协议（tianji-protocol-v1）：
+- key 表达式集中定义于 ``protocol.topics``，消息统一使用严格 JSON（UTF-8）
+- 所有内部数据均携带 ``ProtocolEnvelope``；外部采集 envelope 只在入口重封装
+- 存活注册使用 ``tj/live/<role>/<logical_id>/<instance_id>``，状态与锁存值
+  通过 queryable 快照和订阅事件共同同步
 """
 
 from __future__ import annotations

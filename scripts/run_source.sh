@@ -29,7 +29,7 @@ case "${source_id}" in
   target_replay|joint_replay)
     entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/${source_id}"
     default_config="replay/${source_id%_replay}.yaml" ;;
-  mocap_calibration)
+  diagnostic_mocap_calibration)
     entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/mocap_calibration"
     default_config="diagnostics/mocap_calibration.yaml" ;;
   *)

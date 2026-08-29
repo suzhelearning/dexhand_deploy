@@ -54,6 +54,24 @@ if [[ ! -x "${entry}" ]]; then
 fi
 config="${config_override}"
 if [[ -z "${config}" ]]; then config="$(canonical_config "${default_config}")"; fi
+if [[ "${executor_id}" == mujoco && "${headless}" == false ]]; then
+  # Headless is a component-configured execution mode.  The wrapper must
+  # forward it explicitly so no-DISPLAY launches never fall through to the
+  # passive viewer by accident.
+  if pixi run python - "${config}" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    value = yaml.safe_load(stream) or {}
+if not isinstance(value, dict):
+    raise SystemExit(1)
+raise SystemExit(0 if value.get("headless") is True else 1)
+PY
+  then
+    headless=true
+  fi
+fi
 export TIANJI_ROUTER_ENDPOINT="${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
 export TIANJI_ROUTER_ZID="${TIANJI_ROUTER_ZID:-$(require_router)}"
 export TIANJI_COMPONENT_INSTANCE_ID="${TIANJI_COMPONENT_INSTANCE_ID:-$(new_instance_id)}"

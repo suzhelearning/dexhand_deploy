@@ -36,6 +36,8 @@ from scripts.validation.run_case import (
     BUNDLE_VERSION,
     MATRIX_PATH,
     _authority_contract,
+    _profile_config,
+    _source_type,
     build_session_contract,
     load_matrix,
     sha256_file,
@@ -156,6 +158,8 @@ def _verify_manifest(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
         raise AnalysisError(f"manifest routing contract is invalid: {exc}") from exc
     if manifest.get("producer") != contract["producer"] or manifest.get("profile") != contract["profile"]:
         raise AnalysisError("manifest producer/profile does not match fixed case contract")
+    if manifest.get("source_type") != _source_type(manifest["profile"]):
+        raise AnalysisError("manifest source_type does not match fixed profile contract")
     if manifest.get("ik_backend") != contract["ik_backend"]:
         raise AnalysisError("manifest IK backend does not match fixed case contract")
     if manifest.get("resolved_hand_mode") not in {"disabled", "direct", "retarget"}:
@@ -285,20 +289,161 @@ def _sequence_metric(sequences: Iterable[Any], instances: Iterable[Any] | None =
         previous[owner] = sequence
     return {"drops": drops, "order_errors": order_errors}
 
+def _folded_protocol_sequence_metric(
+    rows: Iterable[tuple[str, int, int, str]],
+) -> dict[str, int]:
+    """Check global wire ordering while folding legal cross-topic pairs.
 
-def _stream_metric(file: Any, path: str, sequence_name: str | None = None) -> dict[str, Any]:
+    Coordinators publish both arm commands with one sequence and the IK
+    producer publishes proposal/solved pairs with one sequence.  Those are
+    one protocol point, not duplicate output.  A repeated sequence on the
+    same topic remains an error, as does a rollback after a newer sequence.
+    """
+    by_instance: defaultdict[str, list[tuple[int, int, str, int]]] = defaultdict(list)
+    for index, (owner, timestamp, sequence, topic) in enumerate(rows):
+        by_instance[str(owner)].append((int(timestamp), int(sequence), str(topic), index))
+    drops = 0
+    order_errors = 0
+    for values in by_instance.values():
+        values.sort(key=lambda item: (item[0], item[3]))
+        last_by_topic: dict[str, int] = {}
+        previous: int | None = None
+        for _timestamp, sequence, topic, _index in values:
+            previous_topic = last_by_topic.get(topic)
+            if previous_topic is not None and sequence <= previous_topic:
+                order_errors += 1
+            last_by_topic[topic] = sequence
+            if previous is None:
+                previous = sequence
+                continue
+            if sequence < previous:
+                order_errors += 1
+            elif sequence > previous:
+                drops += max(0, sequence - previous - 1)
+                previous = sequence
+            # Equal sequence from a different topic is the legal folded pair.
+    return {"drops": drops, "order_errors": order_errors}
+
+
+def _authority_for_row(
+    row: Mapping[str, Any],
+    manifest: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    """Return the preallocated authority owning a captured wire row."""
+    if manifest is None:
+        return {"component_role": "unfiltered"}
+    payload = _payload(row)
+    topic = _topic(row)
+    router = str(payload.get("router_zid", row.get("router_zid", "")))
+    if topic == "mocap/aligned/hands":
+        return (
+            {"component_role": "external_source", "logical_id": "acquisition"}
+            if router == str(manifest.get("router_zid", ""))
+            else None
+        )
+    if not topic or router != str(manifest.get("router_zid", "")):
+        return None
+    instance = str(payload.get("publisher_instance_id", row.get("publisher_instance_id", "")))
+    side_match = re.search(r"/(left|right)(?:/|$)", topic)
+    side = str(payload.get("side") or (side_match.group(1) if side_match else ""))
+    # Unit-level protocol association callers may provide only the two
+    # preallocated stream IDs.  Keep that strict fallback; real bundles always
+    # carry the expanded authority contract and use the branch below.
+    if not manifest.get("authority_contract"):
+        ids = manifest.get("publisher_instance_ids", {})
+        if ("/target/arm/" in topic and str(ids.get("source", "")) == instance) or (
+            topic.endswith("solved_pose") and str(ids.get("producer_arm", "")) == instance
+        ):
+            return {"publisher_instance_id": instance, "side": side}
+    for authority in manifest.get("authority_contract", []):
+        if authority.get("publisher_instance_id") != instance:
+            continue
+        expected_side = authority.get("side")
+        if expected_side is not None and side not in {"", str(expected_side)}:
+            continue
+        expanded = [
+            str(template).replace("{side}", str(expected_side or side))
+            for template in authority.get("topics", [])
+        ]
+        if topic in expanded:
+            return authority
+    return None
+
+
+def _h5_authority(path: str, manifest: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Resolve the authority contract for one recorded HDF5 stream."""
+    role: str | None = None
+    side: str | None = None
+    if path.startswith(("raw/", "target/")):
+        role = "source"
+    elif path.startswith("joint/command/arm") or path == "meta/session_events":
+        role = "coordinator_arm"
+    elif path.startswith("joint/state/arm"):
+        role = "executor_arm"
+    elif path.startswith("joint/command/hand/"):
+        role, side = "producer_hand", path.rsplit("/", 1)[-1]
+    elif path.startswith("joint/state/hand/"):
+        role, side = "executor_hand", path.rsplit("/", 1)[-1]
+    if role is None:
+        return []
+    return [
+        authority
+        for authority in manifest.get("authority_contract", [])
+        if authority.get("component_role") == role
+        and (authority.get("side") is None or authority.get("side") == side)
+    ]
+
+
+def _h5_mask(group: Any, path: str, manifest: Mapping[str, Any]) -> np.ndarray:
+    """Select only rows owned by the profile's role/logical/side authority."""
+    authorities = _h5_authority(path, manifest)
+    count = int(group["time_ns"].shape[0]) if "time_ns" in group else 0
+    if not authorities:
+        return np.zeros(count, dtype=bool)
+    logical = group.attrs.get("logical_id")
+    if isinstance(logical, bytes):
+        logical = logical.decode()
+    if logical is not None and not any(str(authority["logical_id"]) == str(logical) for authority in authorities):
+        raise AnalysisError(f"HDF5 {path} logical authority mismatch")
+    instances = np.asarray(group["publisher_instance_id"][:]) if "publisher_instance_id" in group else np.asarray([], dtype=object)
+    allowed = {str(authority["publisher_instance_id"]) for authority in authorities}
+    values = np.asarray([
+        value.decode() if isinstance(value, (bytes, np.bytes_)) else str(value)
+        for value in instances
+    ])
+    if len(values) != count:
+        raise AnalysisError(f"HDF5 {path} publisher identity length mismatch")
+    return np.isin(values, tuple(allowed))
+
+
+def _masked(group: Any, name: str, mask: np.ndarray) -> np.ndarray:
+    values = np.asarray(group[name][:])
+    return values[mask]
+
+
+def _stream_metric(
+    file: Any,
+    path: str,
+    sequence_name: str | None = None,
+    *,
+    manifest: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     if path not in file:
         return {"samples": 0, "rate_hz": 0.0, "drops": 0, "order_errors": 0}
     group = file[path]
     if "time_ns" not in group:
         return {"samples": 0, "rate_hz": 0.0, "drops": 0, "order_errors": 0}
-    times = np.asarray(group["time_ns"][:], dtype=np.int64)
+    mask = np.ones(int(group["time_ns"].shape[0]), dtype=bool)
+    if manifest is not None:
+        mask = _h5_mask(group, path, manifest)
+    times = np.asarray(group["time_ns"][:], dtype=np.int64)[mask]
     count = int(len(times))
     duration = float(times[-1] - times[0]) / 1e9 if count > 1 and times[-1] > times[0] else 0.0
     ordering = {"drops": 0, "order_errors": 0}
     if sequence_name and sequence_name in group and count:
-        instances = group["publisher_instance_id"][:] if "publisher_instance_id" in group else None
-        ordering = _sequence_metric(group[sequence_name][:], instances)
+        sequences = np.asarray(group[sequence_name][:])[mask]
+        instances = group["publisher_instance_id"][:][mask] if "publisher_instance_id" in group else None
+        ordering = _sequence_metric(sequences, instances)
     return {"samples": count, "rate_hz": count / duration if duration > 0 else 0.0, "duration_s": duration, **ordering}
 
 
@@ -308,13 +453,36 @@ def _decode(value: Any) -> Any:
     return value
 
 
+def _tracking_threshold_rad(manifest: Mapping[str, Any] | None) -> float:
+    """Load the active executor's finite tracking threshold."""
+    if manifest is None:
+        return math.radians(8.0)
+    profile = str(manifest.get("profile", ""))
+    profile_config = _profile_config(profile)
+    configured = profile_config.get("arm_executor_config") or "executors/marvin.yaml"
+    path = canonical_config_root() / str(configured)
+    try:
+        executor = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if "tracking_error_threshold_rad" in executor:
+            threshold = float(executor["tracking_error_threshold_rad"])
+        elif "maximum_tracking_error_deg" in executor:
+            threshold = math.radians(float(executor["maximum_tracking_error_deg"]))
+        else:
+            raise KeyError("tracking threshold")
+    except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError) as exc:
+        raise AnalysisError(f"active executor tracking threshold is unavailable: {exc}") from exc
+    if not math.isfinite(threshold) or threshold <= 0.0:
+        raise AnalysisError("active executor tracking threshold must be finite and positive")
+    return threshold
+
 def _metrics_from_h5(file: Any, manifest: Mapping[str, Any]) -> dict[str, Any]:
-    streams = {name: _stream_metric(file, path, seq) for name, path, seq in (
+    streams = {name: _stream_metric(file, path, seq, manifest=manifest) for name, path, seq in (
         ("raw_pico_controller", "raw/pico_controller", "sequence"),
         ("raw_mocap_live", "raw/mocap_live", "stream_sequence"),
         ("raw_h5_replay", "raw/h5_replay", "sequence"),
         ("target_arm_left", "target/arm/left", "sequence"),
         ("target_arm_right", "target/arm/right", "sequence"),
+
         ("target_hand_left", "target/hand/left", "sequence"),
         ("target_hand_right", "target/hand/right", "sequence"),
         ("command_arm_left", "joint/command/arm/left", "sequence"),
@@ -348,10 +516,11 @@ def _metrics_from_h5(file: Any, manifest: Mapping[str, Any]) -> dict[str, Any]:
         if path not in file:
             continue
         group = file[path]
-        positions = np.asarray(group["position_rad"][:], dtype=float)
+        mask = _h5_mask(group, path, manifest)
+        positions = np.asarray(group["position_rad"][:], dtype=float)[mask]
         command_step[side] = float(np.max(np.abs(np.diff(positions, axis=0)))) if len(positions) > 1 else None
-        times = np.asarray(group["time_ns"][:], dtype=np.int64)
-        modes = [_decode(value) for value in group["mode"][:]] if "mode" in group else ["teleop"] * len(positions)
+        times = np.asarray(group["time_ns"][:], dtype=np.int64)[mask]
+        modes = [_decode(value) for value in group["mode"][:][mask]] if "mode" in group else ["teleop"] * len(positions)
         if len(positions) > 1 and np.all(np.diff(times) > 0):
             velocities = np.abs(np.diff(positions, axis=0) / (np.diff(times)[:, None] / 1e9))
             command_velocity[side] = float(np.max(velocities))
@@ -364,9 +533,10 @@ def _metrics_from_h5(file: Any, manifest: Mapping[str, Any]) -> dict[str, Any]:
             saturation[side] = int(np.sum((positions <= lower + 1e-9) | (positions >= upper - 1e-9)))
         else:
             hard_limit_violations[side] = -1
-            saturation[side] = 0
-    event_states = [_decode(value) for value in file["meta/session_events/state"][:]] if "meta/session_events/state" in file else []
-    event_times = [int(value) for value in file["meta/session_events/time_ns"][:]] if "meta/session_events/time_ns" in file else []
+    event_group = file["meta/session_events"] if "meta/session_events" in file else None
+    event_mask = _h5_mask(event_group, "meta/session_events", manifest) if event_group is not None else np.asarray([], dtype=bool)
+    event_states = [_decode(value) for value in event_group["state"][:][event_mask]] if event_group is not None else []
+    event_times = [int(value) for value in event_group["time_ns"][:][event_mask]] if event_group is not None else []
     return_time = next((event_times[index] for index in range(len(event_states) - 1, -1, -1) if event_states[index] == "returning"), None)
     idle_time = next((event_times[index] for index in range(len(event_states)) if event_states[index] == "idle" and return_time is not None and event_times[index] >= return_time), None)
     home_time: float | str = (idle_time - return_time) / 1e9 if return_time is not None and idle_time is not None else "unavailable"
@@ -374,22 +544,27 @@ def _metrics_from_h5(file: Any, manifest: Mapping[str, Any]) -> dict[str, Any]:
     home_feedback_ok = False
     if idle_time is not None and "joint/state/arm" in file:
         state_group = file["joint/state/arm"]
-        state_times = np.asarray(state_group["time_ns"][:], dtype=np.int64)
-        state_positions = np.asarray(state_group["position_rad"][:], dtype=float)
+        state_mask = _h5_mask(state_group, "joint/state/arm", manifest)
+        state_times = np.asarray(state_group["time_ns"][:], dtype=np.int64)[state_mask]
+        state_positions = np.asarray(state_group["position_rad"][:], dtype=float)[state_mask]
         home = np.asarray(arm_config.get("left_home_rad", []) + arm_config.get("right_home_rad", []), dtype=float)
         valid = state_times >= idle_time
         home_feedback_ok = bool(np.any(valid) and len(home) == state_positions.shape[1] and np.all(np.abs(state_positions[valid][-1] - home) <= home_tolerance))
     tracking_values: list[float] = []
     if "joint/state/arm" in file:
         state_group = file["joint/state/arm"]
-        state_times = np.asarray(state_group["time_ns"][:], dtype=np.int64)
-        state_positions = np.asarray(state_group["position_rad"][:], dtype=float)
+        state_mask = _h5_mask(state_group, "joint/state/arm", manifest)
+        state_times = np.asarray(state_group["time_ns"][:], dtype=np.int64)[state_mask]
+        state_positions = np.asarray(state_group["position_rad"][:], dtype=float)[state_mask]
         for side_index, side in enumerate(("left", "right")):
             command_path = f"joint/command/arm/{side}"
             if command_path not in file or not len(state_times):
                 continue
             group = file[command_path]
-            for timestamp, position in zip(np.asarray(group["time_ns"][:], dtype=np.int64), np.asarray(group["position_rad"][:], dtype=float)):
+            command_mask = _h5_mask(group, command_path, manifest)
+            command_times = np.asarray(group["time_ns"][:], dtype=np.int64)[command_mask]
+            command_positions = np.asarray(group["position_rad"][:], dtype=float)[command_mask]
+            for timestamp, position in zip(command_times, command_positions):
                 state_index = min(int(np.searchsorted(state_times, timestamp, side="left")), len(state_times) - 1)
                 error = position - state_positions[state_index, side_index * 7:(side_index + 1) * 7]
                 if np.isfinite(error).all():
@@ -403,12 +578,14 @@ def _metrics_from_h5(file: Any, manifest: Mapping[str, Any]) -> dict[str, Any]:
         if path not in file or len(zero) != 20 or len(tolerance) != 20:
             continue
         group = file[path]
-        for index, position in enumerate(np.asarray(group["position_rad"][:], dtype=float)):
-            times = np.asarray(group["time_ns"][:], dtype=np.int64)
+        mask = _h5_mask(group, path, manifest)
+        positions = np.asarray(group["position_rad"][:], dtype=float)[mask]
+        times = np.asarray(group["time_ns"][:], dtype=np.int64)[mask]
+        for index, position in enumerate(positions):
             if idle_time is not None and times[index] >= idle_time and np.isfinite(position).all() and np.all(np.abs(position - zero) <= tolerance):
                 hand_zero_times.append(float(times[index]) / 1e9)
                 break
-    return {"rates": streams, "target_to_solved_error": {"samples": 0, "max_position_error_m": "unavailable", "max_orientation_error_rad": "unavailable", "note": "solved pose is collected from protocol capture"}, "joint_step_rad": command_step, "joint_velocity_rad_s": command_velocity, "phase_velocity_rad_s": phase_velocity, "saturation_count": saturation, "hard_limit_violations": hard_limit_violations, "proposal_rejections": "unavailable", "command_feedback_tracking": {"samples": len(tracking_values), "max_error_rad": max(tracking_values) if tracking_values else "unavailable"}, "tracking_threshold_rad": math.radians(float(marvin_config.get("maximum_tracking_error_deg", 8.0))), "home_time_s": home_time, "home_feedback_ok": home_feedback_ok, "hand_zero_time_s": max(hand_zero_times) if hand_zero_times else "unavailable", "hand_zero_feedback_ok": bool(manifest.get("hand_sides") and len(hand_zero_times) == len(manifest.get("hand_sides", []))), "fault_reasons": [], "soft_stop_reasons": [], "session_event_states": Counter(event_states)}
+    return {"rates": streams, "target_to_solved_error": {"samples": 0, "max_position_error_m": "unavailable", "max_orientation_error_rad": "unavailable", "note": "solved pose is collected from protocol capture"}, "joint_step_rad": command_step, "joint_velocity_rad_s": command_velocity, "phase_velocity_rad_s": phase_velocity, "saturation_count": saturation, "hard_limit_violations": hard_limit_violations, "proposal_rejections": "unavailable", "command_feedback_tracking": {"samples": len(tracking_values), "max_error_rad": max(tracking_values) if tracking_values else "unavailable"}, "tracking_threshold_rad": _tracking_threshold_rad(manifest), "home_time_s": home_time, "home_feedback_ok": home_feedback_ok, "hand_zero_time_s": max(hand_zero_times) if hand_zero_times else "unavailable", "hand_zero_feedback_ok": bool(manifest.get("hand_sides") and len(hand_zero_times) == len(manifest.get("hand_sides", []))), "fault_reasons": [], "soft_stop_reasons": [], "session_event_states": Counter(event_states)}
 
 
 def _payload(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -434,20 +611,22 @@ def _protocol_metrics(
     solved: dict[tuple[str, int], Mapping[str, Any]] = {}
     stream_counts: Counter[str] = Counter()
     stream_times: defaultdict[str, list[int]] = defaultdict(list)
-    sequence_rows: defaultdict[str, list[tuple[int, int]]] = defaultdict(list)
+    sequence_rows: list[tuple[str, int, int, str]] = []
     arm_commands: list[Mapping[str, Any]] = []
     arm_states: list[Mapping[str, Any]] = []
     hand_states: defaultdict[str, list[Mapping[str, Any]]] = defaultdict(list)
     session_states: list[Mapping[str, Any]] = []
     for row in rows + status_rows:
+        if manifest is not None and _authority_for_row(row, manifest) is None:
+            continue
         payload = _payload(row)
         topic = _topic(row)
         instance = str(payload.get("publisher_instance_id", row.get("publisher_instance_id", "")))
         sequence = payload.get("sequence")
         timestamp = payload.get("timestamp_ns", payload.get("time_ns"))
-        if isinstance(sequence, int) and not isinstance(sequence, bool):
-            order_time = int(timestamp) if isinstance(timestamp, int) and not isinstance(timestamp, bool) else len(sequence_rows[instance])
-            sequence_rows[instance].append((order_time, sequence))
+        if isinstance(sequence, int) and not isinstance(sequence, bool) and instance:
+            order_time = int(timestamp) if isinstance(timestamp, int) and not isinstance(timestamp, bool) else len(sequence_rows)
+            sequence_rows.append((instance, order_time, sequence, topic))
         side_match = re.search(r"/(left|right)(?:/|$)", topic)
         side = str(payload.get("side") or (side_match.group(1) if side_match else ""))
         stream_name = ""
@@ -458,15 +637,14 @@ def _protocol_metrics(
         elif "/target/arm/" in topic:
             stream_name = f"target_arm_{side}"
             if isinstance(sequence, int) and not isinstance(sequence, bool):
-                if not manifest or not source_instance or instance == source_instance:
-                    key = (side, sequence)
-                    if key in targets:
-                        raise AnalysisError(f"duplicate authorized target key: {side}/{sequence}")
-                    targets[key] = payload
+                key = (side, sequence)
+                if key in targets:
+                    raise AnalysisError(f"duplicate authorized target key: {side}/{sequence}")
+                targets[key] = payload
         elif topic.endswith("solved_pose"):
             stream_name = "solved_arm"
             target_sequence = payload.get("target_sequence")
-            if isinstance(target_sequence, int) and (not manifest or not producer_instance or instance == producer_instance):
+            if isinstance(target_sequence, int) and not isinstance(target_sequence, bool):
                 key = (side, target_sequence)
                 if key in solved:
                     raise AnalysisError(f"duplicate authorized solved key: {side}/{target_sequence}")
@@ -488,12 +666,7 @@ def _protocol_metrics(
             stream_counts[stream_name] += 1
             if isinstance(timestamp, int) and not isinstance(timestamp, bool):
                 stream_times[stream_name].append(timestamp)
-    ordering = {"drops": 0, "order_errors": 0}
-    for values in sequence_rows.values():
-        ordered = [sequence for _, sequence in sorted(values, key=lambda item: item[0])]
-        metric = _sequence_metric(ordered)
-        ordering["drops"] += metric["drops"]
-        ordering["order_errors"] += metric["order_errors"]
+    ordering = _folded_protocol_sequence_metric(sequence_rows)
     position_errors: list[float] = []
     orientation_errors: list[float] = []
     for key, target in targets.items():
@@ -634,6 +807,7 @@ def _protocol_metrics(
             "samples": len(tracking_values),
             "max_error_rad": max(tracking_values) if tracking_values else "unavailable",
         },
+        "tracking_threshold_rad": _tracking_threshold_rad(manifest),
         "joint_step_rad": protocol_step,
         "hard_limit_violations": protocol_limits,
         "phase_velocity_rad_s": protocol_phase_velocity,
@@ -860,7 +1034,7 @@ def analyze_bundle(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
     if missing: raise AnalysisError(f"bundle missing required files: {sorted(missing)}")
     _verify_checksums(bundle, session_required=session_required); manifest = _verify_manifest(bundle, matrix); statuses = _verify_status(bundle, manifest); protocol, liveliness = _verify_capture(bundle, manifest); operator = _verify_operator_result(bundle); events = _verify_operator_events(bundle, manifest)
     if session_required or (bundle / "session.h5").is_file(): metrics = _verify_h5(bundle, manifest)
-    else: metrics = {"rates": {}, "target_to_solved_error": {"samples": 0, "max_position_error_m": "unavailable", "max_orientation_error_rad": "unavailable"}, "joint_step_rad": {}, "joint_velocity_rad_s": {}, "phase_velocity_rad_s": {}, "saturation_count": {}, "hard_limit_violations": {}, "proposal_rejections": "unavailable", "command_feedback_tracking": {"samples": 0, "max_error_rad": "unavailable"}, "home_time_s": "unavailable", "home_feedback_ok": False, "hand_zero_time_s": "unavailable", "hand_zero_feedback_ok": False, "fault_reasons": [], "soft_stop_reasons": [], "session_event_states": {}}
+    else: metrics = {"rates": {}, "target_to_solved_error": {"samples": 0, "max_position_error_m": "unavailable", "max_orientation_error_rad": "unavailable"}, "joint_step_rad": {}, "joint_velocity_rad_s": {}, "phase_velocity_rad_s": {}, "saturation_count": {}, "hard_limit_violations": {}, "proposal_rejections": "unavailable", "command_feedback_tracking": {"samples": 0, "max_error_rad": "unavailable"}, "tracking_threshold_rad": _tracking_threshold_rad(manifest), "home_time_s": "unavailable", "home_feedback_ok": False, "hand_zero_time_s": "unavailable", "hand_zero_feedback_ok": False, "fault_reasons": [], "soft_stop_reasons": [], "session_event_states": {}}
     protocol_metrics = _protocol_metrics(protocol, manifest, statuses)
     metrics.setdefault("rates", {}).update({key: value for key, value in protocol_metrics["rates"].items() if key not in metrics["rates"]})
     if protocol_metrics["target_to_solved_error"]["samples"]:

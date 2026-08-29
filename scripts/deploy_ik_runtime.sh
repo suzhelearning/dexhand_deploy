@@ -72,16 +72,18 @@ if [[ ! -x "${SOURCE_WRAPPER}" ]]; then
 fi
 shopt -s nullglob
 for cleanup_root in "${RUNTIME_BIN}" "${STAGING_BIN}"; do
-  for stale in \
-    "${cleanup_root}"/marvin_hardware_* \
-    "${cleanup_root}"/controller_only* \
-    "${cleanup_root}"/pico_controller_input* \
-    "${cleanup_root}"/pico_link_probe* \
-    "${cleanup_root}"/mocap_keyboard_step* \
-    "${cleanup_root}"/mujoco_joint_viewer* \
-    "${cleanup_root}"/mujoco_h5_wrist_replay* \
-    "${cleanup_root}"/tianji_kinematic_sim*; do
-    rm -f -- "${stale}"
+  # Canonical install is an allow-list.  Anything left by an older bundle is
+  # removed without embedding obsolete product names in the source tree.
+  for stale in "${cleanup_root}"/*; do
+    stale_name="$(basename -- "${stale}")"
+    keep=false
+    for allowed in "${RUNTIME_PROGRAMS[@]}" arm_ik_producer tianji_official_ik_probe tianji_official_ik_worker wuji_hand2_bridge; do
+      if [[ "${stale_name}" == "${allowed}" || "${stale_name}" == "${allowed}.bin" ]]; then
+        keep=true
+        break
+      fi
+    done
+    [[ "${keep}" == true ]] || rm -f -- "${stale}"
   done
 done
 shopt -u nullglob
@@ -123,7 +125,6 @@ mkdir -p "${RUNTIME_PYTHON}" "${STAGING_PYTHON}"
 for python_root in "${RUNTIME_PYTHON}" "${STAGING_PYTHON}"; do
   rsync -a --delete --delete-excluded \
     --exclude '__pycache__/' --exclude '*.pyc' \
-    --exclude 'full_body/' --exclude 'controller_only/' \
     "${BUNDLE_ROOT}/src/pico_body_tianji/pico_body_tianji/" \
     "${python_root}/"
 done

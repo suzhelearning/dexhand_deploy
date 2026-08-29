@@ -2,14 +2,15 @@
 #include "pico_body_tianji/protocol/json_parser.hpp"
 
 #include <zenoh.hxx>
-#include <Eigen/Geometry>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cctype>
 #include <limits>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <mutex>
@@ -327,10 +328,10 @@ private:
       const std::string expected_side = index == 0 ? "left" : "right";
       const auto command = JsonCommandParser(payload).parse(coordinator_, router_, expected_side, joint_names_[index]);
       std::lock_guard<std::mutex> lock(mutex_);
-      if (last_command_sequence_.has_value() && command.sequence <= *last_command_sequence_) {
+      if (last_command_sequence_[index].has_value() && command.sequence <= *last_command_sequence_[index]) {
         throw std::invalid_argument("final command sequence rollback");
       }
-      last_command_sequence_ = command.sequence;
+      last_command_sequence_[index] = command.sequence;
       current_[index] = command.joints;
     } catch (const std::exception &error) {
       publish_status(std::string("current command rejected: ") + error.what());
@@ -386,7 +387,7 @@ private:
   std::array<std::optional<zenoh::Publisher>, 2> solved_publishers_;
   std::array<std::optional<zenoh::Subscriber<void>>, 2> target_subscribers_;
   std::array<std::optional<zenoh::Subscriber<void>>, 2> command_subscribers_;
-  std::optional<std::uint64_t> last_command_sequence_;
+  std::array<std::optional<std::uint64_t>, 2> last_command_sequence_;
   std::optional<zenoh::LivelinessToken> liveliness_token_;
   std::optional<zenoh::Publisher> status_publisher_;
   std::mutex publish_mutex_;

@@ -66,14 +66,15 @@ def main() -> int:
         )
         while not stop_event.wait(1.0):
             node.flush()
-        # Close the Zenoh session before committing complete=true. If closing
-        # transport fails, the exception path below aborts the HDF5 recording.
-        if session is not None:
-            session.close()
-            session = None
+        # Undeclare subscriptions/publishers while the Zenoh session is
+        # still alive, then commit complete=true in HDF5.  Closing transport
+        # first can make a normal SIGTERM look like an aborted recording.
         if node is not None:
             node.close()
             node = None
+        if session is not None:
+            session.close()
+            session = None
     except BaseException:
         if node is not None:
             try:

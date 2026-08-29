@@ -236,14 +236,18 @@ class MarvinExecutor:
             self._session_state = state
             self._session_state_received_ns = received_ns
             self._readiness.observe_session_state(state, received_ns=received_ns)
+            # fault is a latched coordinator decision.  A later returning or
+            # idle snapshot may not downgrade it and accidentally re-enable
+            # normal motion during a reconnect race.
             if state.state == "fault":
                 self._phase = "fault_return"
-            elif state.state == "returning":
-                self._phase = "returning"
-            elif state.state == "idle" and self._phase not in {"soft_stopped", "fault_return"}:
-                self._phase = "armed_idle"
-            elif state.state == "teleop" and self._phase == "armed_idle":
-                self._phase = "teleop"
+            elif self._phase != "fault_return":
+                if state.state == "returning":
+                    self._phase = "returning"
+                elif state.state == "idle" and self._phase not in {"soft_stopped", "fault_return"}:
+                    self._phase = "armed_idle"
+                elif state.state == "teleop" and self._phase == "armed_idle":
+                    self._phase = "teleop"
         except (ProtocolError, TypeError, ValueError) as exc:
             self._last_error = f"invalid session state: {exc}"
 
@@ -314,10 +318,21 @@ class MarvinExecutor:
             return False
         now = int(self.clock())
         recovery_state = self._session_state.state if self._session_state is not None else None
-        fault_reconnect = self._readiness.fault_return_ready(now_ns=now)
-        if not fault_reconnect:
-            deadline = time.monotonic() + float(self.params.get("connection_wait_s", 1.0))
-            while not self._admission_ok() or not self._readiness.connection_ready(now_ns=now):
+        fault_reconnect = recovery_state == "fault"
+        bounded_reconnect = self._readiness.fault_return_ready(now_ns=now)
+        deadline = time.monotonic() + float(self.params.get("connection_wait_s", 1.0))
+        if not bounded_reconnect:
+            while True:
+                current_state = self._session_state.state if self._session_state is not None else None
+                # A fault can arrive while the normal admission gate is
+                # waiting.  It is safer to switch to the coordinator-owned
+                # bounded return path than to wait for source readiness.
+                if current_state == "fault":
+                    fault_reconnect = True
+                    bounded_reconnect = True
+                    break
+                if self._admission_ok() and self._readiness.connection_ready(now_ns=now):
+                    break
                 if time.monotonic() >= deadline:
                     self._phase = "waiting_for_connection"
                     self._publish_status()
@@ -338,7 +353,13 @@ class MarvinExecutor:
             )
             self._feedback = feedback
             self._feedback_received_ns = int(self.clock())
-            if not fault_reconnect:
+            latest_state = self._session_state.state if self._session_state is not None else None
+            # Re-check immediately before any home motion: a fault that won
+            # the race during connect must dominate the older state captured
+            # by the admission check.
+            if latest_state == "fault":
+                fault_reconnect = True
+            if not fault_reconnect and latest_state != "returning":
                 self._hardware.move_to_home(
                     np.degrees(self.robot.left_home_rad), np.degrees(self.robot.right_home_rad),
                     rate_hz=self._rate_hz,
@@ -350,11 +371,15 @@ class MarvinExecutor:
                     upper_limits_deg=np.degrees(self.robot.upper_limits_rad),
                     hard_limit_padding_deg=float(self.params["feedback_hard_limit_padding_deg"]),
                 )
-            self._phase = (
-                "fault_return" if recovery_state == "fault"
-                else "returning" if recovery_state == "returning"
-                else "armed_idle"
-            )
+            # Consult the latest state again so a fault callback cannot be
+            # overwritten by the stale pre-connect state.
+            latest_state = self._session_state.state if self._session_state is not None else None
+            if latest_state == "fault":
+                self._phase = "fault_return"
+            elif latest_state == "returning":
+                self._phase = "returning"
+            else:
+                self._phase = "armed_idle"
             return True
         except BaseException as exc:
             self._last_error = f"startup_error: {exc}"
@@ -469,15 +494,17 @@ class MarvinExecutor:
         return None
 
     def _controlled_return(self, now_ns: int) -> None:
-        if self._hardware is None or self._safety_locked or self._feedback is None:
+        if self._hardware is None or self._safety_locked:
             return
-        current = np.concatenate([self._feedback.left_joints_deg, self._feedback.right_joints_deg])
-        home = np.degrees(np.asarray(self.robot.home_all, dtype=np.float64))
-        step = float(self.params["return_max_speed_deg_s"]) / self._rate_hz
-        target = current + np.clip(home - current, -step, step)
-        left = ArmJointCommand(1, self._state_sequence, now_ns, "coordinator", "left", "returning", None, None, list(ARM_JOINT_NAMES["left"]), np.radians(target[:7]).tolist(), self.coordinator_instance_id, self.router_zid)
-        right = ArmJointCommand(1, self._state_sequence, now_ns, "coordinator", "right", "returning", None, None, list(ARM_JOINT_NAMES["right"]), np.radians(target[7:]).tolist(), self.coordinator_instance_id, self.router_zid)
-        self._send_commands(left, right)
+        # The coordinator owns the bounded Home trajectory.  Marvin must not
+        # synthesize a direct Home step here: doing so would bypass the
+        # authority and let a stale/foreign state move the robot.
+        if not self._command_pair_fresh(int(now_ns)) or any(
+            command.mode != "returning" for command in self._commands.values()
+        ):
+            self._last_error = "coordinator bounded returning command stale or missing"
+            return
+        self._send_commands(self._commands["left"], self._commands["right"])
 
     def _trip_soft_stop(self, reason: str) -> None:
         self._last_error = reason

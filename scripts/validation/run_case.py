@@ -383,6 +383,7 @@ def _source_type(profile: str) -> str:
         "target_replay_sim": "target_replay",
         "joint_replay_sim": "joint_replay",
         "wuji_direct_real": "joint_replay",
+        "diagnostic_mocap_calibration_sim": "diagnostic_mocap_calibration",
     }
     return values.get(profile, "pico_controller")
 def _profile_config(profile: str) -> dict[str, Any]:
@@ -728,6 +729,7 @@ def _build_manifest(case_id: str, case: Mapping[str, Any], profile: str, run_id:
         "run_id": run_id,
         "case_id": case_id,
         "profile": profile,
+        "source_type": _source_type(profile),
         "producer": contract["producer"],
         "required_capability": case["required_capability"],
         "active_sides": list(case["active_sides"]),

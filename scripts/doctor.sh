@@ -90,17 +90,6 @@ for program in "${required_programs[@]}"; do
     exit 1
   fi
 done
-for stale in \
-  "${runtime_bin}"/marvin_hardware_* \
-  "${runtime_bin}"/controller_only* \
-  "${runtime_bin}"/pico_controller_input* \
-  "${runtime_bin}"/pico_link_probe* \
-  "${runtime_bin}"/mocap_keyboard_step* \
-  "${runtime_bin}"/mujoco_joint_viewer* \
-  "${runtime_bin}"/mujoco_h5_wrist_replay* \
-  "${runtime_bin}"/tianji_kinematic_sim*; do
-  [[ ! -e "${stale}" ]] || { printf '错误：runtime 存在过时入口：%s\n' "${stale}" >&2; exit 1; }
-done
 runtime_config="${PROJECT_PREFIX}/share/pico_body_tianji/config"
 for stale_config in "${runtime_config}/mode"; do
   [[ ! -e "${stale_config}" ]] || { printf '错误：runtime 存在过时配置目录：%s\n' "${stale_config}" >&2; exit 1; }

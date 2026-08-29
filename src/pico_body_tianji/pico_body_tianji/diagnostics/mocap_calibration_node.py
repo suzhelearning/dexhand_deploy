@@ -33,6 +33,7 @@ import numpy as np
 
 from ..protocol.messages import SessionState
 from ..sources.common.target_mapper import ArmTargetBatch, EndEffectorTargetMapper
+from ..sources.common.target_publisher import SequenceAllocator, TargetPublisher
 from .mocap_motion import (
     AXIS_STEPS,
     ArrowKeyParser,
@@ -142,20 +143,30 @@ class MocapLiveNode:
         if side not in ("right", "both"):
             raise ValueError(f"side 必须是 right/both 之一，实际 {side!r}")
         identity_values = (publisher_instance_id, router_zid, coordinator_instance_id)
+        self._session = session
+        self._publisher = None
         if any(value is not None for value in identity_values):
             if not all(value for value in identity_values):
                 raise ValueError("diagnostic requires component/router/coordinator identities")
+            allocator = SequenceAllocator()
             self._session_client = SessionClient(
                 session,
                 source="diagnostic_mocap_calibration",
                 publisher_instance_id=publisher_instance_id,
                 router_zid=router_zid,
                 expected_coordinator_instance_id=coordinator_instance_id,
+                allocator=allocator,
             )
             self._session_client.start()
+            self._publisher = TargetPublisher(
+                session,
+                source="diagnostic_mocap_calibration",
+                publisher_instance_id=publisher_instance_id,
+                router_zid=router_zid,
+                allocator=allocator,
+            )
         else:
             self._session_client = None
-        self._session = session
         self._rate = rate
         self._side = side
         self._step_mm = float(step_mm)
@@ -723,9 +734,23 @@ class MocapLiveNode:
         # Diagnostic state is local display state, never a protocol authority.
         self._diagnostic_state = str(state)
     def _publish_targets(self, targets: ArmTargetBatch) -> None:
-        # Keep the computed preview local.  Canonical target publication is
-        # reserved for product sources and the coordinator.
         self._latest_target_preview = targets
+        publisher = getattr(self, "_publisher", None)
+        if publisher is None:
+            return
+        for side in self._active_sides:
+            pose = targets.left_pose if side == "left" else targets.right_pose
+            elbow = (
+                targets.left_default_elbow_direction
+                if side == "left"
+                else targets.right_default_elbow_direction
+            )
+            publisher.publish_arm_target(
+                side=side,
+                position_m=pose[:3],
+                orientation_xyzw=pose[3:],
+                elbow_reference_direction=elbow,
+            )
     def _tick(self) -> bool:
         """rate Hz 映射虚拟目标；仅 q 回零完成后返回 False。"""
         session_client = getattr(self, "_session_client", None)
@@ -820,15 +845,16 @@ class MocapLiveNode:
         circle_trajectory = self._circle_status()
         state = {
             "armed": "idle",
+            "start_pending": "start_pending",
             "stepping": "teleop",
             "returning": "returning",
-        }[phase]
+        }.get(phase, phase)
         status = {
             "phase": phase,
             "state": state,
-            "source": "live",
-            "input": "mocap_live",
-            "scope": "mocap_live",
+            "source": "diagnostic_mocap_calibration",
+            "input": "motive",
+            "scope": "mocap_calibration",
             "mapping": "controller_relative_end_pose_conditioned_v1",
             "elbow_constraint": "published_default_zsp_backend_selected",
             "body_model_used": False,
@@ -846,9 +872,17 @@ class MocapLiveNode:
             "error": None,
         }
         self._latest_diagnostics = status
-        capture = getattr(self, "_status_pub", None)
-        if capture is not None:
-            capture.put_json(status)
+        publisher = getattr(self, "_publisher", None)
+        session_client = getattr(self, "_session_client", None)
+        if publisher is not None:
+            publisher.publish_source_status(
+                component_id="diagnostic_mocap_calibration",
+                phase=phase,
+                ready=session_client is None or session_client.startup_ready,
+                healthy=phase != "fault",
+                capabilities=["simulation"],
+                diagnostics=status,
+            )
         for side, observed in motive_pose.items():
             position = observed["position_m"]
             orientation = observed["orientation_xyzw"]
@@ -916,6 +950,9 @@ class MocapLiveNode:
                 pass
         if self._circle_deadman is not None:
             self._circle_deadman.close()
+        publisher = getattr(self, "_publisher", None)
+        if publisher is not None:
+            publisher.close()
         if self._session_client is not None:
             self._session_client.close()
         self._session.close()
