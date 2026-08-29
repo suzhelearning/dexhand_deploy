@@ -43,6 +43,8 @@
 - Canonical Wuji dry-run test now includes a process-level managed typed-transport smoke (skips honestly when router/binary is unavailable) plus finite/shape, invalid-input, and translation-invariance regressions.
 - Round1 command: `PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_task5_executor_contract.MarvinExecutorSafetyTest tests.test_validation_tools tests.e2e_wuji_hand2_dry -v`
   - Result: 37 tests executed passed; managed process class skipped because `zenohd`/router was unavailable.
+- Follow-up analyzer regression: `PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_validation_tools -v`
+  - Result: 26 tests passed; `py_compile` and `git diff --check` also passed.
 ## 未能执行与外部阻塞
 
 - acquisition `pixi run test` 未在本次修改中触碰；历史 ledger 记录其 151 tests 中仅有用户 dirty baseline 导致的 2 个 `tests/test_object_offset.py` offset 失败，采集仓库用户修改未覆盖。

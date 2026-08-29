@@ -225,7 +225,20 @@ def _verify_capture(bundle: Path, manifest: Mapping[str, Any]) -> tuple[list[dic
             router = row.get("router_zid")
             if not router or router != manifest["router_zid"]:
                 raise AnalysisError(f"{name} router_zid is missing or differs from manifest")
-            if topic.startswith("tianji/") and _authority_for_row(row, manifest) is None:
+            instance = str(row.get("publisher_instance_id") or _payload(row).get("publisher_instance_id", ""))
+            if topic == "tianji/safety/stop":
+                expected = str(manifest.get("publisher_instance_ids", {}).get("validation_supervisor", ""))
+                if instance != expected:
+                    raise AnalysisError(f"{name} safety-stop supervisor authority violation")
+            elif topic.startswith("tianji/safety/ack/"):
+                expected = {
+                    str(item["publisher_instance_id"])
+                    for item in manifest.get("authority_contract", [])
+                    if item.get("component_role") in {"executor_arm", "executor_hand"}
+                }
+                if topic.rsplit("/", 1)[-1] != instance or instance not in expected:
+                    raise AnalysisError(f"{name} safety-stop executor authority violation")
+            elif topic.startswith("tianji/") and _authority_for_row(row, manifest) is None:
                 raise AnalysisError(f"{name} publisher authority violation for {topic}")
     return captures["protocol.jsonl"], captures["liveliness.jsonl"]
 
