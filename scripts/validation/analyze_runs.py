@@ -130,6 +130,8 @@ def _verify_checksums(bundle: Path, *, session_required: bool = True) -> None:
     expected = set(REQUIRED_FILES - {"checksums.sha256"})
     if session_required:
         expected.add("session.h5")
+    if (bundle / "real-preflight.json").is_file():
+        expected.add("real-preflight.json")
     expected |= {path.relative_to(bundle).as_posix() for path in (bundle / "logs").glob("*") if path.is_file()}
     if set(listed) != expected:
         missing = sorted(expected - set(listed)); extra = sorted(set(listed) - expected)
@@ -166,6 +168,21 @@ def _verify_manifest(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
         raise AnalysisError("manifest resolved hand mode is missing")
     if manifest.get("required_capability") == "real" and manifest.get("robot_ip") in {None, "", "unrecorded"}:
         raise AnalysisError("real manifest must include robot IP")
+    if manifest.get("required_capability") == "real" and not manifest.get("real_preflight_file"):
+        raise AnalysisError("real manifest must include bound preflight attestation")
+    if manifest.get("required_capability") == "real":
+        attestation = Path(str(manifest["real_preflight_file"]))
+        try:
+            value = json.loads(attestation.read_text(encoding="utf-8"))
+            if set(value) != {"run_id", "router_zid", "validation_supervisor_instance_id", "launcher_nonce", "capability"}:
+                raise ValueError("attestation schema mismatch")
+            if value["run_id"] != manifest["run_id"] or value["router_zid"] != manifest["router_zid"]:
+                raise ValueError("attestation run/router mismatch")
+            if value["validation_supervisor_instance_id"] != manifest["publisher_instance_ids"]["validation_supervisor"]:
+                raise ValueError("attestation supervisor mismatch")
+            RealCapabilityInput.from_mapping(value["capability"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise AnalysisError(f"invalid bound real preflight attestation: {exc}") from exc
     expected_authorities = _authority_contract(manifest)
     if manifest.get("authority_contract") != expected_authorities:
         raise AnalysisError("manifest authority contract does not match preallocated identities")

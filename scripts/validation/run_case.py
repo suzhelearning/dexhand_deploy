@@ -475,6 +475,8 @@ def _write_checksums(bundle: Path) -> None:
         "manifest.yaml", "status.jsonl", "operator_events.jsonl",
         "liveliness.jsonl", "protocol.jsonl", "operator_result.yaml",
     ]
+    if (bundle / "real-preflight.json").is_file():
+        names.insert(1, "real-preflight.json")
     if (bundle / "session.h5").is_file():
         names.insert(1, "session.h5")
     names += sorted(path.relative_to(bundle).as_posix() for path in (bundle / "logs").glob("*") if path.is_file())
