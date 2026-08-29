@@ -1,4 +1,4 @@
-source_config: replay/joint.yaml
+source_config: replay/joint_real.yaml
 arm_producer_config: null
 arm_executor_config: executors/marvin.yaml
 coordinator_config: coordinator/arm.yaml

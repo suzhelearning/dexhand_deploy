@@ -49,24 +49,24 @@ def monotonic_ns() -> int:
     return time.monotonic_ns()
     
 CASE_CONTRACTS = {
-    "acquisition_live": {"profile": "acquisition_live", "producer": "acquisition", "ik_backend": None},
-    "pico_sim": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "mocap_live_sim": {"profile": "mocap_live_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "h5_sim": {"profile": "h5_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "ik_pinocchio_cpp": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "ik_pinocchio_qp": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_qp"},
-    "ik_tianji_official": {"profile": "pico_sim", "producer": "ik", "ik_backend": "tianji_official"},
-    "target_replay_sim": {"profile": "target_replay_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "joint_replay_sim": {"profile": "joint_replay_sim", "producer": "joint_replay", "ik_backend": None},
-    "policy_hold_sim": {"profile": "pico_sim", "producer": "policy_hold", "ik_backend": None},
-    "marvin_pico_real_10pct": {"profile": "pico_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "marvin_mocap_live_real_10pct": {"profile": "mocap_live_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "marvin_h5_real_10pct": {"profile": "h5_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "wuji_retarget_dry": {"profile": "h5_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "wuji_retarget_real": {"profile": "h5_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "wuji_direct_real": {"profile": "wuji_direct_real", "producer": "joint_replay", "ik_backend": None},
-    "fault_recovery_sim": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "fault_recovery_real": {"profile": "pico_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "acquisition_live": {"profile": "acquisition_live", "producer": "acquisition", "ik_backend": None, "recordable": False, "source_capability": "simulation", "hand_mode": "disabled"},
+    "pico_sim": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "mocap_live_sim": {"profile": "mocap_live_sim", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "h5_sim": {"profile": "h5_sim", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "simulation", "hand_mode": "auto"},
+    "ik_pinocchio_cpp": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "ik_pinocchio_qp": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "ik_tianji_official": {"profile": "pico_sim", "producer": "ik", "ik_backend": "tianji_official", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "target_replay_sim": {"profile": "target_replay_sim", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": False, "source_capability": "simulation", "hand_mode": "auto"},
+    "joint_replay_sim": {"profile": "joint_replay_sim", "producer": "joint_replay", "ik_backend": None, "recordable": False, "source_capability": "simulation", "hand_mode": "direct"},
+    "policy_hold_sim": {"profile": "pico_sim", "producer": "policy_hold", "ik_backend": None, "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "marvin_pico_real_10pct": {"profile": "pico_real", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "real", "hand_mode": "disabled"},
+    "marvin_mocap_live_real_10pct": {"profile": "mocap_live_real", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "real", "hand_mode": "disabled"},
+    "marvin_h5_real_10pct": {"profile": "h5_real", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "real", "hand_mode": "auto"},
+    "wuji_retarget_dry": {"profile": "h5_sim", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "simulation", "hand_mode": "retarget"},
+    "wuji_retarget_real": {"profile": "h5_real", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "real", "hand_mode": "retarget"},
+    "wuji_direct_real": {"profile": "wuji_direct_real", "producer": "joint_replay", "ik_backend": None, "recordable": False, "source_capability": "real", "hand_mode": "direct"},
+    "fault_recovery_sim": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "fault_recovery_real": {"profile": "pico_real", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "real", "hand_mode": "disabled"},
 }
 
 
@@ -79,6 +79,12 @@ def build_session_contract(case_id: str, overrides: Mapping[str, Any] | None = N
     requested = override.get("ik_backend")
     if requested is not None and requested != contract["ik_backend"]:
         raise ValueError(f"case {case_id} requires IK backend {contract['ik_backend']!r}, got {requested!r}")
+    profile = _profile_config(contract["profile"])
+    if profile:
+        if profile.get("required_capability") != contract["source_capability"] and case_id != "wuji_direct_real":
+            raise ValueError(f"case {case_id} source capability/profile mismatch")
+        if contract["hand_mode"] != "auto" and profile.get("hand_mode") not in {contract["hand_mode"], "auto"}:
+            raise ValueError(f"case {case_id} hand mode/profile mismatch")
     return contract
 
 
@@ -272,6 +278,8 @@ class SafetyStopSupervisor:
                     continue
                 ack = value if isinstance(value, SafetyStopAck) else SafetyStopAck.from_dict(payload)
                 ack.validate_for(executor_id, self.run_id)
+                if ack.envelope.publisher_instance_id != executor_id:
+                    raise ValueError("ack publisher instance does not match expected executor")
                 if ack.envelope.router_zid != self.router_zid or ack.envelope.sequence != request.envelope.sequence:
                     raise ValueError("ack sequence/router mismatch")
                 valid[executor_id] = ack
@@ -350,6 +358,7 @@ def _source_type(profile: str) -> str:
         "h5_real": "h5_replay",
         "target_replay_sim": "target_replay",
         "joint_replay_sim": "joint_replay",
+        "wuji_direct_real": "joint_replay",
     }
     return values.get(profile, "pico_controller")
 def _profile_config(profile: str) -> dict[str, Any]:
@@ -441,6 +450,80 @@ def _create_empty_session(path: Path, source_type: str, router_zid: str) -> None
         pass
 
 
+class ManagedEvidenceCapture:
+    """Capture real wire/status/liveliness evidence while a session is online."""
+
+    def __init__(self, endpoint: str, bundle: Path, run_id: str) -> None:
+        from pico_body_tianji.zenoh_util import open_session
+
+        self.bundle = bundle
+        self.run_id = run_id
+        self.session = open_session(endpoint)
+        self._streams: list[Any] = []
+        self._lock = __import__("threading").Lock()
+        self._streams.append(self.session.declare_subscriber("tianji/**", self._on_data))
+        try:
+            self._streams.append(self.session.liveliness().declare_subscriber("tj/live/**", self._on_liveliness))
+        except (AttributeError, TypeError):
+            self._streams.append(self.session.declare_subscriber("tj/live/**", self._on_liveliness))
+
+    @staticmethod
+    def _key(sample: Any) -> str:
+        value = getattr(sample, "key_expr", "")
+        return str(value)
+
+    @staticmethod
+    def _payload(sample: Any) -> dict[str, Any] | None:
+        try:
+            raw = bytes(sample.payload)
+            value = json.loads(raw.decode("utf-8"))
+        except (AttributeError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            return None
+        return dict(value) if isinstance(value, Mapping) else None
+
+    def _append(self, filename: str, row: Mapping[str, Any]) -> None:
+        with self._lock, (self.bundle / filename).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(dict(row), ensure_ascii=False, separators=(",", ":")) + "\n")
+            stream.flush()
+
+    def _on_data(self, sample: Any) -> None:
+        payload = self._payload(sample)
+        if payload is None:
+            return
+        key = self._key(sample)
+        payload.setdefault("schema_version", 1)
+        payload.setdefault("run_id", self.run_id)
+        payload.setdefault("topic", key)
+        payload.setdefault("router_zid", payload.get("router_zid") or os.environ.get("TIANJI_ROUTER_ZID", ""))
+        if key.endswith("/status"):
+            self._append("status.jsonl", payload)
+        else:
+            self._append("protocol.jsonl", payload)
+
+    def _on_liveliness(self, sample: Any) -> None:
+        key = self._key(sample)
+        parts = key.split("/")
+        row = {
+            "schema_version": 1,
+            "run_id": self.run_id,
+            "timestamp_ns": monotonic_ns(),
+            "key_expr": key,
+            "publisher_instance_id": parts[-1] if parts else "",
+            "router_zid": os.environ.get("TIANJI_ROUTER_ZID", ""),
+        }
+        self._append("liveliness.jsonl", row)
+
+    def close(self) -> None:
+        for stream in self._streams:
+            try:
+                stream.undeclare() if hasattr(stream, "undeclare") else stream.close()
+            except Exception:
+                pass
+        try:
+            self.session.close()
+        except Exception:
+            pass
+
 def _prerequisites_passed(root: Path, prerequisites: Iterable[str]) -> tuple[bool, list[str]]:
     """Accept only bundles validated by analyzer, never directory-name hints."""
     missing: list[str] = []
@@ -499,7 +582,6 @@ def _instance_map(manifest: Mapping[str, Any], key: str) -> dict[str, str]:
     value = manifest.get("publisher_instance_ids", {}).get(key, {})
     return dict(value) if isinstance(value, Mapping) else {}
 
-
 def instance_handoff_environment(manifest: Mapping[str, Any]) -> dict[str, str]:
     """Return exact preallocated IDs for run_session child processes."""
     ids = manifest.get("publisher_instance_ids", {})
@@ -521,40 +603,89 @@ def instance_handoff_environment(manifest: Mapping[str, Any]) -> dict[str, str]:
     return {key: value for key, value in environment.items() if value}
 
 
+def _authority_contract(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Expand manifest IDs into role/logical/side/topic/live identities."""
+    ids = manifest.get("publisher_instance_ids", {})
+    router = str(manifest.get("router_zid", ""))
+    profile = str(manifest.get("profile", ""))
+    source = _source_type(profile)
+    producer = str(manifest.get("producer", ""))
+    source_logical = "acquisition" if profile == "acquisition_live" else source
+    entries: list[dict[str, Any]] = []
+
+    def add(role: str, logical_id: str, instance: Any, side: str | None, topics: list[str], live_role: str) -> None:
+        if not instance or str(instance) in {"disabled", "None"}:
+            return
+        entries.append({
+            "component_role": role,
+            "logical_id": logical_id,
+            "side": side,
+            "publisher_instance_id": str(instance),
+            "router_zid": router,
+            "topics": topics,
+            "liveliness": f"tj/live/{live_role}/{logical_id}/{instance}",
+        })
+
+    add("source", source_logical, ids.get("source"), None, ["tianji/source/status", f"tianji/raw/{source}", "tianji/target/arm/{side}", "tianji/target/hand/{side}"], "source")
+    if ids.get("producer_arm"):
+        producer_logical = "joint_replay" if producer == "joint_replay" else producer
+        if producer_logical == "ik":
+            producer_logical = "arm_ik_producer"
+        add("producer_arm", producer_logical, ids.get("producer_arm"), None, ["tianji/producer/status", "tianji/proposal/arm/{side}", "tianji/producer/arm/{side}/solved_pose"], "producer/arm")
+    add("coordinator_arm", "arm", ids.get("coordinator_arm"), None, ["tianji/coordinator/status", "tianji/session/state", "tianji/command/arm/{side}"], "coordinator/arm")
+    executor_config = _profile_config(profile).get("arm_executor_config", "")
+    executor_logical = "marvin" if str(executor_config).endswith("marvin.yaml") else "mujoco"
+    add("executor_arm", executor_logical, ids.get("executor_arm"), None, ["tianji/executor/status", "tianji/state/arm"], "executor/arm")
+    hand_producers = _instance_map(manifest, "hand_producer_instances")
+    hand_executors = _instance_map(manifest, "hand_executor_instances")
+    for side, instance in sorted(hand_producers.items()):
+        logical = "h5_direct" if manifest.get("resolved_hand_mode") == "direct" and profile in {"h5_sim", "h5_real"} else (
+            "joint_replay" if source == "joint_replay" else f"wuji_retarget_{side}"
+        )
+        add("producer_hand", logical, instance, side, ["tianji/producer/status", f"tianji/command/hand/{side}"], "producer/hand")
+    for side, instance in sorted(hand_executors.items()):
+        add("executor_hand", f"wuji_{side}", instance, side, [f"tianji/executor/hand/{side}/status", f"tianji/state/hand/{side}"], "executor/hand")
+    if ids.get("recorder"):
+        add("recorder", "session_recorder", ids.get("recorder"), None, ["tianji/recorder/status"], "recorder")
+    return entries
+
+
 def _build_manifest(case_id: str, case: Mapping[str, Any], profile: str, run_id: str, supervisor: str, router_zid: str, started: str, args: argparse.Namespace) -> dict[str, Any]:
     profile_config = _profile_config(profile)
     source = profile_config.get("source_config", "")
     contract = build_session_contract(case_id, {"ik_backend": args.ik_backend})
     backend = contract["ik_backend"]
     input_path = Path(args.input).expanduser() if args.input else None
+    actual_hand_mode = _resolved_hand_mode(case, profile, input_path)
     instance_ids: dict[str, Any] = {"validation_supervisor": supervisor}
     if not args.fake:
-        instance_ids.update({
-            "source": str(uuid.uuid4()),
-            "producer_arm": str(uuid.uuid4()),
-            "coordinator_arm": str(uuid.uuid4()),
-            "executor_arm": str(uuid.uuid4()),
-            "recorder": str(uuid.uuid4()),
-        })
-        actual_hand_mode = _resolved_hand_mode(case, profile, input_path)
-        hand_sides = list(case["active_sides"]) if case.get("hand_mode") != "disabled" else []
-        if hand_sides:
-            producer_instances: dict[str, str] = {}
-            executor_instances: dict[str, str] = {}
-            for side in hand_sides:
-                executor_instances[side] = str(uuid.uuid4())
-                if actual_hand_mode == "direct" and profile in {"h5_sim", "h5_real"}:
-                    producer_instances[side] = instance_ids["source"]
-                elif profile in {"joint_replay_sim", "wuji_direct_real"}:
-                    producer_instances[side] = instance_ids["producer_arm"]
-                else:
-                    producer_instances[side] = str(uuid.uuid4())
-            instance_ids["hand_producer_instances"] = producer_instances
-            instance_ids["hand_executor_instances"] = executor_instances
-            instance_ids["producer_hand"] = producer_instances[hand_sides[0]]
-            instance_ids["executor_hand"] = executor_instances[hand_sides[0]]
-    hashes = _hashes()
+        instance_ids["source"] = str(uuid.uuid4())
+        if case_id != "acquisition_live":
+            instance_ids.update({
+                "producer_arm": str(uuid.uuid4()),
+                "coordinator_arm": str(uuid.uuid4()),
+                "executor_arm": str(uuid.uuid4()),
+            })
+            if contract["recordable"]:
+                instance_ids["recorder"] = str(uuid.uuid4())
+            hand_sides = list(case["active_sides"]) if actual_hand_mode != "disabled" else []
+            if hand_sides:
+                producer_instances: dict[str, str] = {}
+                executor_instances: dict[str, str] = {}
+                for side in hand_sides:
+                    executor_instances[side] = str(uuid.uuid4())
+                    if actual_hand_mode == "direct" and profile in {"h5_sim", "h5_real"}:
+                        producer_instances[side] = instance_ids["source"]
+                    elif profile in {"joint_replay_sim", "wuji_direct_real"}:
+                        producer_instances[side] = instance_ids["producer_arm"]
+                    else:
+                        producer_instances[side] = str(uuid.uuid4())
+                instance_ids["hand_producer_instances"] = producer_instances
+                instance_ids["hand_executor_instances"] = executor_instances
+                instance_ids["producer_hand"] = producer_instances[hand_sides[0]]
+                instance_ids["executor_hand"] = executor_instances[hand_sides[0]]
     repositories = {"teleop": git_fingerprint(ROOT), "acquisition": git_fingerprint(Path("/home/current/syz/mocap/acquisition"))}
+    hashes = _hashes()
     manifest: dict[str, Any] = {
         "schema_name": BUNDLE_SCHEMA,
         "schema_version": BUNDLE_VERSION,
@@ -562,13 +693,12 @@ def _build_manifest(case_id: str, case: Mapping[str, Any], profile: str, run_id:
         "case_id": case_id,
         "profile": profile,
         "producer": contract["producer"],
-        "required_devices": list(case["required_devices"]),
         "required_capability": case["required_capability"],
         "active_sides": list(case["active_sides"]),
-        "hand": {"sides": list(case["active_sides"] if case.get("hand_mode") != "disabled" else []), "mode": case["hand_mode"]},
-        "hand_sides": list(case["active_sides"] if case.get("hand_mode") != "disabled" else []),
+        "hand": {"sides": list(case["active_sides"] if actual_hand_mode != "disabled" else []), "mode": actual_hand_mode},
+        "hand_sides": list(case["active_sides"] if actual_hand_mode != "disabled" else []),
         "hand_mode": case["hand_mode"],
-        "robot": {"ip": args.robot_ip or "unrecorded", "model": args.robot_model or "unverified"},
+        "resolved_hand_mode": actual_hand_mode,
         "robot_ip": args.robot_ip or "unrecorded",
         "robot_model": args.robot_model or "unverified",
         "motive_rigid_ids": list(args.motive_rigid_id or []),
@@ -601,6 +731,7 @@ def _build_manifest(case_id: str, case: Mapping[str, Any], profile: str, run_id:
         "ended_at": None,
         "exit_reason": "not_finished",
     }
+    manifest["authority_contract"] = _authority_contract(manifest)
     return manifest
 
 
@@ -633,9 +764,14 @@ def _write_operator_result(path: Path, *, outcome: str, emergency_stop: bool = F
 def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: argparse.Namespace) -> SafetyStopResult | None:
     if not args.danger_stop:
         return None
-    ids = [str(manifest["publisher_instance_ids"]["executor_arm"])]
-    if manifest.get("hand_mode") != "disabled" and "executor_hand" in manifest["publisher_instance_ids"]:
-        ids.append(str(manifest["publisher_instance_ids"]["executor_hand"]))
+    ids = [entry["publisher_instance_id"] for entry in manifest.get("authority_contract", []) if entry.get("component_role") == "executor_arm"]
+    ids += [
+        entry["publisher_instance_id"]
+        for entry in manifest.get("authority_contract", [])
+        if entry.get("component_role") == "executor_hand"
+    ]
+    if not ids:
+        ids = [str(manifest["publisher_instance_ids"]["executor_arm"])]
     supervisor_id = str(manifest["publisher_instance_ids"]["validation_supervisor"])
     supervisor = SafetyStopSupervisor(str(manifest["run_id"]), supervisor_id, str(manifest["router_zid"]))
     transport: ZenohSafetyTransport | None = None
@@ -704,22 +840,58 @@ def _run_fake(bundle: Path, manifest: dict[str, Any], status: Any, args: argpars
     return 0
 
 
+def _run_acquisition(bundle: Path, manifest: dict[str, Any], status: Any, args: argparse.Namespace) -> int:
+    """Observe the acquisition-owned aligned stream; never manufacture a sample."""
+    try:
+        capture = ManagedEvidenceCapture(str(manifest["router"]["endpoint"]), bundle, manifest["run_id"])
+        observation = AlignedStreamObservation()
+
+        def on_aligned(sample: Any) -> None:
+            payload = capture._payload(sample)
+            if payload is None:
+                return
+            hands = payload.get("hands", {})
+            if not isinstance(hands, Mapping):
+                return
+            row = dict(payload)
+            row["schema_version"] = 1
+            row["run_id"] = manifest["run_id"]
+            row["topic"] = "mocap/aligned/hands"
+            row["publisher_instance_id"] = str(payload.get("stream_instance_id", ""))
+            row["router_zid"] = str(payload.get("router_zid", manifest["router_zid"]))
+            row["left_valid"] = bool(isinstance(hands.get("left"), Mapping) and hands["left"].get("valid", False))
+            row["right_valid"] = bool(isinstance(hands.get("right"), Mapping) and hands["right"].get("valid", False))
+            if observation.accept(row):
+                capture._append("protocol.jsonl", row)
+
+        capture._streams.append(capture.session.declare_subscriber("mocap/aligned/hands", on_aligned))
+    except Exception as exc:
+        _write_status(status, event="acquisition_capture_unavailable", component="acquisition", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], healthy=False, complete=False, error=str(exc))
+        return 1
+    deadline = time.monotonic() + min(float(manifest["max_duration_s"]), float(args.duration))
+    try:
+        while time.monotonic() < deadline and not observation.complete:
+            time.sleep(0.05)
+    finally:
+        capture.close()
+    (bundle / "logs" / "acquisition.log").write_text(
+        f"source=mocap/aligned/hands samples={observation.samples} stream_instance_id={observation.stream_instance_id or ''} router_zid={observation.router_zid or ''}\n",
+        encoding="utf-8",
+    )
+    _write_status(status, event="acquisition_observation", component="acquisition", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], healthy=observation.complete, complete=observation.complete, samples=observation.samples, stream_instance_id=observation.stream_instance_id, router_zid=observation.router_zid)
+    if not observation.complete:
+        _write_status(status, event="acquisition_observation_missing", component="acquisition", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], healthy=False, complete=False, error="mocap/aligned/hands produced no valid sample")
+        return 1
+    return 0
+
+
 def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argparse.Namespace) -> int:
     profile = manifest["profile"]
     if profile == "acquisition_live":
-        _write_status(
-            status,
-            event="acquisition_observation_missing",
-            component="acquisition",
-            supervisor=manifest["publisher_instance_ids"]["validation_supervisor"],
-            run_id=manifest["run_id"],
-            healthy=False,
-            complete=False,
-            error="external StreamHub observation is required; no sample was recorded",
-        )
-        return 1
+        return _run_acquisition(bundle, manifest, status, args)
+    contract = CASE_CONTRACTS[manifest["case_id"]]
     command = ["bash", str(ROOT / "scripts" / "run_session.sh"), "--profile", profile]
-    if profile not in {"target_replay_sim", "joint_replay_sim"}:
+    if contract["recordable"]:
         command += ["--record", str(bundle / "session.h5")]
     if args.input:
         command += ["--input", args.input]
@@ -732,6 +904,8 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
     env.update({
         "TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID": manifest["publisher_instance_ids"]["validation_supervisor"],
         "TIANJI_ROUTER_ZID": manifest["router_zid"],
+        "TIANJI_VALIDATION_CASE_ID": manifest["case_id"],
+        "TIANJI_VALIDATION_HAND_MODE": str(manifest.get("resolved_hand_mode") or ""),
         "TIANJI_IK_BACKEND": str(manifest.get("ik_backend") or ""),
         "TIANJI_VALIDATION_IK_BACKEND": str(manifest.get("ik_backend") or ""),
         "TIANJI_VALIDATION_PRODUCER": str(manifest.get("producer") or ""),
@@ -740,17 +914,13 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
     log_path = bundle / "logs" / "session.log"
     with log_path.open("w", encoding="utf-8") as log:
         _write_status(status, event="session_starting", component="run_session", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], command=command)
-        capture = {
-            "schema_version": 1,
-            "timestamp_ns": monotonic_ns(),
-            "run_id": manifest["run_id"],
-            "publisher_instance_id": manifest["publisher_instance_ids"]["validation_supervisor"],
-            "event": "managed_session_starting",
-            "router_zid": manifest["router_zid"],
-        }
-        for name in ("liveliness.jsonl", "protocol.jsonl"):
-            with (bundle / name).open("a", encoding="utf-8") as capture_stream:
-                capture_stream.write(json.dumps(capture, separators=(",", ":")) + "\n")
+        try:
+            evidence_capture: ManagedEvidenceCapture | None = ManagedEvidenceCapture(
+                str(manifest["router"]["endpoint"]), bundle, manifest["run_id"]
+            )
+        except Exception as exc:
+            evidence_capture = None
+            _write_status(status, event="capture_unavailable", component="validation", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], healthy=False, error=str(exc))
         process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, text=True)
         stop_result = _managed_stop(bundle, manifest, status, args)
         deadline = time.monotonic() + float(manifest["max_duration_s"])
@@ -778,6 +948,8 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
             process.terminate()
             process.wait(timeout=5)
         _write_status(status, event="session_finished", component="run_session", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], exit_reason=exit_reason, process_returncode=process.returncode)
+        if evidence_capture is not None:
+            evidence_capture.close()
     runtime_dir = Path(env.get("PICO_TIANJI_RUNTIME_DIR", os.environ.get("PICO_TIANJI_RUNTIME_DIR", "/tmp")))
     for child_log in runtime_dir.glob(f"{manifest['run_id']}-*.log"):
         destination = bundle / "logs" / f"{child_log.stem}.log"
@@ -787,7 +959,7 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
             # Missing child log is evidence of failed capture; retain the
             # validation log and let analyzer/checksum expose what is present.
             continue
-    if profile not in {"target_replay_sim", "joint_replay_sim", "acquisition_live"} and not (bundle / "session.h5").exists():
+    if CASE_CONTRACTS[manifest["case_id"]]["recordable"] and not (bundle / "session.h5").exists():
         raise RuntimeError("session recorder did not produce session.h5")
     if stop_result is not None and not stop_result.accepted:
         return 1
@@ -895,6 +1067,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--operator-notes", default="")
     parser.add_argument("--operator-event", "--event", action="append")
     parser.add_argument("--danger-stop", choices=sorted(DANGEROUS_STOPS), help="explicitly issue a latched danger stop; never automatic")
+    parser.add_argument("--duration", type=float, default=10.0, help="acquisition observation timeout in seconds")
     parser.add_argument("--extra", nargs=argparse.REMAINDER)
     return parser
 

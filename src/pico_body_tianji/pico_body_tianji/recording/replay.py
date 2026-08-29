@@ -334,10 +334,14 @@ class JointReplayNode(_ReplayLifecycle):
         active_hand_sides: Iterable[str] = (),
         inactive_hand_sides: Iterable[str] = (),
         rate_hz: float = 60.0,
+        capabilities: Iterable[str] = ("simulation",),
         clock: Callable[[], int] = time.monotonic_ns,
         expected_coordinator_instance_id: str | None = None,
         session_client: SessionClient | None = None,
     ) -> None:
+        self.capabilities = tuple(dict.fromkeys(str(value) for value in capabilities))
+        if not self.capabilities or not ({"simulation", "real"} & set(self.capabilities)):
+            raise ValueError("capabilities must include simulation or real")
         source_publisher_instance_id = source_publisher_instance_id or publisher_instance_id
         producer_publisher_instance_id = producer_publisher_instance_id or publisher_instance_id
         if not source_publisher_instance_id or not producer_publisher_instance_id: raise ValueError("source and producer instance ids are required")
@@ -388,12 +392,12 @@ class JointReplayNode(_ReplayLifecycle):
     def publish_status(self, *, phase: str, ready: bool, healthy: bool, error: str | None = None) -> None:
         if self.session is None: return
         sequence = self._source_allocator.next()
-        status = ComponentStatus(1, sequence, int(self._clock()), "source", "joint_replay", phase, ready, healthy, ["simulation"], error, {}, self.source_publisher_instance_id, self.router_zid)
+        status = ComponentStatus(1, sequence, int(self._clock()), "source", "joint_replay", phase, ready, healthy, list(self.capabilities), error, {}, self.source_publisher_instance_id, self.router_zid)
         self._producer_pub(topics.SOURCE_STATUS).put_json(status.to_dict())
-        producer = ComponentStatus(1, self._producer_allocator.next(), int(self._clock()), "producer_arm", "joint_replay", phase, ready, healthy, ["simulation"], error, {"no_ik_producer": True}, self.producer_publisher_instance_id, self.router_zid)
+        producer = ComponentStatus(1, self._producer_allocator.next(), int(self._clock()), "producer_arm", "joint_replay", phase, ready, healthy, list(self.capabilities), error, {"no_ik_producer": True}, self.producer_publisher_instance_id, self.router_zid)
         self._producer_pub(topics.PRODUCER_STATUS).put_json(producer.to_dict())
         if self.active_hand_sides:
-            hand_producer = ComponentStatus(1, self._producer_allocator.next(), int(self._clock()), "producer_hand", "joint_replay", phase, ready, healthy, ["simulation"], error, {"direct": True}, self.producer_publisher_instance_id, self.router_zid)
+            hand_producer = ComponentStatus(1, self._producer_allocator.next(), int(self._clock()), "producer_hand", "joint_replay", phase, ready, healthy, list(self.capabilities), error, {"direct": True}, self.producer_publisher_instance_id, self.router_zid)
             self._producer_pub(topics.PRODUCER_STATUS).put_json(hand_producer.to_dict())
 
     @staticmethod

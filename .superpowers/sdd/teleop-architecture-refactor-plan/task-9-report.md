@@ -180,3 +180,40 @@ pixi run python -m py_compile scripts/validation/run_case.py scripts/validation/
 bash -n scripts/run_session.sh scripts/run_producer.sh
 git diff --check
 ```
+
+## Review round4 修复与验证
+
+- `wuji_direct_real` 固定到不可录制的 `replay/joint_real.yaml` direct route，source status 同时声明 `real|simulation` capability，arm executor 固定 Marvin；矩阵补充 `marvin_arm` 与 `marvin_pico_real_10pct` prerequisite。`run_case` 按 case contract 决定是否传 `--record`，retarget case 通过 `TIANJI_VALIDATION_HAND_MODE=retarget` 强制拒绝 `wuji2_joints`；policy hold 仅能由 `policy_hold_sim` contract 切换，IK QP/official backend 不被覆盖；manifest 记录实际 profile、producer、backend、resolved hand mode、robot IP 与完整 authority contract。
+- analyzer 改为 case-specific evidence gate：acquisition 只验证真实 `mocap/aligned/hands` 样本、stream instance/sequence、source liveliness、capture status/log；target/joint replay 不套用 arm Home；普通 session 才要求 HDF5 arm state、return 后 Home feedback 和启用手的 return 后 zero。formal status 按 role/logical/side/instance/router 校验，protocol target 与 solved 按 side+target_sequence 关联；hard limit、step、按 idle/teleop/returning 分段 velocity、tracking、fault/soft-stop、sequence duplicate/rollback/drop 均 fail closed。
+- managed validation 使用在线 `tianji/**` 与 `tj/live/**` capture；缺 capture 证据不转化为 pass。SafetyStop expected IDs 从完整 authority contract 构造，覆盖 arm 与每侧 hand，ack envelope publisher instance 必须等于对应 executor；非 fake stop 的 same-tick no-motion/SDK evidence 未采集时 analyzer 保持 unverified。acquisition 无样本明确返回非零并保留 `complete=false` 状态。
+
+实际输出：
+
+```text
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_validation_tools
+...............
+Ran 15 tests in 2.852s
+OK
+
+pixi run validation-run -- --list
+# 18 fixed IDs
+
+pixi run validation-run -- --case pico_sim --output /tmp/t9-r4-final --fake --headless
+pixi run validation-analyze -- /tmp/t9-r4-final
+{"bundles": 1, "run_ids": ["20260829T041416Z_pico_sim_85a9881f"]}
+
+pixi run validation-run -- --case pico_sim --output /tmp/t9-r4-final-stop --fake --headless --danger-stop collision_risk
+pixi run validation-analyze -- /tmp/t9-r4-final-stop
+{"bundles": 1, "run_ids": ["20260829T041418Z_pico_sim_97395d5e"]}
+
+TIANJI_ROUTER_ZID=unreachable-router pixi run validation-run -- --case acquisition_live --output /tmp/t9-r4-acq --duration 1
+acquisition_rc=1
+pixi run validation-analyze -- /tmp/t9-r4-acq
+{"bundles": 1, "run_ids": ["20260829T041433Z_acquisition_live_1d8c7eba"]}
+
+python3 -m py_compile scripts/validation/run_case.py scripts/validation/analyze_runs.py src/pico_body_tianji/pico_body_tianji/recording/replay.py src/pico_body_tianji/pico_body_tianji/recording/replay_cli.py
+bash -n scripts/run_session.sh
+git diff --check
+```
+
+本轮没有 Marvin、Wuji、PICO、Motive 或可用 acquisition stream，未声明任何 physical/real case 通过。`acquisition_live` 仅证明无样本时 fail-closed；fake/headless 产物仍为 `aborted`，不构成设备验收。

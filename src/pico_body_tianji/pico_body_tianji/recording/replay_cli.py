@@ -37,6 +37,12 @@ def main(argv: list[str] | None = None) -> int:
     replay_config = {}
     if args.config is not None:
         replay_config = yaml.safe_load(args.config.read_text(encoding="utf-8")) or {}
+    capability = str(os.environ.get("TIANJI_REQUIRED_CAPABILITY", replay_config.get("required_capability", "simulation")))
+    if capability not in {"simulation", "real"}:
+        raise SystemExit(f"unsupported replay capability: {capability}")
+    capabilities = ("simulation",) if capability == "simulation" else ("real", "simulation")
+    if args.mode == "joint" and capability == "real" and replay_config.get("real_preflight") is not True:
+        raise SystemExit("direct real replay requires explicit real_preflight=true")
     rate = float(args.rate or replay_config.get("rate_hz", 60.0))
     if rate <= 0:
         raise SystemExit("replay rate must be positive")
@@ -57,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             inactive_sides=_sides(args.inactive_sides),
             active_hand_sides=_sides(args.active_hand_sides),
             rate_hz=rate,
+            capabilities=capabilities,
             expected_coordinator_instance_id=coordinator,
         )
         if args.mode == "target":

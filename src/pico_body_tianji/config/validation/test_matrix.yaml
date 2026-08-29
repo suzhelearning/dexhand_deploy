@@ -198,14 +198,14 @@ cases:
       controlled: [operator_normal_end_with_fresh_feedback]
   wuji_direct_real:
     profile: wuji_direct_real
-    required_devices: [router, session_h5, wuji_hand2_real]
+    required_devices: [router, session_h5, marvin_arm, wuji_hand2_real]
     required_capability: real
     active_sides: [left, right]
     hand_mode: direct
     velocity_ratio: 0.1
     acceleration_ratio: 0.1
     max_duration_s: 600
-    prerequisites: [joint_replay_sim]
+    prerequisites: [joint_replay_sim, marvin_pico_real_10pct]
     stop_criteria:
       dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
       controlled: [operator_normal_end_with_fresh_feedback]

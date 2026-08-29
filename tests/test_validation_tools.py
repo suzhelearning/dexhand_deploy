@@ -170,8 +170,58 @@ class ValidationToolsTest(unittest.TestCase):
     def test_hand_case_profiles_and_retarget_contract_are_strict(self):
         matrix = yaml.safe_load(MATRIX.read_text(encoding="utf-8"))["cases"]
         self.assertEqual(matrix["wuji_direct_real"]["profile"], "wuji_direct_real")
+        self.assertEqual(matrix["wuji_direct_real"]["required_capability"], "real")
+        self.assertIn("marvin_arm", matrix["wuji_direct_real"]["required_devices"])
+        self.assertIn("marvin_pico_real_10pct", matrix["wuji_direct_real"]["prerequisites"])
         self.assertEqual(matrix["wuji_retarget_dry"]["hand_mode"], "retarget")
         self.assertEqual(matrix["wuji_retarget_real"]["hand_mode"], "retarget")
+        from scripts.validation.run_case import build_session_contract
+        direct = build_session_contract("wuji_direct_real")
+        self.assertFalse(direct["recordable"])
+        self.assertEqual(direct["hand_mode"], "direct")
+        self.assertEqual(direct["source_capability"], "real")
+        self.assertEqual(build_session_contract("policy_hold_sim")["producer"], "policy_hold")
+        self.assertEqual(build_session_contract("ik_pinocchio_qp")["ik_backend"], "pinocchio_qp")
 
+    def test_safety_ack_requires_executor_envelope_identity(self):
+        from scripts.validation.run_case import SafetyStopSupervisor
+        from pico_body_tianji.protocol.messages import ProtocolEnvelope
+
+        supervisor = SafetyStopSupervisor("run", "supervisor", "router", clock=lambda: 10)
+        result = supervisor.issue(
+            "collision_risk",
+            ["arm"],
+            publish=lambda request: None,
+            wait_ack=lambda request: {
+                "arm": {
+                    "schema_version": 1,
+                    "publisher_instance_id": "other",
+                    "router_zid": "router",
+                    "sequence": request.envelope.sequence,
+                    "timestamp_ns": 11,
+                    "executor_id": "arm",
+                    "run_id": "run",
+                    "latched": True,
+                    "reason": "collision_risk",
+                }
+            },
+        )
+        self.assertFalse(result.accepted)
+        self.assertTrue(result.locked)
+
+    def test_sequence_metric_reports_duplicate_and_rollback(self):
+        from scripts.validation.analyze_runs import _sequence_metric
+
+        metric = _sequence_metric([1, 2, 2, 1, 3], ["instance"] * 5)
+        self.assertEqual(metric["drops"], 0)
+        self.assertEqual(metric["order_errors"], 2)
+
+    def test_analyzer_evidence_is_case_specific(self):
+        from scripts.validation.analyze_runs import REQUIRED_EVIDENCE
+
+        self.assertNotIn("state_arm", REQUIRED_EVIDENCE["acquisition_live"]["streams"])
+        self.assertNotIn("home_feedback", REQUIRED_EVIDENCE["target_replay_sim"]["checks"])
+        self.assertIn("target_to_solved", REQUIRED_EVIDENCE["target_replay_sim"]["checks"])
+        self.assertIn("home_feedback", REQUIRED_EVIDENCE["pico_sim"]["checks"])
 if __name__ == "__main__":
     unittest.main()

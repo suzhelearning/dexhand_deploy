@@ -1,0 +1,6 @@
+rate_hz: 90.0
+pause_republish_hz: 90.0
+source_type: joint_replay
+required_capability: real
+hand_mode: direct
+real_preflight: true

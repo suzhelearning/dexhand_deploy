@@ -72,9 +72,15 @@ hand_mode="$(profile_value hand_mode)"
 active_hand_sides="$(profile_value active_hand_sides)"
 hand_executor="$(profile_value hand_executor)"
 hand_overlay="$(profile_value hand_overlay)"
-if [[ "${TIANJI_VALIDATION_PRODUCER:-}" == policy_hold ]]; then
+if [[ "${TIANJI_VALIDATION_PRODUCER:-}" == policy_hold && "${TIANJI_VALIDATION_CASE_ID:-}" == policy_hold_sim ]]; then
   arm_producer_config="producers/policy_hold.yaml"
 fi
+forced_hand_mode="${TIANJI_VALIDATION_HAND_MODE:-}"
+if [[ -n "${forced_hand_mode}" && "${forced_hand_mode}" != disabled && "${forced_hand_mode}" != direct && "${forced_hand_mode}" != retarget ]]; then
+  printf '错误：非法 validation hand mode: %s\n' "${forced_hand_mode}" >&2
+  exit 2
+fi
+if [[ -n "${forced_hand_mode}" ]]; then hand_mode="${forced_hand_mode}"; fi
 [[ -n "${active_hand_sides}" ]] || active_hand_sides="${active_sides}"
 [[ -n "${hand_executor}" ]] || hand_executor=none
 [[ -n "${hand_overlay}" ]] || hand_overlay=none
@@ -102,13 +108,13 @@ if [[ -n "${record_path}" ]]; then
 fi
 source_name="$(basename -- "${source_config}" .yaml)"
 case "${source_name}" in
-  pico_controller|mocap_live|h5_replay|target|joint) ;;
+  pico_controller|mocap_live|h5_replay|target|joint|joint_real) ;;
   mocap_calibration) ;;
   *) printf '错误：source config 不在 canonical source/replay/diagnostic 树: %s\n' "${source_config}" >&2; exit 2 ;;
 esac
 case "${source_name}" in
   target) source_id=target_replay ;;
-  joint) source_id=joint_replay ;;
+  joint|joint_real) source_id=joint_replay ;;
   *) source_id="${source_name}" ;;
 esac
 if [[ "${source_id}" == h5_replay ]]; then
@@ -139,6 +145,9 @@ coordinator_id="${TIANJI_COORDINATOR_INSTANCE_ID:-$(new_instance_id)}"
 source_instance="${TIANJI_SOURCE_INSTANCE_ID:-$(new_instance_id)}"
 arm_producer_instance=""
 arm_producer_id="arm_ik_producer"
+if [[ "${arm_producer_config}" == producers/policy_hold.yaml ]]; then
+  arm_producer_id="policy_hold"
+fi
 if [[ "${source_id}" == joint_replay ]]; then
   arm_producer_instance="${TIANJI_ARM_PRODUCER_INSTANCE_ID:-$(new_instance_id)}"
   arm_producer_id="joint_replay"
@@ -294,11 +303,13 @@ recorder_instance=""
 base_env=(
   "TIANJI_ROUTER_ENDPOINT=${TIANJI_ROUTER_ENDPOINT}"
   "TIANJI_ROUTER_ZID=${TIANJI_ROUTER_ZID}"
-  "TIANJI_COORDINATOR_INSTANCE_ID=${coordinator_id}"
-  "TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID=${TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID:-}"
   "TIANJI_RUN_ID=${run_id}"
   "TIANJI_REQUIRED_CAPABILITY=${required_capability}"
   "TIANJI_HAND_MODE=${hand_mode}"
+  "TIANJI_VALIDATION_CASE_ID=${TIANJI_VALIDATION_CASE_ID:-}"
+  "TIANJI_VALIDATION_HAND_MODE=${TIANJI_VALIDATION_HAND_MODE:-}"
+  "TIANJI_VALIDATION_PRODUCER=${TIANJI_VALIDATION_PRODUCER:-}"
+  "TIANJI_VALIDATION_IK_BACKEND=${TIANJI_VALIDATION_IK_BACKEND:-}"
   "TIANJI_HAND_PRODUCER_ID=${hand_producer_id}"
   "TIANJI_HAND_PRODUCER_INSTANCE_ID=${hand_producer_instance}"
   "TIANJI_HAND_INPUT_INSTANCE_ID=${hand_input_instance}"

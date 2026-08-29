@@ -735,6 +735,8 @@ class SafetyStopAck:
         """Validate that an acknowledgement belongs to this executor and run."""
         _identity(expected_executor_id, "expected_executor_id")
         _identity(expected_run_id, "expected_run_id")
+        if self.envelope.publisher_instance_id != expected_executor_id:
+            raise ProtocolError("safety stop ack publisher is not the expected executor instance")
         if self.executor_id != expected_executor_id:
             raise ProtocolError("safety stop ack executor_id mismatch")
         if self.run_id != expected_run_id:
