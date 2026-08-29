@@ -59,8 +59,8 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         endpoint = os.environ.get("TIANJI_ROUTER_ENDPOINT", "")
         router = os.environ.get("TIANJI_ROUTER_ZID", "")
-        if not endpoint or not router or shutil.which("zenohd") is None:
-            raise unittest.SkipTest("managed router endpoint/zenohd unavailable")
+        if not endpoint or not router:
+            raise unittest.SkipTest("managed router endpoint unavailable")
         root = Path(os.environ.get("PICO_BODY_TIANJI_BUNDLE_ROOT", Path(__file__).parents[1]))
         candidates = (
             root / "staging/ik/lib/pico_body_tianji/wuji_hand2_bridge",
@@ -75,7 +75,7 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
         try:
             cls.session = open_session(endpoint)
         except Exception as exc:
-            raise unittest.SkipTest(f"router unavailable: {exc}") from exc
+            raise AssertionError(f"router connection failed: {exc}") from exc
         cls.commands: list[dict] = []
         cls.statuses: list[dict] = []
         cls.command_sub = cls.session.declare_subscriber(
@@ -107,7 +107,7 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
         if cls.process.poll() is not None:
             stderr = cls.process.stderr.read() if cls.process.stderr else ""
             cls.tearDownClass()
-            raise unittest.SkipTest(f"Wuji bridge exited during setup: {stderr[-300:]}")
+            raise AssertionError(f"Wuji bridge exited during setup: {stderr[-300:]}")
         cls._put_state("teleop", 1)
         cls._put_target(1)
         deadline = time.monotonic() + 2.0
@@ -115,7 +115,7 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
             time.sleep(0.02)
         if not cls.commands:
             cls.tearDownClass()
-            raise unittest.SkipTest("Wuji bridge produced no canonical command")
+            raise AssertionError("Wuji bridge produced no canonical command before timeout")
 
     @classmethod
     def _put(cls, key: str, payload: dict) -> None:

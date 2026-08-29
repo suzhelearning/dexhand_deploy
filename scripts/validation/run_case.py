@@ -238,6 +238,7 @@ class SafetyStopResult:
     reason: str
     request: SafetyStopRequest
     acked_executor_ids: tuple[str, ...]
+    ack_timestamps_ns: tuple[int, ...] = ()
 
 
 class SafetyStopSupervisor:
@@ -313,8 +314,8 @@ class SafetyStopSupervisor:
         if missing:
             errors.append("missing ack: " + ", ".join(missing))
         if errors:
-            return SafetyStopResult(False, True, "safety stop ack failure: " + "; ".join(errors), request, tuple(sorted(valid)))
-        return SafetyStopResult(True, True, "all executor safety-stop acknowledgements received", request, tuple(sorted(valid)))
+            return SafetyStopResult(False, True, "safety stop ack failure: " + "; ".join(errors), request, tuple(sorted(valid)), tuple(int(valid[item].envelope.timestamp_ns) for item in sorted(valid)))
+        return SafetyStopResult(True, True, "all executor safety-stop acknowledgements received", request, tuple(sorted(valid)), tuple(int(valid[item].envelope.timestamp_ns) for item in sorted(valid)))
 class ZenohSafetyTransport:
     """Small transport adapter for an explicit managed safety stop.
 
@@ -663,13 +664,13 @@ def _authority_contract(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
             "liveliness": f"tj/live/{live_role}/{logical_id}/{instance}",
         })
 
-    add("source", source_logical, ids.get("source"), None, ["tianji/source/status", f"tianji/raw/{source}", "tianji/target/arm/{side}", "tianji/target/hand/{side}"], "source")
+    add("source", source_logical, ids.get("source"), None, ["tianji/source/status", "tianji/session/intent", f"tianji/raw/{source}", f"tianji/target/arm/{{side}}", f"tianji/target/hand/{{side}}"], "source")
     if ids.get("producer_arm"):
         producer_logical = "joint_replay" if producer == "joint_replay" else producer
         if producer_logical == "ik":
             producer_logical = "arm_ik_producer"
         add("producer_arm", producer_logical, ids.get("producer_arm"), None, ["tianji/producer/status", "tianji/proposal/arm/{side}", "tianji/producer/arm/{side}/solved_pose"], "producer/arm")
-    add("coordinator_arm", "arm", ids.get("coordinator_arm"), None, ["tianji/coordinator/status", "tianji/session/state", "tianji/command/arm/{side}"], "coordinator/arm")
+    add("coordinator_arm", "arm", ids.get("coordinator_arm"), None, ["tianji/coordinator/status", "tianji/session/state", "tianji/coordinator/at_home", "tianji/coordinator/return_complete", "tianji/command/arm/{side}"], "coordinator/arm")
     executor_config = _profile_config(profile).get("arm_executor_config", "")
     executor_logical = "marvin" if str(executor_config).endswith("marvin.yaml") else "mujoco"
     add("executor_arm", executor_logical, ids.get("executor_arm"), None, ["tianji/executor/status", "tianji/state/arm"], "executor/arm")
@@ -812,6 +813,16 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
         ids = [str(manifest["publisher_instance_ids"]["executor_arm"])]
     supervisor_id = str(manifest["publisher_instance_ids"]["validation_supervisor"])
     supervisor = SafetyStopSupervisor(str(manifest["run_id"]), supervisor_id, str(manifest["router_zid"]))
+    def _records(name: str) -> list[dict[str, Any]]:
+        try:
+            return [
+                json.loads(line)
+                for line in (bundle / name).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except (OSError, json.JSONDecodeError, TypeError):
+            return []
+    before_status_rows = _records("status.jsonl")
     transport: ZenohSafetyTransport | None = None
     try:
         transport = ZenohSafetyTransport(str(manifest["router"]["endpoint"]))
@@ -828,19 +839,12 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
             transport.close()
     # Give executor callbacks one bounded control interval to publish their
     # unhealthy/locked status.  Evidence is read from captured wire files;
-    # missing status or post-stop motion is recorded as a failed gate.
+    # missing status or post-stop SDK motion is unverified and cannot pass.
     time.sleep(0.2)
-    def _records(name: str) -> list[dict[str, Any]]:
-        try:
-            return [
-                json.loads(line)
-                for line in (bundle / name).read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-        except (OSError, json.JSONDecodeError, TypeError):
-            return []
     status_rows = _records("status.jsonl")
     protocol_rows = _records("protocol.jsonl")
+    request_time = int(result.request.envelope.timestamp_ns)
+    tick_window_ns = 200_000_000
     executor_rows = {
         executor_id: [
             row for row in status_rows
@@ -849,7 +853,9 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
         ]
         for executor_id in ids
     }
-    unhealthy = all(any(row.get("healthy") is False for row in rows) for rows in executor_rows.values())
+    def _status_time(row: Mapping[str, Any]) -> int | None:
+        value = row.get("timestamp_ns")
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
     def _locked(row: Mapping[str, Any]) -> bool:
         diagnostics = row.get("diagnostics")
         diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
@@ -857,17 +863,51 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
             diagnostics.get("safety_locked") is True
             or (row.get("tracking_allowed") is False and row.get("healthy") is False)
         )
-    locked = all(any(_locked(row) for row in rows) for rows in executor_rows.values())
-    post_stop_motion = any(
-        str(row.get("topic", "")).startswith("tianji/command/")
-        and int(row.get("timestamp_ns", row.get("time_ns", 0))) > request.envelope.timestamp_ns
-        for row in protocol_rows
+    def _within(row: Mapping[str, Any]) -> bool:
+        timestamp = _status_time(row)
+        return timestamp is not None and request_time <= timestamp <= request_time + tick_window_ns
+    unhealthy = all(any(_within(row) and row.get("healthy") is False for row in rows) for rows in executor_rows.values())
+    locked = all(any(_within(row) and _locked(row) for row in rows) for rows in executor_rows.values())
+    ack_times = result.ack_timestamps_ns
+    same_tick_ack = bool(
+        result.accepted and len(ack_times) == len(ids)
+        and all(request_time <= timestamp <= request_time + tick_window_ns for timestamp in ack_times)
+    )
+    # Coordinator command wire traffic is not SDK motion evidence.  Require
+    # each executor's command counter before/after the stop to prove no motion.
+    before_counts: dict[str, int] = {}
+    after_counts: dict[str, int] = {}
+    for executor_id, rows in executor_rows.items():
+        before = [
+            int(row["diagnostics"]["commands_sent"])
+            for row in before_status_rows
+            if str(row.get("publisher_instance_id", "")) == executor_id
+            and isinstance(row.get("diagnostics"), Mapping)
+            and isinstance(row["diagnostics"].get("commands_sent"), int)
+        ]
+        after = [
+            int(row["diagnostics"]["commands_sent"])
+            for row in rows
+            if _within(row)
+            and isinstance(row.get("diagnostics"), Mapping)
+            and isinstance(row["diagnostics"].get("commands_sent"), int)
+        ]
+        if before:
+            before_counts[executor_id] = max(before)
+        if after:
+            after_counts[executor_id] = max(after)
+    no_motion = bool(
+        len(before_counts) == len(ids) == len(after_counts)
+        and all(after_counts[item] == before_counts[item] for item in ids)
     )
     evidence = {
-        "same_tick_ack": result.accepted,
+        "same_tick_ack": same_tick_ack,
         "unhealthy": unhealthy,
-        "no_motion_commands": not post_stop_motion,
+        "no_motion_commands": no_motion,
+        "ack_timestamps_ns": list(ack_times),
+        "request_timestamp_ns": request_time,
     }
+    post_stop_motion = not no_motion
     _write_status(
         status,
         event="safety_stop",

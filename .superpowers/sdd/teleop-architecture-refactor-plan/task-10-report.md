@@ -45,6 +45,17 @@
   - Result: 37 tests executed passed; managed process class skipped because `zenohd`/router was unavailable.
 - Follow-up analyzer regression: `PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_validation_tools -v`
   - Result: 26 tests passed; `py_compile` and `git diff --check` also passed.
+## Task10 round2 follow-up
+
+- 修正 `PicoControllerSource` 构造签名，恢复 `router_zid` 并显式传给 `SessionClient`/`TargetPublisher`；`self._rate` 保持，入口 smoke 可执行。
+- Wuji managed process smoke 仅在 endpoint/router 或 canonical binary 缺失时 skip；启动崩溃、连接失败、超时或没有 canonical command 均 fail。
+- authority contract 增加 source intent 与 coordinator latch/control topics；SafetyStop ack 仅接受 validation supervisor 与预分配 executor instance。
+- `SafetyStopResult` 保存 request/ack timestamps；managed stop 不把 coordinator wire command 当 SDK motion，缺少每 executor command-counter evidence 时 no-motion 为 unverified/fail，并按 request/ack/status 时间窗判断 same-tick unhealthy/lockout。
+- Marvin fault reconnect 在 deadline 内等待 fresh bounded returning command；fault 不可降级，正常 timeout 保留 local bounded Home failsafe。
+- real capability provider 改为受保护 regular-file typed attestation；环境变量仅能选择文件路径，缺失/不安全/格式错误默认 denied。
+- Round2 command：定向 `py_compile`、`pixi run unittest`、`bash -n`、`git diff --check`。
+  - Result：38 tests passed，1 managed Wuji process class skip（endpoint unavailable）；所有语法、shell 与 diff 检查通过。
+
 ## 未能执行与外部阻塞
 
 - acquisition `pixi run test` 未在本次修改中触碰；历史 ledger 记录其 151 tests 中仅有用户 dirty baseline 导致的 2 个 `tests/test_object_offset.py` offset 失败，采集仓库用户修改未覆盖。

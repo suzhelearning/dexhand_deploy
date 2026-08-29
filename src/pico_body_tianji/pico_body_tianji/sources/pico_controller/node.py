@@ -57,6 +57,7 @@ class PicoControllerSource:
         params: dict[str, Any] | None = None,
         *,
         publisher_instance_id: str,
+        router_zid: str,
         coordinator_instance_id: str | None = None,
         source: XRoboControllerOnlySource | None = None,
         session_client: SessionClient | None = None,
