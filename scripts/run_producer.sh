@@ -44,6 +44,7 @@ fi
 config="${config_override}"
 if [[ -z "${config}" ]]; then config="$(canonical_config "${default_config}")"; fi
 if [[ "${producer_id}" == ik ]]; then
+  requested_backend="${TIANJI_VALIDATION_IK_BACKEND:-${backend:-}}"
   eval "$(
     pixi run python - "${config}" <<'PY'
 import sys, yaml
@@ -54,6 +55,7 @@ for key, item in value.items():
     print(f"export TIANJI_IK_{name}={item!r}")
 PY
   )"
+  [[ -z "${requested_backend}" ]] || export TIANJI_IK_BACKEND="${requested_backend}"
 fi
 if [[ "${producer_id}" == ik ]]; then
   arm_config="$(canonical_config robot/arm.yaml)"

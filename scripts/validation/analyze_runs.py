@@ -363,6 +363,59 @@ def _verify_operator_events(bundle: Path, manifest: Mapping[str, Any]) -> list[d
     return values
 
 
+def _validate_pass_gate(bundle: Path, manifest: Mapping[str, Any], case: Mapping[str, Any], statuses: list[Mapping[str, Any]], metrics: Mapping[str, Any], events: list[Mapping[str, Any]]) -> None:
+    if manifest.get("fake"):
+        raise AnalysisError("fake/headless bundle cannot be pass")
+    ids = manifest.get("publisher_instance_ids", {})
+    expected = {str(ids[key]) for key in ("source", "producer_arm", "coordinator_arm", "executor_arm") if ids.get(key)}
+    for key in ("hand_producer_instances", "hand_executor_instances"):
+        value = ids.get(key, {})
+        if isinstance(value, Mapping):
+            expected.update(str(item) for item in value.values())
+    if not expected:
+        raise AnalysisError("pass requires preallocated component identities")
+    for name, rows in (("status", statuses), ("protocol", _json_lines(bundle / "protocol.jsonl")), ("liveliness", _json_lines(bundle / "liveliness.jsonl"))):
+        observed = {
+            str(row.get("publisher_instance_id"))
+            for row in rows
+            if row.get("publisher_instance_id") in expected and row.get("router_zid", manifest["router_zid"]) == manifest["router_zid"]
+        }
+        if observed != expected:
+            raise AnalysisError(f"pass requires actual {name} evidence for every authority")
+    child_logs = [path for path in (bundle / "logs").glob("*") if path.is_file() and path.name not in {"validation.log"}]
+    if len(child_logs) < 1:
+        raise AnalysisError("pass requires child logs")
+    rates = metrics.get("rates", {})
+    required_streams = ["state_arm"]
+    coordinator_path = canonical_config_root() / "coordinator" / "arm.yaml"
+    coordinator = yaml.safe_load(coordinator_path.read_text(encoding="utf-8")) or {}
+    max_step = float(coordinator["maximum_command_step_rad"])
+    max_speed = float(coordinator["home_max_speed_rad_s"])
+    for side, value in metrics.get("joint_step_rad", {}).items():
+        if value == "unavailable" or (value is not None and float(value) > max_step):
+            raise AnalysisError(f"joint step exceeds configured limit for {side}")
+    for side, value in metrics.get("joint_velocity_rad_s", {}).items():
+        if value == "unavailable" or (value is not None and float(value) > max_speed):
+            raise AnalysisError(f"joint velocity exceeds configured limit for {side}")
+    if metrics.get("home_time_s") == "unavailable":
+        raise AnalysisError("pass requires Home timing evidence")
+    if any(value.get("drops", 0) for value in rates.values() if isinstance(value, Mapping)):
+        raise AnalysisError("pass cannot contain stream drops")
+    if case.get("hand_mode") != "disabled":
+        required_streams += [f"state_hand_{side}" for side in case.get("active_sides", [])]
+    for stream in required_streams:
+        if not isinstance(rates.get(stream), Mapping) or rates[stream].get("samples", 0) <= 0:
+            raise AnalysisError(f"pass requires samples for {stream}")
+    if metrics.get("fault_reasons") or metrics.get("soft_stop_reasons"):
+        raise AnalysisError("fault or soft-stop prevents pass")
+    if metrics.get("target_to_solved_error", {}).get("max_position_error_m") == "unavailable" or metrics.get("command_feedback_tracking", {}).get("max_error_rad") == "unavailable":
+        raise AnalysisError("pass requires target/solved and tracking evidence")
+    if case.get("hand_mode") != "disabled" and metrics.get("hand_zero_time_s") == "unavailable":
+        raise AnalysisError("pass requires hand-zero evidence")
+    if any(str(event.get("event")) in {"collision_risk", "emergency_stop"} for event in events):
+        raise AnalysisError("danger event prevents pass")
+
+
 def analyze_bundle(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
     manifest_preview = _yaml(bundle / "manifest.yaml")
     session_required = manifest_preview.get("profile") not in SESSION_OPTIONAL_PROFILES
@@ -413,11 +466,14 @@ def analyze_bundle(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
             "note": "protocol target/solved position pairing",
         }
     if operator["outcome"] == "pass":
-        if manifest.get("fake"):
-            raise AnalysisError("fake/headless bundle cannot be pass")
-        rates = metrics.get("rates", {})
-        if not any(value.get("samples", 0) for value in rates.values() if isinstance(value, Mapping)):
-            raise AnalysisError("pass requires recorded authority samples")
+        _validate_pass_gate(
+            bundle,
+            manifest,
+            matrix["cases"][manifest["case_id"]],
+            statuses,
+            metrics,
+            events,
+        )
     return {
         "schema_name": "tianji-validation-analysis",
         "schema_version": BUNDLE_VERSION,

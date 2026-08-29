@@ -30,10 +30,10 @@ if [[ -z "${profile}" ]]; then
   exit 2
 fi
 case "${profile}" in
-  pico_sim|pico_real|mocap_live_sim|mocap_live_real|h5_sim|h5_real|target_replay_sim|joint_replay_sim|diagnostic_mocap_calibration_sim) ;;
+  pico_sim|pico_real|mocap_live_sim|mocap_live_real|h5_sim|h5_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim) ;;
   *) printf '错误：未知 session profile: %s\n' "${profile}" >&2; exit 2 ;;
 esac
-if [[ "${profile}" == target_replay_sim || "${profile}" == joint_replay_sim ]]; then
+if [[ "${profile}" == target_replay_sim || "${profile}" == joint_replay_sim || "${profile}" == wuji_direct_real ]]; then
   if [[ -n "${record_path}" ]]; then
     printf '%s\n' 'replay profile cannot be recorded' >&2
     exit 2

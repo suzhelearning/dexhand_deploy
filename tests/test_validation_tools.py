@@ -167,6 +167,11 @@ class ValidationToolsTest(unittest.TestCase):
         self.assertEqual(observation.samples, 2)
         self.assertFalse(observation.accept({"stream_instance_id": "stream-b", "stream_sequence": 1, "router_zid": "router", "left_valid": True, "right_valid": False}))
 
+    def test_hand_case_profiles_and_retarget_contract_are_strict(self):
+        matrix = yaml.safe_load(MATRIX.read_text(encoding="utf-8"))["cases"]
+        self.assertEqual(matrix["wuji_direct_real"]["profile"], "wuji_direct_real")
+        self.assertEqual(matrix["wuji_retarget_dry"]["hand_mode"], "retarget")
+        self.assertEqual(matrix["wuji_retarget_real"]["hand_mode"], "retarget")
 
 if __name__ == "__main__":
     unittest.main()

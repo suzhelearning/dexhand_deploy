@@ -150,3 +150,33 @@ pixi run python -m py_compile scripts/validation/run_case.py scripts/validation/
 bash -n scripts/run_session.sh
 git diff --check
 ```
+## Review round3 修复与验证
+
+- 固定 case contract 约束 profile/producer/backend，IK backend 通过 `TIANJI_VALIDATION_IK_BACKEND` 覆盖配置默认值并记录；policy hold 切换 producer config；real child 传 `MARVIN_ROBOT_IP`。
+- `wuji_direct_real` 改为专用 real direct profile（Marvin arm + Wuji direct），retarget dry/real 固定 retarget 并拒绝带 `wuji2_joints` 的 H5 输入。
+- acquisition managed case 无外部 aligned stream 样本时明确记录 `complete=false` 并返回非零，不写空 complete HDF5；replay 不加 `--record`。
+- analyzer pass gate 要求 manifest identities 的 status/protocol/liveliness/child-log 证据、required state samples、无 drop/fault/soft-stop、按 coordinator step/speed/home 阈值校验；无 authority/指标证据 fail closed。target-solved 优先从 protocol 样本计算。
+
+实际输出：
+
+```text
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_validation_tools
+............
+Ran 12 tests in 2.913s
+OK
+
+pixi run validation-run -- --list
+# 18 IDs
+
+pixi run validation-run -- --case pico_sim --output /tmp/t9-r3 --fake --headless
+pixi run validation-analyze -- /tmp/t9-r3
+{"bundles": 1, "run_ids": ["20260829T033246Z_pico_sim_2199e8d6"]}
+
+pixi run validation-run -- --case pico_sim --output /tmp/t9-r3-stop --fake --headless --danger-stop collision_risk
+pixi run validation-analyze -- /tmp/t9-r3-stop
+{"bundles": 1, "run_ids": ["20260829T033247Z_pico_sim_899e0ba8"]}
+
+pixi run python -m py_compile scripts/validation/run_case.py scripts/validation/analyze_runs.py
+bash -n scripts/run_session.sh scripts/run_producer.sh
+git diff --check
+```

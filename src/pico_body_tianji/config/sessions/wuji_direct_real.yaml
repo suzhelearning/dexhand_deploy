@@ -1,0 +1,11 @@
+source_config: replay/joint.yaml
+arm_producer_config: null
+arm_executor_config: executors/marvin.yaml
+coordinator_config: coordinator/arm.yaml
+required_capability: real
+active_sides: [left, right]
+inactive_sides: []
+hand_mode: direct
+hand_executor: wuji_hand2
+hand_overlay: none
+active_hand_sides: [left, right]

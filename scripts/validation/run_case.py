@@ -64,7 +64,7 @@ CASE_CONTRACTS = {
     "marvin_h5_real_10pct": {"profile": "h5_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
     "wuji_retarget_dry": {"profile": "h5_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
     "wuji_retarget_real": {"profile": "h5_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
-    "wuji_direct_real": {"profile": "joint_replay_sim", "producer": "joint_replay", "ik_backend": None},
+    "wuji_direct_real": {"profile": "wuji_direct_real", "producer": "joint_replay", "ik_backend": None},
     "fault_recovery_sim": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
     "fault_recovery_real": {"profile": "pico_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
 }
@@ -545,7 +545,7 @@ def _build_manifest(case_id: str, case: Mapping[str, Any], profile: str, run_id:
                 executor_instances[side] = str(uuid.uuid4())
                 if actual_hand_mode == "direct" and profile in {"h5_sim", "h5_real"}:
                     producer_instances[side] = instance_ids["source"]
-                elif profile == "joint_replay_sim":
+                elif profile in {"joint_replay_sim", "wuji_direct_real"}:
                     producer_instances[side] = instance_ids["producer_arm"]
                 else:
                     producer_instances[side] = str(uuid.uuid4())
@@ -733,6 +733,7 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
         "TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID": manifest["publisher_instance_ids"]["validation_supervisor"],
         "TIANJI_ROUTER_ZID": manifest["router_zid"],
         "TIANJI_IK_BACKEND": str(manifest.get("ik_backend") or ""),
+        "TIANJI_VALIDATION_IK_BACKEND": str(manifest.get("ik_backend") or ""),
         "TIANJI_VALIDATION_PRODUCER": str(manifest.get("producer") or ""),
         "MARVIN_ROBOT_IP": str(manifest.get("robot_ip") or ""),
     })
@@ -806,7 +807,12 @@ def run_case(args: argparse.Namespace) -> int:
     if args.case not in cases:
         raise ValueError(f"unknown validation case: {args.case}")
     case = cases[args.case]
+    contract = build_session_contract(args.case, {"ik_backend": args.ik_backend})
+    if contract["profile"] != case["profile"]:
+        raise ValueError(f"matrix profile mismatch for {args.case}: {case['profile']} != {contract['profile']}")
     capability = case["required_capability"]
+    if args.case in {"wuji_retarget_dry", "wuji_retarget_real"} and _h5_contains_hand_joints(Path(args.input).expanduser() if args.input else None):
+        raise ValueError("retarget validation rejects H5 wuji2_joints input; use direct profile")
     if capability == "real" and not args.confirm_real:
         raise PermissionError("real validation requires explicit --confirm-real")
     prerequisite_root = Path(args.prerequisite_root or args.output).expanduser()

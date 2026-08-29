@@ -197,7 +197,7 @@ cases:
       dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
       controlled: [operator_normal_end_with_fresh_feedback]
   wuji_direct_real:
-    profile: joint_replay_sim
+    profile: wuji_direct_real
     required_devices: [router, session_h5, wuji_hand2_real]
     required_capability: real
     active_sides: [left, right]
