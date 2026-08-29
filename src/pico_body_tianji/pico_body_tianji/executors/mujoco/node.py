@@ -229,6 +229,7 @@ class MujocoExecutor:
         self._latch_received_ns: dict[str, int] = {}
         self._latest_received_ns: dict[tuple[str, str], int] = {}
         self._state_sequence = 0
+        self._command_count = 0
         self._status_sequence = 0
         self._safety_locked = False
         self._safety_ack: SafetyStopAck | None = None
@@ -546,7 +547,7 @@ class MujocoExecutor:
         return ComponentStatus(
             1, self._status_sequence, int(self.clock()), "executor_arm", "mujoco",
             phase, ready and self._healthy, healthy and self._healthy, ["simulation"], self._last_error,
-            {"headless": True, "safety_locked": self._safety_locked, "hand_overlay": self.hand_overlay},
+            {"headless": True, "safety_locked": self._safety_locked, "hand_overlay": self.hand_overlay, "commands_sent": self._command_count},
             self.publisher_instance_id, self.router_zid,
         )
 
@@ -619,6 +620,7 @@ class MujocoExecutor:
             for address, value in zip(self._hand_addresses[side].values(), values):
                 self._qpos[address] = value
             applied["hand"][side] = command
+        self._command_count += len(applied["arm"]) + len(applied["hand"])
         try:
             import mujoco
             mujoco.mj_forward(self.model, self.data)

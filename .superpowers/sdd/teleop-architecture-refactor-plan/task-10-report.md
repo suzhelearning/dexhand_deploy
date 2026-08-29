@@ -67,6 +67,8 @@
 - C++ smoke command: `cmake --build build/task8-cmake --target wuji_hand2_bridge -j2`
   - Result: blocked before execution because `cmake: command not found`.
 
+- Additional round2 focused command: `py_compile` (Python sources), `PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_task5_executor_contract tests.test_validation_tools -v`, `bash -n ...`, `git diff --check`.
+  - Result: 52 tests passed; all syntax/shell/diff checks passed.
 ## 未能执行与外部阻塞
 
 - acquisition `pixi run test` 未在本次修改中触碰；历史 ledger 记录其 151 tests 中仅有用户 dirty baseline 导致的 2 个 `tests/test_object_offset.py` offset 失败，采集仓库用户修改未覆盖。
