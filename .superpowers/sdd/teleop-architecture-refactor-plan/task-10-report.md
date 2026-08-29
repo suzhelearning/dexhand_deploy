@@ -85,6 +85,14 @@
 - 修复预检 nonce lifecycle、bundle-relative attestation/checksum、danger-stop bounded ready wait、Wuji Python/C++/MuJoCo command counters，以及按 executor rate 的 same-tick evidence。
 - `pixi run -e ik-build cmake --build build/task8-cmake --target wuji_hand2_bridge -j2` 成功编译链接 Wuji bridge；裸 shell `cmake` 不可用，已分开记录。
 - focused `tests.test_validation_tools` + `tests.test_task5_executor_contract`：52 tests 全部通过；py_compile、bash-n、git diff-check通过。
+## Task10 round7 follow-up
+
+- 修复 `run_case` 预检 nonce 在 payload 构造前生成、bound attestation digest 绑定，并将 manifest 仅保存 bundle-relative `real-preflight.json`；analyzer 从当前 bundle 强制解析并纳入 checksum。
+- danger-stop 在 Popen 后有界等待所有 executor ready/healthy，再保持同一 supervisor transport 收齐 arm 与每侧 hand ack；未ready不发布、不成功。
+- same-tick 依据 active executor 最大 rate 的 1.5 tick margin；no-motion 只接受 executor SDK `commands_sent` counter，缺证据为 false/unverified。
+- `pixi run -e ik-build cmake --build build/task8-cmake --target wuji_hand2_bridge -j2` 成功；裸 shell `cmake` 缺失单独记录。
+- focused `tests.test_validation_tools` + `tests.test_task5_executor_contract`：52 tests passed；py_compile、bash-n、git diff-check passed。
+
 
 ## 未能执行与外部阻塞
 

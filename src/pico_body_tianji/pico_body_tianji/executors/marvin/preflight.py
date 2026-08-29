@@ -1,6 +1,7 @@
 """受 launcher 授权的 Marvin real-capability provider。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,9 @@ def trusted_real_capability() -> RealCapabilityInput:
     try:
         stat = path.stat()
         if path.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o022:
+            return denied
+        expected_digest = os.environ.get("TIANJI_REAL_PREFLIGHT_DIGEST", "")
+        if not expected_digest or hashlib.sha256(path.read_bytes()).hexdigest() != expected_digest:
             return denied
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict) or set(value) != {

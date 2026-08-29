@@ -1125,6 +1125,7 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
         "TIANJI_VALIDATION_PRODUCER": str(manifest.get("producer") or ""),
         "TIANJI_REAL_PREFLIGHT_FILE": str(getattr(args, "real_preflight_file", "") or ""),
         "TIANJI_REAL_PREFLIGHT_NONCE": str(getattr(args, "real_preflight_nonce", "") or ""),
+        "TIANJI_REAL_PREFLIGHT_DIGEST": str(getattr(args, "real_preflight_digest", "") or ""),
     })
     log_path = bundle / "logs" / "session.log"
     with log_path.open("w", encoding="utf-8") as log:
@@ -1237,6 +1238,7 @@ def run_case(args: argparse.Namespace) -> int:
             router_zid=router_zid,
         )
         args.real_preflight_file = str(bound_attestation)
+        args.real_preflight_digest = sha256_file(bound_attestation)
     manifest = _build_manifest(args.case, case, case["profile"], run_id, supervisor, router_zid, started, args)
     (bundle / "manifest.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
     (bundle / "operator_events.jsonl").touch()

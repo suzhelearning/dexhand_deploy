@@ -320,6 +320,7 @@ base_env=(
   "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID=${TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID:-}"
   "TIANJI_REAL_PREFLIGHT_FILE=${TIANJI_REAL_PREFLIGHT_FILE:-}"
   "TIANJI_REAL_PREFLIGHT_NONCE=${TIANJI_REAL_PREFLIGHT_NONCE:-}"
+  "TIANJI_REAL_PREFLIGHT_DIGEST=${TIANJI_REAL_PREFLIGHT_DIGEST:-}"
 )
 if [[ "${required_capability}" == real ]]; then
   # Real admission is process-issued and fail-closed.  Speed/yaw are fixed by
