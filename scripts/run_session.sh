@@ -318,9 +318,8 @@ base_env=(
   "TIANJI_ARM_PRODUCER_INSTANCE_ID=${arm_producer_instance}"
   "TIANJI_AUTHORITIES=${TIANJI_AUTHORITIES}"
   "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID=${TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID:-}"
-  "TIANJI_REAL_PREFLIGHT_FILE=${TIANJI_REAL_PREFLIGHT_FILE:-}"
-  "TIANJI_REAL_PREFLIGHT_NONCE=${TIANJI_REAL_PREFLIGHT_NONCE:-}"
-  "TIANJI_REAL_PREFLIGHT_DIGEST=${TIANJI_REAL_PREFLIGHT_DIGEST:-}"
+  "TIANJI_REAL_PREFLIGHT_FD=${TIANJI_REAL_PREFLIGHT_FD:-}"
+  "TIANJI_REAL_PREFLIGHT_SCANNER_FD=${TIANJI_REAL_PREFLIGHT_SCANNER_FD:-}"
 )
 if [[ "${required_capability}" == real ]]; then
   # Real admission is process-issued and fail-closed.  Speed/yaw are fixed by
@@ -330,7 +329,6 @@ if [[ "${required_capability}" == real ]]; then
     "TIANJI_REAL_SPEED=${TIANJI_REAL_SPEED:-1}"
     "TIANJI_REAL_YAW_DEG=${TIANJI_REAL_YAW_DEG:-nan}"
     "TIANJI_REAL_DEADMAN_AVAILABLE=${TIANJI_REAL_DEADMAN_AVAILABLE:-0}"
-    "TIANJI_REAL_PREFLIGHT_PASSED=${TIANJI_REAL_PREFLIGHT_PASSED:-0}"
   )
 fi
 if [[ -n "${record_path}" ]]; then
@@ -391,4 +389,5 @@ else
   launch source "${source_args[@]}"
 fi
 printf '%s\n' "session ${profile} started; router_zid=${router_zid}; run_id=${run_id}"
+printf '%s\n' "session_startup_complete run_id=${run_id}; profile=${profile}; router_zid=${router_zid}"
 wait

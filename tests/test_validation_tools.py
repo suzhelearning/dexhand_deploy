@@ -476,5 +476,184 @@ class ValidationToolsTest(unittest.TestCase):
         self.assertEqual(len(found), 2)
         self.assertFalse(live)
 
+    def test_managed_stop_waits_for_explicit_launcher_startup_signal(self):
+        from scripts.validation.run_case import _wait_for_launcher_startup
+
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "session.log"
+            clock = [0.0]
+
+            def now():
+                return clock[0]
+
+            def advance(seconds):
+                clock[0] += seconds
+                if clock[0] >= 6.0:
+                    marker.write_text(
+                        "session_startup_complete run_id=run; profile=h5_real\n",
+                        encoding="utf-8",
+                    )
+
+            self.assertTrue(
+                _wait_for_launcher_startup(
+                    marker,
+                    timeout_s=10.0,
+                    clock=now,
+                    sleep=advance,
+                )
+            )
+
+    def test_real_capability_uses_sealed_attestation_and_scanner_binding(self):
+        import fcntl
+        import ctypes
+        import hashlib
+        import json
+        import os
+        import stat
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from pico_body_tianji.executors.marvin.preflight import trusted_real_capability
+
+        scanner = json.dumps(
+            {
+                "scanner_id": "scanner-1",
+                "capability": {
+                    "speed": 0.25,
+                    "yaw_deg": 0.0,
+                    "deadman_available": True,
+                    "preflight_passed": True,
+                },
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.memfd_create.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+        libc.memfd_create.restype = ctypes.c_int
+        scanner_fd = libc.memfd_create(b"scanner", 0x0002)
+        attestation_fd = libc.memfd_create(b"attestation", 0x0002)
+        try:
+            os.fchmod(scanner_fd, 0o400)
+            os.write(scanner_fd, scanner)
+            scanner_stat = os.fstat(scanner_fd)
+            base = {
+                "run_id": "run",
+                "router_zid": "router",
+                "validation_supervisor_instance_id": "supervisor",
+                "launcher_nonce": "nonce",
+                "scanner_id": "scanner-1",
+                "scanner_sha256": hashlib.sha256(scanner).hexdigest(),
+                "scanner_device": scanner_stat.st_dev,
+                "scanner_inode": scanner_stat.st_ino,
+                "capability": json.loads(scanner.decode())["capability"],
+            }
+            canonical = json.dumps(base, separators=(",", ":"), sort_keys=True).encode()
+            payload = {
+                **base,
+                "payload_sha256": hashlib.sha256(canonical).hexdigest(),
+            }
+            payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+            os.write(attestation_fd, payload_bytes)
+            fcntl.fcntl(
+                attestation_fd,
+                getattr(fcntl, "F_ADD_SEALS", 1033),
+                (getattr(fcntl, "F_SEAL_SEAL", 1)
+                 | getattr(fcntl, "F_SEAL_SHRINK", 2)
+                 | getattr(fcntl, "F_SEAL_GROW", 4)
+                 | getattr(fcntl, "F_SEAL_WRITE", 8)),
+            )
+
+            real_fstat = os.fstat
+
+            def fake_fstat(fd):
+                result = real_fstat(fd)
+                if fd == scanner_fd:
+                    return SimpleNamespace(
+                        st_mode=stat.S_IFREG | (result.st_mode & 0o777),
+                        st_uid=0,
+                        st_size=result.st_size,
+                        st_dev=result.st_dev,
+                        st_ino=result.st_ino,
+                    )
+                return result
+
+            with patch.dict(
+                os.environ,
+                {
+                    "TIANJI_REAL_PREFLIGHT_FD": str(attestation_fd),
+                    "TIANJI_REAL_PREFLIGHT_SCANNER_FD": str(scanner_fd),
+                    "TIANJI_RUN_ID": "run",
+                    "TIANJI_ROUTER_ZID": "router",
+                    "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID": "supervisor",
+                },
+                clear=False,
+            ), patch("pico_body_tianji.executors.marvin.preflight.os.fstat", side_effect=fake_fstat):
+                capability = trusted_real_capability()
+            self.assertTrue(capability.admitted)
+
+        finally:
+            os.close(attestation_fd)
+            os.close(scanner_fd)
+    def test_real_capability_rejects_ordinary_path_and_digest_environment(self):
+        import hashlib
+        import json
+        import os
+        from unittest.mock import patch
+        from pico_body_tianji.executors.marvin.preflight import trusted_real_capability
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "attestation.json"
+            payload = json.dumps(
+                {
+                    "run_id": "run",
+                    "router_zid": "router",
+                    "validation_supervisor_instance_id": "supervisor",
+                    "launcher_nonce": "nonce",
+                    "capability": {
+                        "speed": 0.25,
+                        "yaw_deg": 0.0,
+                        "deadman_available": True,
+                        "preflight_passed": True,
+                    },
+                },
+                separators=(",", ":"),
+            ).encode()
+            path.write_bytes(payload)
+            path.chmod(0o400)
+            with patch.dict(
+                os.environ,
+                {
+                    "TIANJI_REAL_PREFLIGHT_FILE": str(path),
+                    "TIANJI_REAL_PREFLIGHT_NONCE": "nonce",
+                    "TIANJI_REAL_PREFLIGHT_DIGEST": hashlib.sha256(payload).hexdigest(),
+                    "TIANJI_RUN_ID": "run",
+                    "TIANJI_ROUTER_ZID": "router",
+                    "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID": "supervisor",
+                },
+                clear=False,
+            ):
+                self.assertFalse(trusted_real_capability().admitted)
+    def test_analyzer_returns_verified_attestation_bytes_for_single_parse(self):
+        import hashlib
+        from scripts.validation.analyze_runs import _verify_checksums
+
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            payload = b'{"sealed":true}'
+            names = [
+                "manifest.yaml", "status.jsonl", "operator_events.jsonl",
+                "liveliness.jsonl", "protocol.jsonl", "operator_result.yaml",
+                "real-preflight.json",
+            ]
+            for name in names:
+                (bundle / name).write_bytes(payload if name == "real-preflight.json" else b"")
+            lines = [
+                f"{hashlib.sha256((bundle / name).read_bytes()).hexdigest()}  {name}"
+                for name in names
+            ]
+            (bundle / "checksums.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            verified = _verify_checksums(bundle, session_required=False)
+            self.assertEqual(verified["real-preflight.json"], payload)
 if __name__ == "__main__":
     unittest.main()

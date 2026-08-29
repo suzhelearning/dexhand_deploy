@@ -8,6 +8,7 @@ state, configured limits, and operator result all agree.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from collections import Counter, defaultdict
 import json
 import math
@@ -111,7 +112,7 @@ def _bundle_paths(root: Path) -> list[Path]:
     return paths
 
 
-def _verify_checksums(bundle: Path, *, session_required: bool = True) -> None:
+def _verify_checksums(bundle: Path, *, session_required: bool = True) -> dict[str, bytes]:
     try:
         lines = (bundle / "checksums.sha256").read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -137,12 +138,45 @@ def _verify_checksums(bundle: Path, *, session_required: bool = True) -> None:
     if set(listed) != expected:
         missing = sorted(expected - set(listed)); extra = sorted(set(listed) - expected)
         raise AnalysisError(f"checksum set mismatch; missing={missing}, extra={extra}")
+    verified: dict[str, bytes] = {}
     for name, expected_hash in listed.items():
-        if sha256_file(bundle / name) != expected_hash:
+        try:
+            payload = (bundle / name).read_bytes()
+        except OSError as exc:
+            raise AnalysisError(f"cannot read checksummed file {name}: {exc}") from exc
+        if hashlib.sha256(payload).hexdigest() != expected_hash:
             raise AnalysisError(f"checksum mismatch: {name}")
+        verified[name] = payload
+    return verified
+def _parse_bound_attestation(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+        if not isinstance(value, dict) or set(value) != {
+            "run_id", "router_zid", "validation_supervisor_instance_id",
+            "launcher_nonce", "scanner_id", "scanner_sha256",
+            "scanner_device", "scanner_inode", "capability", "payload_sha256",
+        }:
+            raise ValueError("attestation schema mismatch")
+        payload_digest = value.pop("payload_sha256")
+        if not isinstance(payload_digest, str) or hashlib.sha256(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest() != payload_digest:
+            raise ValueError("attestation payload digest mismatch")
+        if not str(value["scanner_id"]).strip() or not isinstance(value["scanner_sha256"], str):
+            raise ValueError("scanner binding is missing")
+        RealCapabilityInput.from_mapping(value["capability"])
+        return value
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise AnalysisError(f"invalid bound real preflight attestation: {exc}") from exc
 
 
-def _verify_manifest(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
+def _verify_manifest(
+    bundle: Path,
+    matrix: Mapping[str, Any],
+    *,
+    verified_files: Mapping[str, bytes] | None = None,
+) -> dict[str, Any]:
+
     manifest = _yaml(bundle / "manifest.yaml")
     if manifest.get("schema_name") != BUNDLE_SCHEMA or manifest.get("schema_version") != BUNDLE_VERSION:
         raise AnalysisError("unsupported validation manifest schema")
@@ -175,17 +209,20 @@ def _verify_manifest(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
         relative = Path(str(manifest["real_preflight_file"]))
         if relative.is_absolute() or relative.as_posix() != "real-preflight.json":
             raise AnalysisError("real preflight path must be bundle-relative")
-        attestation = bundle / relative
         try:
-            value = json.loads(attestation.read_text(encoding="utf-8"))
-            if set(value) != {"run_id", "router_zid", "validation_supervisor_instance_id", "launcher_nonce", "capability"}:
-                raise ValueError("attestation schema mismatch")
+            attestation_bytes = (
+                verified_files.get(relative.as_posix())
+                if verified_files is not None
+                else attestation.read_bytes()
+            )
+            if attestation_bytes is None:
+                raise OSError("verified attestation bytes are missing")
+            value = _parse_bound_attestation(attestation_bytes)
             if value["run_id"] != manifest["run_id"] or value["router_zid"] != manifest["router_zid"]:
                 raise ValueError("attestation run/router mismatch")
             if value["validation_supervisor_instance_id"] != manifest["publisher_instance_ids"]["validation_supervisor"]:
                 raise ValueError("attestation supervisor mismatch")
-            RealCapabilityInput.from_mapping(value["capability"])
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        except (OSError, KeyError, TypeError, ValueError, AnalysisError) as exc:
             raise AnalysisError(f"invalid bound real preflight attestation: {exc}") from exc
     expected_authorities = _authority_contract(manifest)
     if manifest.get("authority_contract") != expected_authorities:
@@ -1076,7 +1113,12 @@ def analyze_bundle(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
     if session_required: required.add("session.h5")
     missing = [name for name in required if not (bundle / name).is_file()]
     if missing: raise AnalysisError(f"bundle missing required files: {sorted(missing)}")
-    _verify_checksums(bundle, session_required=session_required); manifest = _verify_manifest(bundle, matrix); statuses = _verify_status(bundle, manifest); protocol, liveliness = _verify_capture(bundle, manifest); operator = _verify_operator_result(bundle); events = _verify_operator_events(bundle, manifest)
+    verified_files = _verify_checksums(bundle, session_required=session_required)
+    manifest = _verify_manifest(bundle, matrix, verified_files=verified_files)
+    statuses = _verify_status(bundle, manifest)
+    protocol, liveliness = _verify_capture(bundle, manifest)
+    operator = _verify_operator_result(bundle)
+    events = _verify_operator_events(bundle, manifest)
     if session_required or (bundle / "session.h5").is_file(): metrics = _verify_h5(bundle, manifest)
     else: metrics = {"rates": {}, "target_to_solved_error": {"samples": 0, "max_position_error_m": "unavailable", "max_orientation_error_rad": "unavailable"}, "joint_step_rad": {}, "joint_velocity_rad_s": {}, "phase_velocity_rad_s": {}, "saturation_count": {}, "hard_limit_violations": {}, "proposal_rejections": "unavailable", "command_feedback_tracking": {"samples": 0, "max_error_rad": "unavailable"}, "tracking_threshold_rad": _tracking_threshold_rad(manifest), "home_time_s": "unavailable", "home_feedback_ok": False, "hand_zero_time_s": "unavailable", "hand_zero_feedback_ok": False, "fault_reasons": [], "soft_stop_reasons": [], "session_event_states": {}}
     protocol_metrics = _protocol_metrics(protocol, manifest, statuses)

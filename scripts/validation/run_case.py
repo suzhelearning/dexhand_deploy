@@ -8,9 +8,12 @@ is ``aborted`` until an operator records a real observation.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import fcntl
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import stat
 import hashlib
 import json
 import os
@@ -158,14 +161,82 @@ class AlignedStreamObservation:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _canonical_json(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def _memfd_create(name: str) -> int:
+    creator = getattr(os, "memfd_create", None)
+    if creator is not None:
+        return int(creator(name, getattr(os, "MFD_ALLOW_SEALING", 0x0002)))
+    libc = ctypes.CDLL(None, use_errno=True)
+    function = libc.memfd_create
+    function.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    fd = int(function(name.encode("ascii"), 0x0002))
+    if fd < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return fd
+
+
+def _sealed_memfd(payload: bytes, *, name: str) -> int:
+    fd = _memfd_create(name)
+    try:
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(fd, payload[offset:])
+        fcntl.fcntl(
+            fd,
+            getattr(fcntl, "F_ADD_SEALS", 1033),
+            getattr(fcntl, "F_SEAL_SEAL", 1)
+            | getattr(fcntl, "F_SEAL_SHRINK", 2)
+            | getattr(fcntl, "F_SEAL_GROW", 4)
+            | getattr(fcntl, "F_SEAL_WRITE", 8),
+        )
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _read_fd(fd: int) -> bytes:
+    size = os.fstat(fd).st_size
+    if size < 0:
+        raise ValueError("invalid file descriptor size")
+    payload = os.pread(fd, size, 0)
+    if len(payload) != size:
+        raise ValueError("short read from immutable file descriptor")
+    return payload
+
+
+@dataclass
+class RealPreflightBinding:
+    nonce: str
+    digest: str
+    payload: bytes
+    attestation_fd: int
+    scanner_fd: int
+
+    def close(self) -> None:
+        for name in ("attestation_fd", "scanner_fd"):
+            fd = getattr(self, name)
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, name, -1)
+
+
 
 
 def sha256_tree(path: Path, *, suffixes: Iterable[str] | None = None) -> str:
@@ -410,8 +481,6 @@ def _hashes() -> dict[str, str]:
         "runtime_sha256": sha256_tree(ROOT / "runtime"),
         "acl_sha256": sha256_file(acl) if acl.is_file() else "unavailable",
     }
-
-
 def _bind_real_preflight(
     source_path: Path,
     bound_path: Path,
@@ -419,29 +488,117 @@ def _bind_real_preflight(
     run_id: str,
     supervisor: str,
     router_zid: str,
-) -> str:
-    """Bind a root-owned scanner result to this run without mutating it."""
-    stat = source_path.stat()
-    if source_path.is_symlink() or not source_path.is_file() or stat.st_uid != 0 or stat.st_mode & 0o022:
-        raise PermissionError("real preflight source must be a root-owned protected regular file")
-    value = yaml.safe_load(source_path.read_text(encoding="utf-8"))
-    if not isinstance(value, Mapping) or set(value) != {"scanner_id", "capability"} or not str(value["scanner_id"]).strip():
-        raise PermissionError("real preflight source is not a scanner attestation")
-    capability = RealCapabilityInput.from_mapping(value["capability"])
-    nonce = uuid.uuid4().hex
-    bound_path.write_text(json.dumps({
-        "run_id": run_id,
-        "router_zid": router_zid,
-        "validation_supervisor_instance_id": supervisor,
-        "launcher_nonce": nonce,
-        "capability": {
-            "speed": float(capability.speed),
-            "yaw_deg": float(capability.yaw_deg),
-            "deadman_available": capability.deadman_available,
-            "preflight_passed": capability.preflight_passed,
-        },
-    }, separators=(",", ":")), encoding="utf-8")
-    return nonce
+) -> RealPreflightBinding:
+    """Bind one protected scanner result and keep its immutable bytes for children."""
+    scanner_fd = -1
+    attestation_fd = -1
+    audit_created = False
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        scanner_fd = os.open(str(source_path), flags)
+        scanner_stat = os.fstat(scanner_fd)
+        if (
+            not stat.S_ISREG(scanner_stat.st_mode)
+            or scanner_stat.st_uid != 0
+            or scanner_stat.st_mode & 0o022
+        ):
+            raise PermissionError("real preflight source must be a root-owned protected regular file")
+        scanner_bytes = _read_fd(scanner_fd)
+        value = yaml.safe_load(scanner_bytes.decode("utf-8"))
+        if not isinstance(value, Mapping) or set(value) != {"scanner_id", "capability"} or not str(value["scanner_id"]).strip():
+            raise PermissionError("real preflight source is not a scanner attestation")
+        capability = RealCapabilityInput.from_mapping(value["capability"])
+        nonce = uuid.uuid4().hex
+        base = {
+            "run_id": run_id,
+            "router_zid": router_zid,
+            "validation_supervisor_instance_id": supervisor,
+            "launcher_nonce": nonce,
+            "scanner_id": str(value["scanner_id"]).strip(),
+            "scanner_sha256": hashlib.sha256(scanner_bytes).hexdigest(),
+            "scanner_device": int(scanner_stat.st_dev),
+            "scanner_inode": int(scanner_stat.st_ino),
+            "capability": {
+                "speed": float(capability.speed),
+                "yaw_deg": float(capability.yaw_deg),
+                "deadman_available": capability.deadman_available,
+                "preflight_passed": capability.preflight_passed,
+            },
+        }
+        payload = dict(base)
+        payload["payload_sha256"] = hashlib.sha256(_canonical_json(base)).hexdigest()
+        payload_bytes = _canonical_json(payload)
+        audit_fd = os.open(
+            str(bound_path),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o400,
+        )
+        audit_created = True
+        try:
+            offset = 0
+            while offset < len(payload_bytes):
+                offset += os.write(audit_fd, payload_bytes[offset:])
+            os.fsync(audit_fd)
+            os.fchmod(audit_fd, 0o400)
+        finally:
+            os.close(audit_fd)
+        attestation_fd = _sealed_memfd(payload_bytes, name="tianji-real-preflight")
+        return RealPreflightBinding(
+            nonce=nonce,
+            digest=hashlib.sha256(payload_bytes).hexdigest(),
+            payload=payload_bytes,
+            attestation_fd=attestation_fd,
+            scanner_fd=scanner_fd,
+        )
+    except Exception:
+        if attestation_fd >= 0:
+            os.close(attestation_fd)
+        if scanner_fd >= 0:
+            os.close(scanner_fd)
+        if audit_created:
+            try:
+                bound_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _wait_for_launcher_startup(
+    log_path: Path,
+    *,
+    timeout_s: float,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Any] = time.sleep,
+    process: Any | None = None,
+) -> bool:
+    """Wait for run_session's explicit post-launch marker, not elapsed time."""
+    if timeout_s <= 0:
+        return False
+    deadline = clock() + float(timeout_s)
+    while clock() < deadline:
+        try:
+            text = log_path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        if any(line.startswith("session_startup_complete ") for line in text.splitlines()):
+            return True
+        if process is not None and process.poll() is not None:
+            return False
+        sleep(min(0.05, max(0.0, deadline - clock())))
+    return False
+
+
+def _launcher_startup_timeout(manifest: Mapping[str, Any]) -> float:
+    components = sum(
+        1 for entry in manifest.get("authority_contract", [])
+        if entry.get("component_role") in {
+            "source", "producer_arm", "producer_hand", "coordinator_arm",
+            "executor_arm", "executor_hand", "recorder",
+        }
+    )
+    return max(15.0, float(max(1, components) * 3))
+
+
 
 def _write_status(stream: Any, *, event: str, component: str, supervisor: str, run_id: str, **fields: Any) -> None:
     record = {
@@ -472,7 +629,7 @@ def _write_operator_event(path: Path, supervisor: str, run_id: str, event: str, 
         stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def _write_checksums(bundle: Path) -> None:
+def _write_checksums(bundle: Path, *, immutable_files: Mapping[str, bytes] | None = None) -> None:
     names = [
         "manifest.yaml", "status.jsonl", "operator_events.jsonl",
         "liveliness.jsonl", "protocol.jsonl", "operator_result.yaml",
@@ -482,9 +639,12 @@ def _write_checksums(bundle: Path) -> None:
     if (bundle / "session.h5").is_file():
         names.insert(1, "session.h5")
     names += sorted(path.relative_to(bundle).as_posix() for path in (bundle / "logs").glob("*") if path.is_file())
+    immutable = dict(immutable_files or {})
     with (bundle / "checksums.sha256").open("w", encoding="utf-8") as stream:
         for name in names:
-            stream.write(f"{sha256_file(bundle / name)}  {name}\n")
+            payload = immutable.get(name)
+            digest = hashlib.sha256(payload).hexdigest() if payload is not None else sha256_file(bundle / name)
+            stream.write(f"{digest}  {name}\n")
 
 
 def _create_empty_session(path: Path, source_type: str, router_zid: str) -> None:
@@ -840,7 +1000,15 @@ def _write_operator_result(path: Path, *, outcome: str, emergency_stop: bool = F
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
-def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: argparse.Namespace) -> SafetyStopResult | None:
+def _managed_stop(
+    bundle: Path,
+    manifest: Mapping[str, Any],
+    status: Any,
+    args: argparse.Namespace,
+    *,
+    launcher_log: Path | None = None,
+    process: Any | None = None,
+) -> SafetyStopResult | None:
     if not args.danger_stop:
         return None
     ids = [entry["publisher_instance_id"] for entry in manifest.get("authority_contract", []) if entry.get("component_role") == "executor_arm"]
@@ -862,22 +1030,29 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
             ]
         except (OSError, json.JSONDecodeError, TypeError):
             return []
-    # A danger stop is meaningful only after every enabled executor has
-    # published a fresh ready/healthy status.  Wait for the bounded startup
-    # window; never emit a stop for an unready session.
-    ready_deadline = time.monotonic() + min(5.0, float(manifest.get("max_duration_s", 5.0)))
+    # A danger stop is meaningful only after the launcher has completed its
+    # full component sequence.  The explicit marker avoids a fixed five-second
+    # race with hand executors that are started last.
+    before_status_rows = _records("status.jsonl")
+    startup_ready = launcher_log is None or _wait_for_launcher_startup(
+        launcher_log,
+        timeout_s=_launcher_startup_timeout(manifest),
+        process=process,
+    )
+    ready_deadline = time.monotonic() + 5.0
     executor_ready = False
-    while time.monotonic() < ready_deadline:
-        before_status_rows = _records("status.jsonl")
-        executor_ready = all(any(
-            str(row.get("publisher_instance_id", "")) == executor_id
-            and row.get("component_role") in {"executor_arm", "executor_hand"}
-            and row.get("ready") is True and row.get("healthy") is True
-            for row in before_status_rows
-        ) for executor_id in ids)
-        if executor_ready:
-            break
-        time.sleep(0.05)
+    if startup_ready:
+        while time.monotonic() < ready_deadline:
+            before_status_rows = _records("status.jsonl")
+            executor_ready = all(any(
+                str(row.get("publisher_instance_id", "")) == executor_id
+                and row.get("component_role") in {"executor_arm", "executor_hand"}
+                and row.get("ready") is True and row.get("healthy") is True
+                for row in before_status_rows
+            ) for executor_id in ids)
+            if executor_ready:
+                break
+            time.sleep(0.05)
     if not executor_ready:
         request = SafetyStopRequest(
             ProtocolEnvelope(1, supervisor_id, str(manifest["router_zid"]), 1, monotonic_ns()),
@@ -1123,9 +1298,8 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
         "TIANJI_IK_BACKEND": str(manifest.get("ik_backend") or ""),
         "TIANJI_VALIDATION_IK_BACKEND": str(manifest.get("ik_backend") or ""),
         "TIANJI_VALIDATION_PRODUCER": str(manifest.get("producer") or ""),
-        "TIANJI_REAL_PREFLIGHT_FILE": str(getattr(args, "real_preflight_file", "") or ""),
-        "TIANJI_REAL_PREFLIGHT_NONCE": str(getattr(args, "real_preflight_nonce", "") or ""),
-        "TIANJI_REAL_PREFLIGHT_DIGEST": str(getattr(args, "real_preflight_digest", "") or ""),
+        "TIANJI_REAL_PREFLIGHT_FD": str(getattr(args, "real_preflight_fd", "") or ""),
+        "TIANJI_REAL_PREFLIGHT_SCANNER_FD": str(getattr(args, "real_preflight_scanner_fd", "") or ""),
     })
     log_path = bundle / "logs" / "session.log"
     with log_path.open("w", encoding="utf-8") as log:
@@ -1137,8 +1311,29 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
         except Exception as exc:
             evidence_capture = None
             _write_status(status, event="capture_unavailable", component="validation", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], healthy=False, error=str(exc))
-        process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, text=True)
-        stop_result = _managed_stop(bundle, manifest, status, args)
+        pass_fds = tuple(
+            int(fd) for fd in (
+                getattr(args, "real_preflight_fd", -1),
+                getattr(args, "real_preflight_scanner_fd", -1),
+            ) if isinstance(fd, int) and fd >= 0
+        )
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            pass_fds=pass_fds,
+        )
+        stop_result = _managed_stop(
+            bundle,
+            manifest,
+            status,
+            args,
+            launcher_log=log_path,
+            process=process,
+        )
         deadline = time.monotonic() + float(manifest["max_duration_s"])
         exit_reason = "operator_interrupt"
         try:
@@ -1228,9 +1423,10 @@ def run_case(args: argparse.Namespace) -> int:
     router_zid = "fake-router-unverified" if args.fake else os.environ.get("TIANJI_ROUTER_ZID", "")
     if not router_zid:
         raise RuntimeError("router ZID unavailable; run the managed router before validation")
+    preflight_binding: RealPreflightBinding | None = None
     if capability == "real":
         bound_attestation = bundle / "real-preflight.json"
-        args.real_preflight_nonce = _bind_real_preflight(
+        preflight_binding = _bind_real_preflight(
             Path(args.real_preflight_file).expanduser(),
             bound_attestation,
             run_id=run_id,
@@ -1238,7 +1434,10 @@ def run_case(args: argparse.Namespace) -> int:
             router_zid=router_zid,
         )
         args.real_preflight_file = str(bound_attestation)
-        args.real_preflight_digest = sha256_file(bound_attestation)
+        args.real_preflight_nonce = preflight_binding.nonce
+        args.real_preflight_digest = preflight_binding.digest
+        args.real_preflight_fd = preflight_binding.attestation_fd
+        args.real_preflight_scanner_fd = preflight_binding.scanner_fd
     manifest = _build_manifest(args.case, case, case["profile"], run_id, supervisor, router_zid, started, args)
     (bundle / "manifest.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
     (bundle / "operator_events.jsonl").touch()
@@ -1247,7 +1446,11 @@ def run_case(args: argparse.Namespace) -> int:
     with (bundle / "status.jsonl").open("w", encoding="utf-8") as status, (bundle / "logs" / "validation.log").open("w", encoding="utf-8") as log:
         _write_status(status, event="preflight_started", component="validation", supervisor=supervisor, run_id=run_id, required_capability=capability, required_devices=case["required_devices"], physical_validation=not args.fake)
         log.write(f"run_id={run_id}\ncase={args.case}\nmode={'fake_headless' if args.fake else 'managed_session'}\n")
-        rc = _run_fake(bundle, manifest, status, args) if args.fake else _run_session(bundle, manifest, status, args)
+        try:
+            rc = _run_fake(bundle, manifest, status, args) if args.fake else _run_session(bundle, manifest, status, args)
+        finally:
+            if preflight_binding is not None:
+                preflight_binding.close()
     manifest["ended_at"] = utc_now()
     manifest["exit_reason"] = "fake_headless_only" if args.fake else "operator_or_session_exit"
     (bundle / "manifest.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
@@ -1277,7 +1480,8 @@ def run_case(args: argparse.Namespace) -> int:
         outcome=requested_outcome,
         notes=args.operator_notes or ("No physical acceptance claim; record operator result after completing the runbook." if requested_outcome == "aborted" else "Operator recorded outcome with explicit event."),
     )
-    _write_checksums(bundle)
+    immutable_files = {"real-preflight.json": preflight_binding.payload} if preflight_binding is not None else None
+    _write_checksums(bundle, immutable_files=immutable_files)
     print(bundle)
     return rc
 

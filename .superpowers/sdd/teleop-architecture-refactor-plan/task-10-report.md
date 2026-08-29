@@ -106,3 +106,38 @@
 - 未修改 acquisition 用户 dirty/untracked 文件。
 - 未扩大 physical limits、未关闭 freshness、未吞掉 fault，也未自动触发危险输入。
 - 真实设备验收仍需按 `docs/validation/` gate 执行，完成后再对完整 ROOT 运行 analyzer；本报告不替代物理验证。
+
+## Task10 round5 final fix
+
+- RED 证据：新增 launcher startup marker 回归测试初次因缺少 `_wait_for_launcher_startup` 实现而失败；sealed attestation 测试在旧 path/digest 读取实现下未通过。
+- `_managed_stop` 现在等待 `run_session.sh` 在所有组件启动完成后写出的 `session_startup_complete` 明确 marker，再在有界窗口内确认所有 arm/hand executor fresh ready/healthy；不再以固定 5 秒覆盖启动顺序。launcher 退出或 marker 超时会保持 stop 未发布并 fail closed。
+- real preflight 由 root-owned scanner descriptor 绑定，launcher 将 scanner 与 run-bound payload 读入内存；payload 通过 sealed `memfd` 继承给 children。provider 使用同一 `pread` 字节完成 digest/JSON 校验，核对 scanner inode/device、原始 scanner digest 与 typed capability，并拒绝普通 path/digest/UID 自报。
+- analyzer checksum 校验缓存每个文件的已验证字节，real attestation 解析复用同一内存内容；run_case checksum 生成复用 bound payload，不再重新打开可写 bundle attestation。
+- 定向验证：`tests.test_validation_tools` + `tests.test_task5_executor_contract` 共 56 tests 全部通过；`python3 -m py_compile scripts/validation/run_case.py scripts/validation/analyze_runs.py src/pico_body_tianji/pico_body_tianji/executors/marvin/preflight.py tests/test_validation_tools.py` 通过；`bash -n scripts/run_session.sh scripts/validation/run_case.py` 与 `git diff --check` 通过。
+- `pixi run -e ik-build cmake --build build/task8-cmake --target wuji_hand2_bridge -j2` 通过（`wuji_hand2`、`wuji_hand2_bridge` 均成功构建链接）。
+
+### 本轮实际命令输出摘要
+
+```text
+$ PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_validation_tools tests.test_task5_executor_contract -v
+Ran 56 tests in 3.011s
+OK
+
+$ PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_validation_tools.ValidationToolsTest.test_managed_stop_waits_for_explicit_launcher_startup_signal tests.test_validation_tools.ValidationToolsTest.test_real_capability_uses_sealed_attestation_and_scanner_binding tests.test_validation_tools.ValidationToolsTest.test_real_capability_rejects_ordinary_path_and_digest_environment -v
+Ran 3 tests in 0.055s
+OK
+
+$ python3 -m py_compile scripts/validation/run_case.py scripts/validation/analyze_runs.py src/pico_body_tianji/pico_body_tianji/executors/marvin/preflight.py tests/test_validation_tools.py
+[无输出，退出码 0]
+$ bash -n scripts/run_session.sh scripts/validation/run_case.py && git diff --check
+[无输出，退出码 0]
+
+$ pixi run -e ik-build cmake --build build/task8-cmake --target wuji_hand2_bridge -j2
+[ 40%] Built target wuji_hand2
+[100%] Built target wuji_hand2_bridge
+```
+
+### 本轮未完成项
+
+- 未执行 acquisition/full `pixi run test`、teleop full suite、`pixi install`/完整 `build-ik`/`deploy-ik`；未执行 managed ACL router/doctor、真实 managed bundle、live/IK/replay/policy/Wuji/diagnostic 进程 E2E。
+- 当前环境仍无可用 `zenohd`、官方设备 SDK、Motive/Marvin/Wuji 设备；未进行任何物理验收或危险 stop 实机验证。上述缺口不能由 fake/headless bundle 代替。
