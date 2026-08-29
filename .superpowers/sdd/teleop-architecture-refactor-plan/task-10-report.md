@@ -64,6 +64,8 @@
 - managed SafetyStop 在 session executor 未 ready 时不发布且不成功；进入 stop 后等待所有 arm/hand matching ack，并按 request/ack/status monotonic 时间窗计算 same-tick evidence。
 - real validation 增加 `--real-preflight-file`，要求 regular-file、run/router/supervisor-bound typed attestation；普通环境变量不能自报通过，默认 denied。
 - Round3 command：定向 35 tests（validation 26、PICO entry 1、Marvin 8）全部通过；Wuji 3 canonical unit tests已通过，managed process因endpoint缺失skip；py_compile、bash -n、git diff-check通过。C++构建受zenohd/SDK环境阻塞，未虚报通过。
+- C++ smoke command: `cmake --build build/task8-cmake --target wuji_hand2_bridge -j2`
+  - Result: blocked before execution because `cmake: command not found`.
 
 ## 未能执行与外部阻塞
 
