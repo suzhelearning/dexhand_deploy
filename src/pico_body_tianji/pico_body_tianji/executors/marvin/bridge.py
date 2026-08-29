@@ -32,7 +32,7 @@ from ...protocol.messages import (
     strict_loads,
 )
 from ...sources.common.real_admission import RealCapabilityInput, parse_real_capability
-from ...zenoh_util import open_session, require_single_router
+from ...zenoh_util import open_session, require_single_router, declare_component_liveliness
 from .readiness import MarvinReadiness
 
 _LOG = logging.getLogger(__name__)
@@ -152,6 +152,9 @@ class MarvinExecutor:
         self._status_sequence = 0
         self._publishers: dict[str, Any] = {}
         self._subscriptions: list[Any] = []
+        self._liveliness_token = declare_component_liveliness(
+            session, role="executor/arm", logical_id="marvin", instance_id=publisher_instance_id
+        ) if session is not None else None
         self._setup_transport()
         self._status = self._make_status(False, False, self._phase)
 
@@ -550,9 +553,14 @@ class MarvinExecutor:
             self.tick()
             self._publish_status()
             time.sleep(max(0.0, next_tick - time.monotonic()))
-
     def close(self) -> None:
         self._release_hardware()
+        if self._liveliness_token is not None:
+            try:
+                self._liveliness_token.undeclare()
+            except Exception:
+                pass
+            self._liveliness_token = None
         for resource in (*self._subscriptions, *self._publishers.values()):
             try:
                 if resource is not None:
@@ -568,6 +576,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="canonical Marvin executor")
     parser.add_argument("--confirm-real", action="store_true")
     parser.add_argument("--robot-ip", default=os.environ.get("MARVIN_ROBOT_IP", ""))
+    parser.add_argument("--config", default="")
     args = parser.parse_args(argv)
     if not args.confirm_real:
         print("Marvin executor requires --confirm-real", flush=True)
@@ -582,6 +591,13 @@ def main(argv: list[str] | None = None) -> int:
     coordinator = os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID", "")
     if not instance or not coordinator:
         raise RuntimeError("TIANJI_COMPONENT_INSTANCE_ID and TIANJI_COORDINATOR_INSTANCE_ID are required")
+    params = {"robot_ip": args.robot_ip}
+    if args.config:
+        import yaml
+        configured = yaml.safe_load(open(args.config, encoding="utf-8")) or {}
+        if not isinstance(configured, Mapping):
+            raise RuntimeError("Marvin executor config must be a mapping")
+        params.update(configured)
     session = open_session()
     node = None
     try:
@@ -591,7 +607,7 @@ def main(argv: list[str] | None = None) -> int:
             coordinator_instance_id=coordinator, real_capability=provider,
             run_id=os.environ.get("TIANJI_RUN_ID"),
             safety_supervisor_instance_id=os.environ.get("TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID"),
-            params={"robot_ip": args.robot_ip},
+            params=params,
         )
         if not node.connect():
             return 1

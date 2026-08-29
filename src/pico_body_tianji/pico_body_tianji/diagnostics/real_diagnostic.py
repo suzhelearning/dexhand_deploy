@@ -11,9 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..protocol import topics
-from ..protocol.messages import SessionState, strict_loads
-from ..zenoh_util import open_session, require_single_router
+from ..protocol.messages import ComponentStatus, SessionState, strict_loads
 
 
 class RealDiagnosticCollector:
@@ -25,6 +23,17 @@ class RealDiagnosticCollector:
         self.output.parent.mkdir(parents=True, exist_ok=True)
         self._file = self.output.open("a", encoding="utf-8")
         self._closed = False
+        self._statuses: dict[str, ComponentStatus] = {}
+        self._session_state: SessionState | None = None
+
+    @property
+    def readiness(self) -> dict[str, Any]:
+        required = ("source", "producer_arm", "coordinator_arm", "executor_arm")
+        ready = self._session_state is not None and self._session_state.state in {"idle", "teleop", "returning"}
+        for role in required:
+            status = self._statuses.get(role)
+            ready = ready and status is not None and status.ready and status.healthy and self.router_zid == status.router_zid
+        return {"ready": bool(ready), "state": None if self._session_state is None else self._session_state.state, "roles": sorted(self._statuses)}
 
     def receive(self, topic: str, payload: Any) -> None:
         if self._closed:
@@ -34,7 +43,13 @@ class RealDiagnosticCollector:
             message = SessionState.from_dict(value)
             if message.router_zid != self.router_zid:
                 return
-        self._file.write(json.dumps({"time_ns": time.monotonic_ns(), "topic": topic, "payload": value}, ensure_ascii=False) + "\n")
+            self._session_state = message
+        else:
+            message = ComponentStatus.from_dict(value)
+            if message.router_zid != self.router_zid:
+                return
+            self._statuses[message.component_role] = message
+        self._file.write(json.dumps({"time_ns": time.monotonic_ns(), "topic": topic, "payload": value, "readiness": self.readiness}, ensure_ascii=False) + "\n")
         self._file.flush()
 
     def close(self) -> None:

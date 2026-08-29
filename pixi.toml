@@ -25,16 +25,16 @@ doctor = "bash scripts/doctor.sh"
 test = "bash scripts/test.sh"
 status = "bash scripts/status.sh"
 pico_sim = { cmd = "bash scripts/run_session.sh --profile pico_sim" }
-pico_real = { cmd = "bash scripts/run_session.sh --profile pico_real --confirm-real" }
+pico_real = { cmd = "bash scripts/run_session.sh --profile pico_real" }
 mocap_live_sim = { cmd = "bash scripts/run_session.sh --profile mocap_live_sim" }
-mocap_live_real = { cmd = "bash scripts/run_session.sh --profile mocap_live_real --confirm-real" }
+mocap_live_real = { cmd = "bash scripts/run_session.sh --profile mocap_live_real" }
 h5_sim = { cmd = "bash scripts/run_session.sh --profile h5_sim" }
-h5_real = { cmd = "bash scripts/run_session.sh --profile h5_real --confirm-real" }
+h5_real = { cmd = "bash scripts/run_session.sh --profile h5_real" }
 target_replay_sim = { cmd = "bash scripts/run_session.sh --profile target_replay_sim" }
 joint_replay_sim = { cmd = "bash scripts/run_session.sh --profile joint_replay_sim" }
 diagnostic-mocap-calibration-sim = { cmd = "bash scripts/run_session.sh --profile diagnostic_mocap_calibration_sim" }
-wuji_hand2_dry = { cmd = "bash scripts/run_executor.sh --executor wuji_hand2 --mode retarget --side right" }
-wuji_hand2_real = { cmd = "bash scripts/run_executor.sh --executor wuji_hand2 --mode retarget --side right --confirm-real" }
+wuji_hand2_dry = { cmd = "bash scripts/run_session.sh --profile h5_sim" }
+wuji_hand2_real = { cmd = "bash scripts/run_session.sh --profile h5_real" }
 
 # C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。
 # 编译器使用 Ubuntu 24.04 系统 GCC 13；脚本会在编译前严格检查它们与

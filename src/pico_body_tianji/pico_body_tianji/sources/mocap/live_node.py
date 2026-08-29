@@ -535,6 +535,13 @@ def main(argv: list[str] | None = None) -> int:
     overrides = dict(parse_param_override(item) for item in args.param)
     params = load_node_config(args.config, "mocap_live", {"rate": 60.0, "stale_timeout": _FRAME_STALE_S}, overrides)
     instance_id = os.environ.get("TIANJI_COMPONENT_INSTANCE_ID")
+    real_mode = os.environ.get("TIANJI_REQUIRED_CAPABILITY", "simulation") == "real"
+    if real_mode:
+        params["real_mode"] = True
+    real_capability = None
+    if real_mode:
+        from ...executors.marvin.preflight import trusted_real_capability
+        real_capability = trusted_real_capability
     router_zid = os.environ.get("TIANJI_ROUTER_ZID")
     coordinator_id = os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID")
     endpoint = os.environ.get("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447")
@@ -551,6 +558,7 @@ def main(argv: list[str] | None = None) -> int:
         publisher_instance_id=instance_id,
         router_zid=router_zid,
         coordinator_instance_id=coordinator_id,
+        real_capability=real_capability,
     )
     keyboard_thread = threading.Thread(
         target=raw_keyboard,

@@ -76,7 +76,11 @@ def open_session(endpoint: str | None = None) -> zenoh.Session:
     if not endpoint:
         raise ValueError("router endpoint must not be empty")
     config = zenoh.Config.from_json5(
-        json.dumps({"mode": "client", "connect": {"endpoints": [endpoint]}})
+        json.dumps({
+            "mode": "client",
+            "connect": {"endpoints": [endpoint]},
+            "scouting": {"multicast": {"enabled": False}},
+        })
     )
     return zenoh.open(config)
 

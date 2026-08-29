@@ -25,6 +25,7 @@ RUNTIME_PROGRAMS=(
   trace_metrics
   real_diagnostic
   h5_wrist_diagnostic
+  joint_watcher
 )
 BACKUP_DIR="${BUNDLE_ROOT}/staging/runtime-backup"
 SDK_SOURCE_ROOT="${TIANJI_OFFICIAL_SDK_ROOT:-/home/ice/TJ_FX_ROBOT_CONTRL_SDK}"
@@ -36,6 +37,7 @@ SOURCE_CONFIG="${BUNDLE_ROOT}/src/pico_body_tianji/config"
 RUNTIME_CONFIG="${RUNTIME_SHARE}/config"
 SOURCE_ASSETS="${BUNDLE_ROOT}/src/pico_body_tianji/assets"
 RUNTIME_ASSETS="${RUNTIME_SHARE}/assets"
+RUNTIME_PYTHON="${BUNDLE_ROOT}/runtime/pico_body_tianji/lib/python3.10/site-packages/pico_body_tianji"
 STAGING_PYTHON="${BUNDLE_ROOT}/staging/ik/lib/python3.10/site-packages/pico_body_tianji"
 STRIP_TOOL="${IK_STRIP_TOOL:-/usr/bin/strip}"
 
@@ -62,25 +64,22 @@ if [[ ! -x "${STRIP_TOOL}" ]]; then
   printf '错误：找不到可执行的 strip 工具：%s\n' "${STRIP_TOOL}" >&2
   exit 1
 fi
-if [[ ! -x "${RUNTIME_BIN}/arm_ik_producer" ]]; then
-  printf '%s\n' '错误：runtime arm_ik_producer Bash 包装器不存在，拒绝部署。' >&2
-  exit 1
-fi
-if ! head -n 1 "${RUNTIME_BIN}/arm_ik_producer" | grep -Fxq '#!/usr/bin/env bash'; then
-  printf '%s\n' '错误：runtime arm_ik_producer 入口不是预期的 Bash 包装器，拒绝部署。' >&2
+SOURCE_WRAPPER="${BUNDLE_ROOT}/scripts/runtime_arm_ik_producer.sh"
+if [[ ! -x "${SOURCE_WRAPPER}" ]]; then
+  printf '%s\n' '错误：缺少 source arm_ik_producer runtime wrapper。' >&2
   exit 1
 fi
 shopt -s nullglob
-# Remove obsolete runtime entries explicitly, without keeping a compatibility
-# alias in the shipped tree.
-for stale in \
-  "${RUNTIME_BIN}"/pico_controller_* \
-  "${RUNTIME_BIN}"/marvin_hardware_* \
-  "${RUNTIME_BIN}"/mocap_keyboard_* \
-  "${RUNTIME_BIN}"/mujoco_joint_viewer* \
-  "${RUNTIME_BIN}"/controller_* \
-  "${RUNTIME_BIN}"/tianji_kinematic_*; do
-  rm -f -- "${stale}"
+for cleanup_root in "${RUNTIME_BIN}" "${STAGING_BIN}"; do
+  for stale in \
+    "${cleanup_root}"/pico_controller_* \
+    "${cleanup_root}"/marvin_hardware_* \
+    "${cleanup_root}"/mocap_keyboard_* \
+    "${cleanup_root}"/mujoco_joint_viewer* \
+    "${cleanup_root}"/controller_* \
+    "${cleanup_root}"/tianji_kinematic_*; do
+    rm -f -- "${stale}"
+  done
 done
 shopt -u nullglob
 mkdir -p "${BACKUP_DIR}"

@@ -14,14 +14,15 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="session-v1 replay source")
     parser.add_argument("mode", choices=("target", "joint"))
     parser.add_argument("recording", type=Path)
+    parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--headless", action="store_true")
-    parser.add_argument("--rate", type=float, default=60.0)
+    parser.add_argument("--rate", type=float, default=None)
     parser.add_argument("--active-sides", default="left,right")
     parser.add_argument("--inactive-sides", default="")
-    parser.add_argument("--record", default=None, help="rejected: replay profiles cannot be recorded")
+    parser.add_argument("--active-hand-sides", default="")
     parser.add_argument("--inactive-hand-sides", default="left,right")
+    parser.add_argument("--record", default=None, help="rejected: replay profiles cannot be recorded")
     return parser
-
 
 def _sides(raw: str) -> tuple[str, ...]:
     return tuple(item for item in (value.strip() for value in raw.split(",")) if item)
@@ -32,6 +33,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.record is not None:
         print("replay profile cannot be recorded", file=__import__("sys").stderr)
         return 2
+    import yaml
+    replay_config = {}
+    if args.config is not None:
+        replay_config = yaml.safe_load(args.config.read_text(encoding="utf-8")) or {}
+    rate = float(args.rate or replay_config.get("rate_hz", 60.0))
+    if rate <= 0:
+        raise SystemExit("replay rate must be positive")
     if not args.headless:
         raise SystemExit("replay profile requires --headless")
     instance = os.environ.get("TIANJI_COMPONENT_INSTANCE_ID")
@@ -48,8 +56,7 @@ def main(argv: list[str] | None = None) -> int:
             active_sides=_sides(args.active_sides),
             inactive_sides=_sides(args.inactive_sides),
             active_hand_sides=_sides(args.active_hand_sides),
-            inactive_hand_sides=_sides(args.inactive_hand_sides),
-            rate_hz=args.rate,
+            rate_hz=rate,
             expected_coordinator_instance_id=coordinator,
         )
         if args.mode == "target":
@@ -63,8 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         node.start()
         while True:
-            node.tick()
-            time.sleep(1.0 / args.rate)
+            time.sleep(1.0 / rate)
     except KeyboardInterrupt:
         return 0
     finally:

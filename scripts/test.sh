@@ -23,6 +23,8 @@ fi
 acl_config="${TIANJI_ACL_CONFIG:-/home/current/syz/mocap/acquisition/config/zenohd_acl.yaml}"
 [[ -f "${acl_config}" ]] || { printf '错误：ACL 配置不存在：%s\n' "${acl_config}" >&2; exit 1; }
 export TIANJI_ROUTER_ENDPOINT="${router_endpoint}"
+mkdir -p -- "${TELEOP_RUNTIME_DIR}"
+chmod 700 -- "${TELEOP_RUNTIME_DIR}"
 setsid zenohd -e "${router_endpoint}" -c "${acl_config}" >"${TELEOP_RUNTIME_DIR}/test-router.log" 2>&1 &
 router_pid=$!
 for _ in {1..50}; do

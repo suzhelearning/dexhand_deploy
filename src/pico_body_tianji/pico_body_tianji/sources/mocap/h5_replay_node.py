@@ -46,11 +46,12 @@ from .h5 import (
     load_mocap_h5,
     synthetic_reference_pose,
 )
-from ...protocol.messages import ArmSolvedPose, HAND_JOINT_NAMES, ProtocolError
+from ...protocol.messages import ArmSolvedPose, HAND_JOINT_NAMES, ProtocolError, ComponentStatus
 from ..common.real_admission import RealCapabilityInput, parse_real_capability
-from .motive import MotiveFrame, MotiveFrameSource
 from ...zenoh_util import (
     ZenohJsonSub,
+    ZenohPub,
+    declare_component_liveliness,
     load_node_config,
     load_tianji_config,
     open_session,
@@ -475,6 +476,12 @@ class MocapH5ReplayNode:
             router_zid=router_zid,
             allocator=allocator,
         )
+        self._direct_hand_token = (
+            declare_component_liveliness(
+                session, role="producer/hand", logical_id="h5_direct", instance_id=publisher_instance_id
+            ) if self._hand_joint_commands_payload is not None else None
+        )
+        self._direct_hand_status_pub = ZenohPub(session, topics.PRODUCER_STATUS) if self._hand_joint_commands_payload is not None else None
         self._session_client = SessionClient(
             session,
             source="h5_replay",
@@ -1536,6 +1543,14 @@ class MocapH5ReplayNode:
                 error=self._last_error,
                 diagnostics=diagnostics,
             )
+            if self._direct_hand_status_pub is not None:
+                direct = ComponentStatus(
+                    1, self._publisher.sequence, time.monotonic_ns(), "producer_hand", "h5_direct",
+                    self._phase, self._phase in {"armed", "start_pending", "ready", "replaying"},
+                    self._last_error is None, ["simulation"], self._last_error,
+                    {"mode": "direct"}, self._publisher.publisher_instance_id, self._publisher.router_zid,
+                )
+                self._direct_hand_status_pub.put_json(direct.to_dict())
 
     def run(self) -> int:
         tick_interval = 1.0 / self._rate
@@ -1564,6 +1579,15 @@ class MocapH5ReplayNode:
                 resource.close()
             except Exception:
                 pass
+        if self._direct_hand_token is not None:
+            try:
+                self._direct_hand_token.undeclare()
+            except Exception:
+                pass
+            self._direct_hand_token = None
+        if self._direct_hand_status_pub is not None:
+            self._direct_hand_status_pub.close()
+            self._direct_hand_status_pub = None
         try:
             self._publisher.close()
         finally:
@@ -1674,6 +1698,12 @@ def main(argv=None) -> int:
         DEFAULT_PARAMETERS,
         overrides,
     )
+    real_mode = os.environ.get("TIANJI_REQUIRED_CAPABILITY", "simulation") == "real"
+    real_capability = None
+    if real_mode:
+        params["real_mode"] = True
+        from ...executors.marvin.preflight import trusted_real_capability
+        real_capability = trusted_real_capability
     session = _open_session(os.environ.get("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447"))
     instance_id = os.environ.get("TIANJI_COMPONENT_INSTANCE_ID")
     router_zid = os.environ.get("TIANJI_ROUTER_ZID")
@@ -1718,7 +1748,7 @@ def main(argv=None) -> int:
             speed=args.speed,
             yaw_deg=args.yaw_deg,
             rate=args.rate,
-            real_capability=params.get("real_capability"),
+            real_capability=real_capability,
         )
         try:
             return node.run()

@@ -342,6 +342,20 @@ find_conflicting_teleop_nodes() {
   '
 }
 
+assert_profile_domains_free() {
+  local existing="$1"
+  local token role
+  while IFS= read -r token; do
+    [[ -n "${token}" ]] || continue
+    role="$(awk -F/ '{if ($3=="source") print "source"; else if (($3=="producer" || $3=="executor") && ($4=="arm" || $4=="hand")) print $3"/"$4; else if ($3=="coordinator" && $4=="arm") print "coordinator/arm"; else if ($3=="recorder") print "recorder"}' <<<"${token}")"
+    case "${role}" in
+      source|producer/arm|producer/hand|coordinator/arm|executor/arm|executor/hand)
+        printf '拒绝启动：profile domain 已被 live token 占用：%s\n' "${token}" >&2
+        return 1 ;;
+    esac
+  done <<<"${existing}"
+}
+
 read_router_zid() {
   local endpoint="${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
   TIANJI_ROUTER_ENDPOINT="${endpoint}" python - <<'PY'

@@ -43,11 +43,18 @@ if [[ ! -x "${entry}" ]]; then
 fi
 config="${config_override}"
 if [[ -z "${config}" ]]; then config="$(canonical_config "${default_config}")"; fi
-export TIANJI_ROUTER_ENDPOINT="${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
-export TIANJI_ROUTER_ZID="${TIANJI_ROUTER_ZID:-$(require_router)}"
-export TIANJI_COMPONENT_INSTANCE_ID="${TIANJI_COMPONENT_INSTANCE_ID:-$(new_instance_id)}"
-export TIANJI_COORDINATOR_INSTANCE_ID="${TIANJI_COORDINATOR_INSTANCE_ID:?必须由run_session注入 TIANJI_COORDINATOR_INSTANCE_ID}"
-activate_bundle_runtime
+if [[ "${producer_id}" == ik ]]; then
+  eval "$(
+    pixi run python - "${config}" <<'PY'
+import sys, yaml
+value = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+required = {"ik_backend", "arm_config", "rate_hz", "freshness_timeout_s", "maximum_joint_step_rad", "position_tolerance_m", "orientation_tolerance_rad", "worker_timeout_ms", "worker_restart_attempts"}
+for key, item in value.items():
+    name = "BACKEND" if key == "ik_backend" else key.upper()
+    print(f"export TIANJI_IK_{name}={item!r}")
+PY
+  )"
+fi
 if [[ "${producer_id}" == ik ]]; then
   arm_config="$(canonical_config robot/arm.yaml)"
   urdf_path="${TIANJI_ARM_URDF:-${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf}"

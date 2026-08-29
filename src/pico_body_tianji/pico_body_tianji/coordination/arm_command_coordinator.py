@@ -685,11 +685,18 @@ def main() -> int:
     from ..zenoh_util import open_session, require_single_router
     session = open_session(endpoint)
     router = require_single_router(session, router)
+    hand_mode = os.environ.get("TIANJI_HAND_MODE", "disabled")
     node = ArmCommandCoordinator(
         session,
         publisher_instance_id=instance,
         router_zid=router,
-        profile={"active_sides": tuple(filter(None, os.environ.get("TIANJI_ACTIVE_SIDES", "left,right").split(","))), "required_capability": os.environ.get("TIANJI_REQUIRED_CAPABILITY", "simulation")},
+        profile={
+            "active_sides": tuple(filter(None, os.environ.get("TIANJI_ACTIVE_SIDES", "left,right").split(","))),
+            "required_capability": os.environ.get("TIANJI_REQUIRED_CAPABILITY", "simulation"),
+            "hand_mode": hand_mode,
+            "hand_enabled": hand_mode != "disabled",
+            "hand_sides": tuple(filter(None, os.environ.get("TIANJI_ACTIVE_HAND_SIDES", os.environ.get("TIANJI_ACTIVE_SIDES", "left,right")).split(","))),
+        },
     )
     try:
         node.start()

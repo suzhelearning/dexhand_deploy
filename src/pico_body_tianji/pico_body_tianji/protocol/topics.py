@@ -3,6 +3,7 @@
 SESSION_INTENT = "tianji/session/intent"
 SESSION_STATE = "tianji/session/state"
 SOURCE_STATUS = "tianji/source/status"
+RECORDER_STATUS = "tianji/recorder/status"
 
 ARM_TARGET = "tianji/target/arm/{side}"
 HAND_TARGET = "tianji/target/hand/{side}"
@@ -79,7 +80,7 @@ def safety_ack(executor_id: str) -> str:
 
 
 __all__ = [
-    "SESSION_INTENT", "SESSION_STATE", "SOURCE_STATUS", "ARM_TARGET",
+    "SESSION_INTENT", "SESSION_STATE", "SOURCE_STATUS", "RECORDER_STATUS", "ARM_TARGET",
     "HAND_TARGET", "PRODUCER_STATUS", "ARM_PROPOSAL", "ARM_SOLVED_POSE",
     "COORDINATOR_STATUS", "AT_HOME", "RETURN_COMPLETE", "ARM_COMMAND",
     "HAND_COMMAND", "ARM_STATE", "HAND_STATE", "EXECUTOR_STATUS",

@@ -48,6 +48,6 @@ export TIANJI_COORDINATOR_INSTANCE_ID="${TIANJI_COORDINATOR_INSTANCE_ID:?必须�
 activate_bundle_runtime
 case "${source_id}" in
   target_replay|joint_replay)
-    exec python "${entry}" "$@" --headless ;;
+    exec python "${entry}" "$@" --config "${config}" --headless ;;
   *) exec python "${entry}" --config "${config}" "$@" ;;
 esac

@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+from pico_body_tianji.diagnostics.joint_watcher import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

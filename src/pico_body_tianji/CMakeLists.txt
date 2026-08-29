@@ -241,6 +241,7 @@ install(
     scripts/trace_metrics
     scripts/real_diagnostic
     scripts/h5_wrist_diagnostic
+    scripts/joint_watcher
   DESTINATION lib/${PROJECT_NAME}
 )
 install(

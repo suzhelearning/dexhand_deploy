@@ -38,8 +38,7 @@ from ...protocol.messages import (
     strict_loads,
 )
 from ...mujoco_urdf import portable_mujoco_urdf
-from ...zenoh_util import key, open_session, require_single_router
-from ..wuji_hand2.config import WujiHandConfig
+from ...zenoh_util import key, open_session, require_single_router, declare_component_liveliness
 
 _LOG = logging.getLogger(__name__)
 SIDES = ("left", "right")
@@ -234,6 +233,9 @@ class MujocoExecutor:
         self._last_error: str | None = None
         self._subscriptions: list[Any] = []
         self._publishers: dict[str, Any] = {}
+        self._liveliness_token = declare_component_liveliness(
+            session, role="executor/arm", logical_id="mujoco", instance_id=publisher_instance_id
+        ) if session is not None else None
         self._snapshot_timeout_ns = max(self.command_timeout_ns, 1_000_000_000)
         self._snapshot_attempt = 0
         self._snapshot_query_started_ns: int | None = None
@@ -628,8 +630,13 @@ class MujocoExecutor:
             next_tick += period
             self.tick()
             time.sleep(max(0.0, next_tick - time.monotonic()))
-
     def close(self) -> None:
+        if self._liveliness_token is not None:
+            try:
+                self._liveliness_token.undeclare()
+            except Exception:
+                pass
+            self._liveliness_token = None
         for resource in (*self._subscriptions, *self._publishers.values()):
             if resource is not None:
                 try:
@@ -643,6 +650,7 @@ class MujocoExecutor:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="canonical MuJoCo executor")
     parser.add_argument("--headless", action="store_true", help="run without mujoco.viewer")
+    parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--urdf", type=Path, default=None)
     parser.add_argument("--rate", type=float, default=60.0)
     parser.add_argument("--run-id", default="")
@@ -653,8 +661,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    if not args.headless:
-        raise SystemExit("MujocoExecutor requires --headless; windowed overlay is intentionally optional")
+    if args.config is not None:
+        import yaml
+        configured = yaml.safe_load(args.config.read_text(encoding="utf-8")) or {}
+        if args.urdf is None and configured.get("urdf"):
+            args.urdf = Path(configured["urdf"])
+        if args.rate == 60.0 and configured.get("rate_hz"):
+            args.rate = float(configured["rate_hz"])
     try:
         import mujoco
     except ImportError as exc:
@@ -675,7 +688,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=args.run_id or None,
             safety_supervisor_instance_id=os.environ.get("TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID"),
         )
-        executor.run(headless=True, rate_hz=args.rate)
+        executor.run(headless=args.headless, rate_hz=args.rate)
     except KeyboardInterrupt:
         return 0
     finally:

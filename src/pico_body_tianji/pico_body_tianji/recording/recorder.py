@@ -17,8 +17,10 @@ from ..protocol.messages import (
     RawMocapLiveSample,
     RawPicoControllerSample,
     SessionState,
+    ComponentStatus,
     strict_loads,
 )
+from ..zenoh_util import declare_component_liveliness
 from .session_h5 import SessionH5Writer
 
 
@@ -76,12 +78,26 @@ class SessionRecorderNode:
         flush_interval_s: float = 1.0,
         clock: Callable[[], int] | None = None,
     ) -> None:
-        del publisher_instance_id  # Recorder stores source publisher ids per row.
+        publisher_instance_id = publisher_instance_id or __import__("os").environ.get("TIANJI_COMPONENT_INSTANCE_ID") or "recorder"
+        if not publisher_instance_id:
+            raise ValueError("publisher_instance_id is required")
         self.session = session
+        self.publisher_instance_id = publisher_instance_id
         self.router_zid = router_zid
         self.source_type = source_type
         self._failed: RecorderProtocolError | None = None
         self._closed = False
+        self._status_sequence = 0
+        self._liveliness_token = (
+            declare_component_liveliness(
+                session, role="recorder", logical_id="session_recorder", instance_id=publisher_instance_id
+            ) if session is not None else None
+        )
+        self._status_publisher = (
+            session.declare_publisher(topics.RECORDER_STATUS)
+            if session is not None and hasattr(session, "declare_publisher")
+            else None
+        )
         self.writer = SessionH5Writer(
             output_path,
             source_type=source_type,
@@ -95,10 +111,25 @@ class SessionRecorderNode:
         if selected_raw is not None:
             self._declare(selected_raw[0])
         key_map = _key_map()
-        # Canonical targets/commands/states are recorded regardless of source;
-        # raw input is the only profile-specific subscription.
         for key in key_map:
             self._declare(key)
+        self._publish_status(ready=True, healthy=True)
+
+    def _publish_status(self, *, ready: bool, healthy: bool, error: str | None = None) -> None:
+        if self._status_publisher is None:
+            return
+        self._status_sequence += 1
+        status = ComponentStatus(
+            1, self._status_sequence, __import__("time").monotonic_ns(),
+            "recorder", "session_recorder", "ready" if ready else "fault",
+            ready, healthy, ["simulation"], error, {},
+            self.publisher_instance_id, self.router_zid,
+        )
+        payload = json.dumps(status.to_dict(), separators=(",", ":")).encode("utf-8")
+        try:
+            self._status_publisher.put(payload, encoding="application/json")
+        except TypeError:
+            self._status_publisher.put(payload)
 
     @property
     def failed(self) -> bool:
@@ -169,9 +200,24 @@ class SessionRecorderNode:
             try:
                 resource.undeclare()
             except Exception:
-                try: resource.close()
-                except Exception: pass
+                try:
+                    resource.close()
+                except Exception:
+                    pass
         self._resources.clear()
+        self._publish_status(ready=False, healthy=self._failed is None, error=str(self._failed) if self._failed else None)
+        if self._liveliness_token is not None:
+            try:
+                self._liveliness_token.undeclare()
+            except Exception:
+                pass
+            self._liveliness_token = None
+        if self._status_publisher is not None:
+            try:
+                self._status_publisher.undeclare()
+            except Exception:
+                pass
+            self._status_publisher = None
         if self._failed is None:
             self.writer.close()
         else:
@@ -179,11 +225,10 @@ class SessionRecorderNode:
         self._closed = True
 
     def abort(self) -> None:
-        if self._closed: return
-        for resource in self._resources:
-            try: resource.undeclare()
-            except Exception: pass
-        self._resources.clear(); self.writer.abort(); self._closed = True
+        if self._closed:
+            return
+        self._failed = self._failed or RecorderProtocolError("recorder aborted")
+        self.close()
 
     def __enter__(self) -> "SessionRecorderNode": return self
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
