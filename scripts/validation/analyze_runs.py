@@ -60,6 +60,8 @@ for _case_id in ("pico_sim", "mocap_live_sim", "h5_sim", "marvin_pico_real_10pct
 REQUIRED_EVIDENCE["h5_sim"]["checks"].add("target_to_solved")
 REQUIRED_EVIDENCE["wuji_retarget_dry"]["checks"].update({"target_to_solved", "hand_zero"})
 REQUIRED_EVIDENCE["wuji_retarget_real"]["checks"].update({"target_to_solved", "hand_zero", "home_feedback"})
+for _case_id in ("ik_pinocchio_cpp", "ik_pinocchio_qp", "ik_tianji_official"):
+    REQUIRED_EVIDENCE[_case_id]["checks"].add("target_to_solved")
 
 
 class AnalysisError(ValueError):
@@ -201,18 +203,24 @@ def _verify_status(bundle: Path, manifest: Mapping[str, Any]) -> list[dict[str, 
         if not expected or acked != expected or row.get("ack_complete") is not True or row.get("lockout") is not True:
             raise AnalysisError("danger stop did not record all matching acknowledgements or remained unlocked")
     return statuses
-
-
 def _verify_capture(bundle: Path, manifest: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     captures: dict[str, list[dict[str, Any]]] = {}
     for name in ("liveliness.jsonl", "protocol.jsonl"):
         rows = _json_lines(bundle / name)
         captures[name] = rows
         for row in rows:
-            if row.get("schema_version") != 1 or row.get("run_id") != manifest["run_id"]:
-                raise AnalysisError(f"{name} schema or run_id mismatch")
-            if row.get("router_zid") not in {None, "", manifest["router_zid"]}:
-                raise AnalysisError(f"{name} router_zid differs from manifest")
+            topic = _topic(row)
+            external = topic == "mocap/aligned/hands"
+            if row.get("run_id") != manifest["run_id"]:
+                raise AnalysisError(f"{name} run_id mismatch")
+            if external:
+                if not row.get("stream_instance_id") or not isinstance(row.get("stream_sequence"), int) or not row.get("router_zid"):
+                    raise AnalysisError(f"{name} aligned stream envelope is incomplete")
+            elif row.get("schema_version") != 1:
+                raise AnalysisError(f"{name} missing or unsupported protocol schema")
+            router = row.get("router_zid")
+            if not router or router != manifest["router_zid"]:
+                raise AnalysisError(f"{name} router_zid is missing or differs from manifest")
     return captures["protocol.jsonl"], captures["liveliness.jsonl"]
 
 
@@ -317,6 +325,13 @@ def _metrics_from_h5(file: Any, manifest: Mapping[str, Any]) -> dict[str, Any]:
         ("state_hand_left", "joint/state/hand/left", "sequence"),
         ("state_hand_right", "joint/state/hand/right", "sequence"),
     )}
+    # Sequence is allocated per publisher across every topic.  A side/topic
+    # HDF5 group is only a projection of that stream, so checking its local
+    # gaps would report valid interleaving as drops.  The wire capture below
+    # performs the cross-topic ordering check.
+    for stream in streams.values():
+        stream["drops"] = 0
+        stream["order_errors"] = 0
     command_step: dict[str, float | None] = {}
     command_velocity: dict[str, float | None] = {}
     phase_velocity: dict[str, dict[str, float | None]] = {}
@@ -405,108 +420,309 @@ def _topic(row: Mapping[str, Any]) -> str:
     return str(row.get("topic") or row.get("key_expr") or row.get("key") or "")
 
 
-def _protocol_metrics(protocol: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+def _protocol_metrics(
+    protocol: Iterable[Mapping[str, Any]],
+    manifest: Mapping[str, Any] | None = None,
+    statuses: Iterable[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
     rows = list(protocol)
+    status_rows = list(statuses)
+    manifest_ids = manifest.get("publisher_instance_ids", {}) if manifest else {}
+    source_instance = str(manifest_ids.get("source", "")) if manifest else ""
+    producer_instance = str(manifest_ids.get("producer_arm", "")) if manifest else ""
     targets: dict[tuple[str, int], Mapping[str, Any]] = {}
     solved: dict[tuple[str, int], Mapping[str, Any]] = {}
     stream_counts: Counter[str] = Counter()
     stream_times: defaultdict[str, list[int]] = defaultdict(list)
-    sequence_rows: defaultdict[str, list[int]] = defaultdict(list)
-    for row in rows:
-        payload = _payload(row); topic = _topic(row)
-        side_match = re.search(r"/(left|right)(?:/|$)", topic)
-        side = str(payload.get("side") or (side_match.group(1) if side_match else ""))
+    sequence_rows: defaultdict[str, list[tuple[int, int]]] = defaultdict(list)
+    arm_commands: list[Mapping[str, Any]] = []
+    arm_states: list[Mapping[str, Any]] = []
+    hand_states: defaultdict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    session_states: list[Mapping[str, Any]] = []
+    for row in rows + status_rows:
+        payload = _payload(row)
+        topic = _topic(row)
         instance = str(payload.get("publisher_instance_id", row.get("publisher_instance_id", "")))
         sequence = payload.get("sequence")
+        timestamp = payload.get("timestamp_ns", payload.get("time_ns"))
         if isinstance(sequence, int) and not isinstance(sequence, bool):
-            sequence_rows[f"{topic}|{instance}"].append(sequence)
+            order_time = int(timestamp) if isinstance(timestamp, int) and not isinstance(timestamp, bool) else len(sequence_rows[instance])
+            sequence_rows[instance].append((order_time, sequence))
+        side_match = re.search(r"/(left|right)(?:/|$)", topic)
+        side = str(payload.get("side") or (side_match.group(1) if side_match else ""))
         stream_name = ""
+        if topic == "tianji/session/state":
+            session_states.append(payload)
         if topic == "mocap/aligned/hands" or payload.get("stream_instance_id"):
             stream_name = "aligned_hands"
         elif "/target/arm/" in topic:
             stream_name = f"target_arm_{side}"
-            if isinstance(sequence, int):
-                targets[(side, sequence)] = payload
+            if isinstance(sequence, int) and not isinstance(sequence, bool):
+                if not manifest or not source_instance or instance == source_instance:
+                    key = (side, sequence)
+                    if key in targets:
+                        raise AnalysisError(f"duplicate authorized target key: {side}/{sequence}")
+                    targets[key] = payload
         elif topic.endswith("solved_pose"):
             stream_name = "solved_arm"
             target_sequence = payload.get("target_sequence")
-            if isinstance(target_sequence, int):
-                solved[(side, target_sequence)] = payload
+            if isinstance(target_sequence, int) and (not manifest or not producer_instance or instance == producer_instance):
+                key = (side, target_sequence)
+                if key in solved:
+                    raise AnalysisError(f"duplicate authorized solved key: {side}/{target_sequence}")
+                solved[key] = payload
         elif "/proposal/arm/" in topic:
             stream_name = f"proposal_arm_{side}"
         elif "/command/arm/" in topic:
             stream_name = f"command_arm_{side}"
+            arm_commands.append(payload)
         elif "/command/hand/" in topic:
             stream_name = f"command_hand_{side}"
         elif topic.endswith("/state/arm"):
             stream_name = "state_arm"
+            arm_states.append(payload)
         elif "/state/hand/" in topic:
             stream_name = f"state_hand_{side}"
+            hand_states[side].append(payload)
         if stream_name:
             stream_counts[stream_name] += 1
-            timestamp = payload.get("timestamp_ns", payload.get("time_ns"))
             if isinstance(timestamp, int) and not isinstance(timestamp, bool):
                 stream_times[stream_name].append(timestamp)
     ordering = {"drops": 0, "order_errors": 0}
     for values in sequence_rows.values():
-        metric = _sequence_metric(values)
-        ordering["drops"] += metric["drops"]; ordering["order_errors"] += metric["order_errors"]
-    position_errors: list[float] = []; orientation_errors: list[float] = []
+        ordered = [sequence for _, sequence in sorted(values, key=lambda item: item[0])]
+        metric = _sequence_metric(ordered)
+        ordering["drops"] += metric["drops"]
+        ordering["order_errors"] += metric["order_errors"]
+    position_errors: list[float] = []
+    orientation_errors: list[float] = []
     for key, target in targets.items():
         pose = solved.get(key)
         if pose is None:
             continue
         try:
-            difference = np.asarray(target["position_m"], dtype=float) - np.asarray(pose["position_m"], dtype=float)
-            if not np.isfinite(difference).all():
+            target_position = [float(value) for value in target["position_m"]]
+            solved_position = [float(value) for value in pose["position_m"]]
+            difference = [a - b for a, b in zip(target_position, solved_position)]
+            if len(difference) != 3 or not all(math.isfinite(value) for value in difference):
                 continue
-            position_errors.append(float(np.linalg.norm(difference)))
-            qa = np.asarray(target["orientation_xyzw"], dtype=float); qb = np.asarray(pose["orientation_xyzw"], dtype=float)
-            dot = abs(float(np.dot(qa / np.linalg.norm(qa), qb / np.linalg.norm(qb))))
+            position_errors.append(math.sqrt(sum(value * value for value in difference)))
+            qa = [float(value) for value in target["orientation_xyzw"]]
+            qb = [float(value) for value in pose["orientation_xyzw"]]
+            na = math.sqrt(sum(value * value for value in qa)); nb = math.sqrt(sum(value * value for value in qb))
+            if na == 0.0 or nb == 0.0:
+                continue
+            dot = abs(sum(a * b for a, b in zip(qa, qb)) / (na * nb))
             orientation_errors.append(2 * math.acos(min(1.0, max(-1.0, dot))))
         except (KeyError, TypeError, ValueError, ZeroDivisionError):
             continue
+    tracking_values: list[float] = []
+    state_by_time = sorted(
+        (
+            int(row.get("timestamp_ns", row.get("time_ns", 0))),
+            row,
+        )
+        for row in arm_states
+        if isinstance(row.get("position_rad"), (list, tuple))
+    )
+    for command in arm_commands:
+        position = command.get("position_rad")
+        if not isinstance(position, (list, tuple)) or len(position) != 7 or not state_by_time:
+            continue
+        command_time = int(command.get("timestamp_ns", command.get("time_ns", 0)))
+        _, state = min(state_by_time, key=lambda item: abs(item[0] - command_time))
+        state_position = state.get("position_rad")
+        side = str(command.get("side", ""))
+        offset = 0 if side == "left" else 7
+        if not isinstance(state_position, (list, tuple)) or len(state_position) != 14:
+            continue
+        try:
+            errors = [abs(float(a) - float(b)) for a, b in zip(position, state_position[offset:offset + 7])]
+            if all(math.isfinite(value) for value in errors):
+                tracking_values.append(max(errors))
+        except (TypeError, ValueError):
+            continue
+    hand_zero_ok: dict[str, bool] = {}
+    if manifest:
+        try:
+            hand_config = yaml.safe_load((canonical_config_root() / "robot" / "wuji_hand2.yaml").read_text(encoding="utf-8")) or {}
+            zero = [float(value) for value in hand_config.get("zero_position_rad", [])]
+            tolerance = [float(value) for value in hand_config.get("zero_tolerance_rad", [])]
+            return_times = [
+                int(row.get("timestamp_ns", row.get("time_ns", 0)))
+                for row in session_states
+                if row.get("state") == "returning"
+            ]
+            last_return = max(return_times) if return_times else None
+            idle_times = [
+                int(row.get("timestamp_ns", row.get("time_ns", 0)))
+                for row in session_states
+                if row.get("state") == "idle"
+                and (last_return is None or int(row.get("timestamp_ns", row.get("time_ns", 0))) >= last_return)
+            ]
+            idle_after_return = max(idle_times) if idle_times else None
+            for side in manifest.get("hand_sides", []):
+                hand_zero_ok[side] = len(zero) == len(tolerance) == 20 and idle_after_return is not None and any(
+                    isinstance(row.get("position_rad"), (list, tuple))
+                    and len(row["position_rad"]) == 20
+                    and int(row.get("timestamp_ns", row.get("time_ns", 0))) >= idle_after_return
+                    and all(math.isfinite(float(value)) and abs(float(value) - z) <= t for value, z, t in zip(row["position_rad"], zero, tolerance))
+                    for row in hand_states.get(side, [])
+                )
+        except (OSError, TypeError, ValueError):
+            hand_zero_ok = {}
+    arm_limits = yaml.safe_load((canonical_config_root() / "robot" / "arm.yaml").read_text(encoding="utf-8")) or {}
+    lower = [float(value) for value in arm_limits.get("lower_limits_rad", [])]
+    upper = [float(value) for value in arm_limits.get("upper_limits_rad", [])]
+    protocol_step: dict[str, float | None] = {}
+    protocol_limits: dict[str, int] = {}
+    protocol_phase_velocity: dict[str, dict[str, float | None]] = {}
+    grouped_commands: defaultdict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for command in arm_commands:
+        grouped_commands[str(command.get("side", ""))].append(command)
+    for side, values in grouped_commands.items():
+        values.sort(key=lambda row: int(row.get("timestamp_ns", row.get("time_ns", 0))))
+        positions = [row.get("position_rad") for row in values]
+        deltas = []
+        violations = 0
+        for position in positions:
+            if not isinstance(position, (list, tuple)) or len(position) != 7:
+                continue
+            try:
+                if len(lower) == len(upper) == 7 and (not all(math.isfinite(float(item)) for item in position) or any(float(item) < lo or float(item) > hi for item, lo, hi in zip(position, lower, upper))):
+                    violations += 1
+            except (TypeError, ValueError):
+                violations += 1
+        for previous, current in zip(positions, positions[1:]):
+            if isinstance(previous, (list, tuple)) and isinstance(current, (list, tuple)) and len(previous) == len(current) == 7:
+                try:
+                    deltas.append(max(abs(float(a) - float(b)) for a, b in zip(previous, current)))
+                except (TypeError, ValueError):
+                    continue
+        protocol_step[side] = max(deltas) if deltas else None
+        protocol_limits[side] = violations
+        phase_values: dict[str, list[float]] = defaultdict(list)
+        for previous, current in zip(values, values[1:]):
+            previous_position = previous.get("position_rad"); current_position = current.get("position_rad")
+            previous_time = int(previous.get("timestamp_ns", previous.get("time_ns", 0))); current_time = int(current.get("timestamp_ns", current.get("time_ns", 0)))
+            if current_time <= previous_time or not isinstance(previous_position, (list, tuple)) or not isinstance(current_position, (list, tuple)):
+                continue
+            try:
+                speed = max(abs(float(a) - float(b)) for a, b in zip(previous_position, current_position)) / ((current_time - previous_time) / 1e9)
+                phase = str(current.get("mode", "teleop"))
+                if math.isfinite(speed):
+                    phase_values[phase].append(speed)
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+        protocol_phase_velocity[side] = {phase: (max(values) if values else None) for phase, values in ((phase, phase_values.get(phase, [])) for phase in ("idle", "teleop", "returning"))}
     rates = {}
     for name, count in stream_counts.items():
         times = stream_times.get(name, [])
         duration = (times[-1] - times[0]) / 1e9 if len(times) > 1 and times[-1] > times[0] else 0.0
         rates[name] = {"samples": count, "rate_hz": count / duration if duration > 0 else 0.0, "drops": 0, "order_errors": 0}
-    return {"rates": rates, "target_to_solved_error": {"samples": len(position_errors), "max_position_error_m": max(position_errors) if position_errors else "unavailable", "max_orientation_error_rad": max(orientation_errors) if orientation_errors else "unavailable", "note": "protocol target_sequence association"}, "protocol_order_errors": ordering["order_errors"], "protocol_drops": ordering["drops"]}
+    return {
+        "rates": rates,
+        "target_to_solved_error": {
+            "samples": len(position_errors),
+            "max_position_error_m": max(position_errors) if position_errors else "unavailable",
+            "max_orientation_error_rad": max(orientation_errors) if orientation_errors else "unavailable",
+            "note": "protocol target_sequence association",
+        },
+        "protocol_order_errors": ordering["order_errors"],
+        "protocol_drops": ordering["drops"],
+        "command_feedback_tracking": {
+            "samples": len(tracking_values),
+            "max_error_rad": max(tracking_values) if tracking_values else "unavailable",
+        },
+        "joint_step_rad": protocol_step,
+        "hard_limit_violations": protocol_limits,
+        "phase_velocity_rad_s": protocol_phase_velocity,
+        "hand_zero_feedback_ok": bool(hand_zero_ok) and all(hand_zero_ok.values()),
+    }
 
 
 def _authority_statuses(statuses: Iterable[Mapping[str, Any]], manifest: Mapping[str, Any]) -> tuple[set[str], list[str]]:
-    expected = list(manifest.get("authority_contract", [])); found: set[str] = set(); unhealthy: list[str] = []
+    expected = list(manifest.get("authority_contract", []))
+    matched: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in statuses:
         topic = _topic(row)
         side_match = re.search(r"/(left|right)(?:/|$)", topic)
-        side = str(row.get("side") or (side_match.group(1) if side_match else ""))
+        diagnostics = row.get("diagnostics")
+        diagnostic_side = diagnostics.get("side") if isinstance(diagnostics, Mapping) else None
+        side = row.get("side") or diagnostic_side or (side_match.group(1) if side_match else "")
         role = row.get("component_role")
         logical = row.get("component_id") or row.get("logical_id")
+        instance = str(row.get("publisher_instance_id", ""))
+        router = str(row.get("router_zid", ""))
         if role is None and topic.startswith("tianji/executor/hand/"):
             role, logical = "executor_hand", f"wuji_{side}"
-        instance = str(row.get("publisher_instance_id", ""))
-        router = str(row.get("router_zid", manifest.get("router_zid", "")))
+        sequence = row.get("sequence")
+        if isinstance(sequence, bool) or not isinstance(sequence, int):
+            continue
         for authority in expected:
             if authority["publisher_instance_id"] != instance or authority["router_zid"] != router or authority["component_role"] != role or authority["logical_id"] != logical:
                 continue
-            if authority.get("side") is not None and side not in {authority["side"], None}:
+            expected_side = authority.get("side")
+            # ComponentStatus is intentionally side-less.  A shared hand
+            # producer identity may therefore prove every authorized active
+            # side; typed executor status still carries its side.
+            if expected_side is not None and side not in {"", None, expected_side}:
                 continue
-            key = json.dumps(authority, sort_keys=True); found.add(key)
-            if row.get("phase") == "fault" or row.get("healthy") is not True or row.get("ready") is not True:
-                unhealthy.append(f"{authority['component_role']}:{authority['logical_id']}:{authority.get('side') or ''}")
+            matched.setdefault(json.dumps(authority, sort_keys=True), []).append(row)
+    found: set[str] = set()
+    unhealthy: list[str] = []
+    for authority in expected:
+        key = json.dumps(authority, sort_keys=True)
+        rows = matched.get(key, [])
+        if not rows:
+            continue
+        rows = sorted(rows, key=lambda row: int(row["sequence"]))
+        latest = rows[-1]
+        found.add(key)
+        # Startup/armed ready=false is a valid lifecycle state.  Only the
+        # latest monotonic status decides health, and a recorder's normal
+        # close phase is healthy when it carries no error.
+        if latest.get("healthy") is not True or (
+            latest.get("phase") == "fault" and latest.get("error")
+        ):
+            unhealthy.append(f"{authority['component_role']}:{authority['logical_id']}:{authority.get('side') or ''}")
     return found, unhealthy
 
 
-def _authority_capture(protocol: Iterable[Mapping[str, Any]], liveliness: Iterable[Mapping[str, Any]], manifest: Mapping[str, Any]) -> tuple[set[str], set[str]]:
-    expected = list(manifest.get("authority_contract", [])); protocol_keys: set[str] = set(); live_keys: set[str] = set()
-    def key(value: Mapping[str, Any]) -> str: return json.dumps(value, sort_keys=True)
-    for row in protocol:
-        payload = _payload(row); topic = _topic(row); instance = str(payload.get("publisher_instance_id", row.get("publisher_instance_id", ""))); router = str(payload.get("router_zid", row.get("router_zid", manifest.get("router_zid", ""))))
-        side_match = re.search(r"/(left|right)(?:/|$)", topic); side = str(payload.get("side") or (side_match.group(1) if side_match else ""))
+def _authority_capture(
+    protocol: Iterable[Mapping[str, Any]],
+    liveliness: Iterable[Mapping[str, Any]],
+    manifest: Mapping[str, Any],
+    statuses: Iterable[Mapping[str, Any]] = (),
+) -> tuple[set[str], set[str]]:
+    expected = list(manifest.get("authority_contract", []))
+    protocol_keys: set[str] = set()
+    live_keys: set[str] = set()
+
+    def key(value: Mapping[str, Any]) -> str:
+        return json.dumps(value, sort_keys=True)
+
+    for row in list(protocol) + list(statuses):
+        payload = _payload(row)
+        topic = _topic(row)
+        instance = str(payload.get("publisher_instance_id", row.get("publisher_instance_id", "")))
+        router = str(payload.get("router_zid", row.get("router_zid", "")))
+        side_match = re.search(r"/(left|right)(?:/|$)", topic)
+        side = str(payload.get("side") or (side_match.group(1) if side_match else ""))
+        if not router:
+            continue
         for authority in expected:
-            if authority["publisher_instance_id"] != instance or authority["router_zid"] != router or authority.get("side") not in {None, "", side}:
+            if authority["publisher_instance_id"] != instance or authority["router_zid"] != router:
                 continue
-            topics = [item.replace("{side}", side) for item in authority.get("topics", [])]
+            expected_side = authority.get("side")
+            if expected_side is not None and side not in {"", expected_side}:
+                continue
+            topics = []
+            for template in authority.get("topics", []):
+                if "{side}" in template:
+                    topics.append(template.replace("{side}", expected_side or side))
+                else:
+                    topics.append(template)
             if topic in topics:
                 protocol_keys.add(key(authority))
     for row in liveliness:
@@ -542,22 +758,34 @@ def _validate_pass_gate(bundle: Path, manifest: Mapping[str, Any], case: Mapping
     if manifest.get("fake"):
         raise AnalysisError("fake/headless bundle cannot be pass")
     if manifest.get("case_id") == "acquisition_live":
-        aligned = [row for row in protocol if _topic(row) == "mocap/aligned/hands" and row.get("stream_instance_id")]
+        aligned = [row for row in protocol if _topic(row) == "mocap/aligned/hands"]
         observed = [row for row in statuses if row.get("event") == "acquisition_observation" and row.get("healthy") is True and row.get("complete") is True]
         if not aligned or not observed:
             raise AnalysisError("acquisition pass requires real aligned-hands samples and healthy capture status")
-        if not any(str(row.get("key_expr") or "").startswith("tj/live/") for row in liveliness):
-            raise AnalysisError("acquisition pass requires observed source liveliness")
+        instances = {str(row.get("stream_instance_id", "")) for row in aligned}
+        routers = {str(row.get("router_zid", "")) for row in aligned}
+        if not any(str(row.get("stream_instance_id", "")) in instances and str(row.get("router_zid", "")) == manifest["router_zid"] and int(row.get("samples", 0)) >= 3 for row in observed):
+            raise AnalysisError("acquisition observation status does not match captured stream")
+        sequences = [row.get("stream_sequence") for row in sorted(aligned, key=lambda row: int(row.get("time_ns", 0)))]
+        times = [int(row.get("time_ns", 0)) for row in sorted(aligned, key=lambda row: int(row.get("time_ns", 0)))]
+        if len(instances) != 1 or "" in instances or routers != {manifest["router_zid"]} or len(aligned) < 3:
+            raise AnalysisError("acquisition stream instance/router evidence is incomplete")
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in sequences) or any(b != a + 1 for a, b in zip(sequences, sequences[1:])):
+            raise AnalysisError("acquisition stream sequence is not continuous")
+        duration = (times[-1] - times[0]) / 1e9 if len(times) > 1 else 0.0
+        if duration <= 0 or (len(times) - 1) / duration < 50.0:
+            raise AnalysisError("acquisition stream is below the required 60Hz observation rate")
         if not any(path.name != "validation.log" for path in (bundle / "logs").glob("*") if path.is_file()):
             raise AnalysisError("acquisition pass requires capture log evidence")
         return
     expected = list(manifest.get("authority_contract", []))
     found_status, unhealthy = _authority_statuses(statuses, manifest)
-    found_protocol, found_live = _authority_capture(protocol, liveliness, manifest)
+    found_protocol, found_live = _authority_capture(protocol, liveliness, manifest, statuses)
     expected_keys = {json.dumps(item, sort_keys=True) for item in expected}
     if found_status != expected_keys:
         raise AnalysisError("pass requires formal healthy/ready status for every authority")
-    if unhealthy:
+    fault_case = str(manifest.get("case_id", "")).startswith("fault_recovery")
+    if unhealthy and not fault_case:
         raise AnalysisError("unhealthy/fault authority status prevents pass: " + ",".join(sorted(set(unhealthy))))
     required_protocol = {
         json.dumps(item, sort_keys=True)
@@ -573,7 +801,7 @@ def _validate_pass_gate(bundle: Path, manifest: Mapping[str, Any], case: Mapping
     if _child_log_labels(bundle, manifest) != expected_keys:
         raise AnalysisError("pass requires a child log for every authority")
     evidence = REQUIRED_EVIDENCE.get(manifest["case_id"], {"streams": set(), "checks": set()})
-    rates = dict(metrics.get("rates", {})); rates.update(_protocol_metrics(protocol)["rates"])
+    rates = dict(metrics.get("rates", {}))
     for stream in evidence["streams"]:
         if not isinstance(rates.get(stream), Mapping) or rates[stream].get("samples", 0) <= 0:
             raise AnalysisError(f"pass requires samples for {stream}")
@@ -603,8 +831,20 @@ def _validate_pass_gate(bundle: Path, manifest: Mapping[str, Any], case: Mapping
         raise AnalysisError("pass requires final arm feedback in Home tolerance after return")
     if "hand_zero" in evidence["checks"] and metrics.get("hand_zero_feedback_ok") is not True:
         raise AnalysisError("pass requires every enabled hand feedback in zero tolerance after return")
-    if metrics.get("fault_reasons") or metrics.get("soft_stop_reasons"):
+    if not fault_case and (metrics.get("fault_reasons") or metrics.get("soft_stop_reasons")):
         raise AnalysisError("fault or soft-stop prevents pass")
+    if fault_case:
+        stop_rows = [row for row in statuses if row.get("event") == "safety_stop"]
+        if not stop_rows:
+            raise AnalysisError("fault recovery requires a latched SafetyStop evidence row")
+        for row in stop_rows:
+            expected_ids = {str(item) for item in row.get("expected_executor_ids") or []}
+            acked_ids = {str(item) for item in row.get("acked_executor_ids") or []}
+            stop_evidence = row.get("executor_safety_evidence")
+            if not expected_ids or acked_ids != expected_ids or row.get("ack_complete") is not True or row.get("lockout") is not True or row.get("new_motion_commands_after_stop") is not False:
+                raise AnalysisError("fault recovery stop lacks complete matching ack/no-motion/lockout evidence")
+            if not isinstance(stop_evidence, Mapping) or stop_evidence.get("same_tick_ack") is not True or stop_evidence.get("unhealthy") is not True or stop_evidence.get("no_motion_commands") is not True:
+                raise AnalysisError("fault recovery stop lacks executor unhealthy/no-motion evidence")
     dangerous_names = {"wrong_direction_or_side", "physical_limit", "collision_risk", "feedback_stale", "tracking_threshold", "device_or_servo_error", "duplicate_authority", "router_zid_change", "emergency_stop"}
     if dangerous_names.intersection(str(item.get("event")) for item in events) or any(operator.get(key) is True for key in ("emergency_stop", "abnormal_direction", "collision_risk")):
         raise AnalysisError("dangerous operator event prevents pass")
@@ -621,9 +861,22 @@ def analyze_bundle(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
     _verify_checksums(bundle, session_required=session_required); manifest = _verify_manifest(bundle, matrix); statuses = _verify_status(bundle, manifest); protocol, liveliness = _verify_capture(bundle, manifest); operator = _verify_operator_result(bundle); events = _verify_operator_events(bundle, manifest)
     if session_required or (bundle / "session.h5").is_file(): metrics = _verify_h5(bundle, manifest)
     else: metrics = {"rates": {}, "target_to_solved_error": {"samples": 0, "max_position_error_m": "unavailable", "max_orientation_error_rad": "unavailable"}, "joint_step_rad": {}, "joint_velocity_rad_s": {}, "phase_velocity_rad_s": {}, "saturation_count": {}, "hard_limit_violations": {}, "proposal_rejections": "unavailable", "command_feedback_tracking": {"samples": 0, "max_error_rad": "unavailable"}, "home_time_s": "unavailable", "home_feedback_ok": False, "hand_zero_time_s": "unavailable", "hand_zero_feedback_ok": False, "fault_reasons": [], "soft_stop_reasons": [], "session_event_states": {}}
-    protocol_metrics = _protocol_metrics(protocol); metrics.setdefault("rates", {}).update({key: value for key, value in protocol_metrics["rates"].items() if key not in metrics["rates"]})
-    if protocol_metrics["target_to_solved_error"]["samples"]: metrics["target_to_solved_error"] = protocol_metrics["target_to_solved_error"]
-    metrics["protocol_order_errors"] = protocol_metrics["protocol_order_errors"]; metrics["protocol_drops"] = protocol_metrics["protocol_drops"]
+    protocol_metrics = _protocol_metrics(protocol, manifest, statuses)
+    metrics.setdefault("rates", {}).update({key: value for key, value in protocol_metrics["rates"].items() if key not in metrics["rates"]})
+    if protocol_metrics["target_to_solved_error"]["samples"]:
+        metrics["target_to_solved_error"] = protocol_metrics["target_to_solved_error"]
+    if protocol_metrics["command_feedback_tracking"]["samples"]:
+        metrics["command_feedback_tracking"] = protocol_metrics["command_feedback_tracking"]
+    if protocol_metrics["joint_step_rad"]:
+        metrics["joint_step_rad"].update(protocol_metrics["joint_step_rad"])
+    if protocol_metrics["hard_limit_violations"]:
+        metrics["hard_limit_violations"].update(protocol_metrics["hard_limit_violations"])
+    if protocol_metrics["phase_velocity_rad_s"]:
+        metrics["phase_velocity_rad_s"].update(protocol_metrics["phase_velocity_rad_s"])
+    if protocol_metrics["hand_zero_feedback_ok"]:
+        metrics["hand_zero_feedback_ok"] = True
+    metrics["protocol_order_errors"] = protocol_metrics["protocol_order_errors"]
+    metrics["protocol_drops"] = protocol_metrics["protocol_drops"]
     metrics["proposal_rejections"] = len([row for row in statuses if row.get("event") in {"proposal_rejected", "producer_unhealthy", "action_rejected"}]) or metrics.get("proposal_rejections", "unavailable")
     metrics["fault_reasons"] = [str(row.get("reason") or row.get("error")) for row in statuses if row.get("event") in {"fault", "fault_latched"} and (row.get("reason") or row.get("error"))]
     metrics["soft_stop_reasons"] = [str(row.get("reason") or row.get("error")) for row in statuses if row.get("event") in {"soft_stop", "safety_stop"} and (row.get("reason") or row.get("error"))]

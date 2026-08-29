@@ -139,6 +139,7 @@ class ValidationToolsTest(unittest.TestCase):
             'TIANJI_RECORDER_INSTANCE_ID:-$(new_instance_id)',
         ):
             self.assertIn(expression, launcher)
+        self.assertIn('"TIANJI_COORDINATOR_INSTANCE_ID=${coordinator_id}"', launcher)
     def test_case_contract_routes_profile_backend_and_rejects_conflicting_backend(self):
         from scripts.validation.run_case import build_session_contract
 
@@ -223,5 +224,257 @@ class ValidationToolsTest(unittest.TestCase):
         self.assertNotIn("home_feedback", REQUIRED_EVIDENCE["target_replay_sim"]["checks"])
         self.assertIn("target_to_solved", REQUIRED_EVIDENCE["target_replay_sim"]["checks"])
         self.assertIn("home_feedback", REQUIRED_EVIDENCE["pico_sim"]["checks"])
+    def test_target_replay_cli_omits_joint_only_capabilities(self):
+        from unittest.mock import Mock, patch
+        from pico_body_tianji.recording import replay_cli
+
+        session = Mock()
+        node = Mock()
+        node.start.side_effect = KeyboardInterrupt
+        with patch.dict("os.environ", {
+            "TIANJI_COMPONENT_INSTANCE_ID": "source",
+            "TIANJI_COORDINATOR_INSTANCE_ID": "coord",
+        }, clear=False), patch.object(replay_cli, "open_session", return_value=session), patch.object(
+            replay_cli, "require_single_router", return_value="router"
+        ), patch.object(replay_cli, "TargetReplaySource", return_value=node) as constructor:
+            self.assertEqual(replay_cli.main(["target", "recording.h5", "--headless"]), 0)
+        self.assertNotIn("capabilities", constructor.call_args.kwargs)
+
+    def test_capture_rejects_missing_protocol_envelope(self):
+        import json
+        from types import SimpleNamespace
+        from scripts.validation.run_case import ManagedEvidenceCapture
+
+        capture = object.__new__(ManagedEvidenceCapture)
+        capture.run_id = "run"
+        captured = []
+        capture._append = lambda filename, row: captured.append((filename, row))
+        sample = SimpleNamespace(
+            key_expr="tianji/source/status",
+            payload=json.dumps({"component_role": "source"}).encode(),
+        )
+        capture._on_data(sample)
+        self.assertEqual(captured, [])
+
+    def test_authority_uses_latest_valid_sequence_and_side_less_hand_status(self):
+        from scripts.validation.analyze_runs import _authority_statuses
+
+        hand_authorities = [
+            {
+                "component_role": "producer_hand",
+                "logical_id": "wuji_retarget_left",
+                "side": side,
+                "publisher_instance_id": "hand",
+                "router_zid": "router",
+            }
+            for side in ("left", "right")
+        ]
+        manifest = {
+            "router_zid": "router",
+            "authority_contract": [
+                {
+                    "component_role": "coordinator_arm",
+                    "logical_id": "arm",
+                    "side": None,
+                    "publisher_instance_id": "coord",
+                    "router_zid": "router",
+                },
+                *hand_authorities,
+            ],
+        }
+        statuses = [
+            {
+                "component_role": "coordinator_arm",
+                "component_id": "arm",
+                "publisher_instance_id": "coord",
+                "router_zid": "router",
+                "sequence": 1,
+                "ready": False,
+                "healthy": True,
+                "phase": "startup",
+            },
+            {
+                "component_role": "coordinator_arm",
+                "component_id": "arm",
+                "publisher_instance_id": "coord",
+                "router_zid": "router",
+                "sequence": 2,
+                "ready": True,
+                "healthy": True,
+                "phase": "idle",
+            },
+            {
+                "component_role": "producer_hand",
+                "component_id": "wuji_retarget_left",
+                "publisher_instance_id": "hand",
+                "router_zid": "router",
+                "sequence": 3,
+                "ready": True,
+                "healthy": True,
+                "phase": "teleop",
+            },
+        ]
+        found, unhealthy = _authority_statuses(statuses, manifest)
+        self.assertEqual(found, {__import__("json").dumps(item, sort_keys=True) for item in manifest["authority_contract"]})
+        self.assertEqual(unhealthy, [])
+
+    def test_protocol_sequence_drop_merges_topics_per_instance(self):
+        from scripts.validation.analyze_runs import _protocol_metrics
+
+        rows = [
+            {"topic": "tianji/source/status", "publisher_instance_id": "source", "sequence": 1},
+            {
+                "topic": "tianji/target/arm/left",
+                "publisher_instance_id": "source",
+                "sequence": 2,
+                "side": "left",
+                "position_m": [0, 0, 0],
+                "orientation_xyzw": [0, 0, 0, 1],
+                "elbow_reference_direction": [1, 0, 0],
+            },
+            {"topic": "tianji/source/status", "publisher_instance_id": "source", "sequence": 3},
+        ]
+        self.assertEqual(_protocol_metrics(rows)["protocol_drops"], 0)
+
+    def test_aligned_observer_requires_continuous_multiframe_rate(self):
+        from scripts.validation.run_case import AlignedStreamObservation
+
+        observation = AlignedStreamObservation(min_samples=3, min_rate_hz=50.0)
+        base = {"stream_instance_id": "stream", "router_zid": "router", "left_valid": True, "right_valid": False}
+        observation.accept({**base, "stream_sequence": 1, "timestamp_ns": 0})
+        self.assertFalse(observation.complete)
+        observation.accept({**base, "stream_sequence": 2, "timestamp_ns": 16_666_667})
+        self.assertFalse(observation.complete)
+        observation.accept({**base, "stream_sequence": 3, "timestamp_ns": 33_333_334})
+        self.assertTrue(observation.complete)
+        self.assertGreaterEqual(observation.rate_hz, 50.0)
+        self.assertFalse(observation.accept({**base, "stream_sequence": 5, "timestamp_ns": 50_000_000}))
+
+    def test_target_solved_association_requires_authorized_instances_and_unique_key(self):
+        from scripts.validation.analyze_runs import AnalysisError, _protocol_metrics
+
+        manifest = {
+            "publisher_instance_ids": {"source": "source", "producer_arm": "producer"},
+            "authority_contract": [],
+        }
+        target = {
+            "topic": "tianji/target/arm/left",
+            "publisher_instance_id": "source",
+            "sequence": 7,
+            "side": "left",
+            "position_m": [0, 0, 0],
+            "orientation_xyzw": [0, 0, 0, 1],
+            "elbow_reference_direction": [1, 0, 0],
+        }
+        solved = {
+            "topic": "tianji/producer/arm/left/solved_pose",
+            "publisher_instance_id": "producer",
+            "sequence": 9,
+            "target_sequence": 7,
+            "side": "left",
+            "position_m": [0, 0, 0],
+            "orientation_xyzw": [0, 0, 0, 1],
+        }
+        unauthorized = dict(target, publisher_instance_id="other", position_m=[100, 0, 0])
+        self.assertEqual(_protocol_metrics([unauthorized, target, solved], manifest)["target_to_solved_error"]["samples"], 1)
+        with self.assertRaises(AnalysisError):
+            _protocol_metrics([target, target, solved], manifest)
+
+    def test_each_ik_case_requires_solved_pose_evidence(self):
+        from scripts.validation.analyze_runs import REQUIRED_EVIDENCE
+
+        for case_id in ("ik_pinocchio_cpp", "ik_pinocchio_qp", "ik_tianji_official"):
+            self.assertIn("target_to_solved", REQUIRED_EVIDENCE[case_id]["checks"])
+
+    def test_nonrecordable_replay_metrics_include_protocol_tracking(self):
+        from scripts.validation.analyze_runs import _protocol_metrics
+
+        rows = [
+            {
+                "topic": "tianji/command/arm/left",
+                "publisher_instance_id": "coord",
+                "sequence": 1,
+                "side": "left",
+                "timestamp_ns": 1_000_000_000,
+                "position_rad": [0, 0, 0, 0, 0, 0, 0],
+            },
+            {
+                "topic": "tianji/state/arm",
+                "publisher_instance_id": "exec",
+                "sequence": 1,
+                "timestamp_ns": 1_000_001_000,
+                "position_rad": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            },
+        ]
+        metrics = _protocol_metrics(rows)
+        self.assertEqual(metrics["command_feedback_tracking"]["samples"], 1)
+        self.assertEqual(metrics["command_feedback_tracking"]["max_error_rad"], 0.0)
+
+    def test_fault_recovery_fake_stop_covers_every_executor_and_lockout(self):
+        from scripts.validation.run_case import _authority_contract
+
+        manifest = {
+            "profile": "h5_sim",
+            "producer": "ik",
+            "resolved_hand_mode": "retarget",
+            "router_zid": "router",
+            "publisher_instance_ids": {
+                "source": "source",
+                "producer_arm": "arm-producer",
+                "coordinator_arm": "coord",
+                "executor_arm": "arm-executor",
+                "hand_producer_instances": {"left": "hand-producer-left", "right": "hand-producer-right"},
+                "hand_executor_instances": {"left": "hand-executor-left", "right": "hand-executor-right"},
+            },
+        }
+        executors = {
+            item["publisher_instance_id"]
+            for item in _authority_contract(manifest)
+            if item["component_role"].startswith("executor_")
+        }
+        self.assertEqual(
+            executors,
+            {"arm-executor", "hand-executor-left", "hand-executor-right"},
+        )
+
+    def test_direct_real_replay_preflight_rejects_missing_recording_before_connect(self):
+        from pico_body_tianji.recording.replay import validate_direct_real_recording
+
+        with self.assertRaises(ValueError):
+            validate_direct_real_recording("/tmp/not-a-session-v1.h5")
+
+    def test_authority_capture_accepts_actual_coordinator_and_hand_executor_topics(self):
+        from scripts.validation.analyze_runs import _authority_capture
+
+        manifest = {
+            "authority_contract": [
+                {
+                    "component_role": "coordinator_arm",
+                    "logical_id": "arm",
+                    "side": None,
+                    "publisher_instance_id": "coord",
+                    "router_zid": "router",
+                    "topics": ["tianji/coordinator/status"],
+                    "liveliness": "tj/live/coordinator/arm/arm/coord",
+                },
+                {
+                    "component_role": "executor_hand",
+                    "logical_id": "wuji_left",
+                    "side": "left",
+                    "publisher_instance_id": "hand",
+                    "router_zid": "router",
+                    "topics": ["tianji/executor/hand/{side}/status"],
+                    "liveliness": "tj/live/executor/hand/wuji_left/hand",
+                },
+            ]
+        }
+        rows = [
+            {"topic": "tianji/coordinator/status", "publisher_instance_id": "coord", "router_zid": "router"},
+            {"topic": "tianji/executor/hand/left/status", "publisher_instance_id": "hand", "router_zid": "router", "side": "left"},
+        ]
+        found, live = _authority_capture(rows, [], manifest)
+        self.assertEqual(len(found), 2)
+        self.assertFalse(live)
+
 if __name__ == "__main__":
     unittest.main()

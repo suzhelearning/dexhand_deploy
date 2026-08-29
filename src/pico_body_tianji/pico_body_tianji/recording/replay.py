@@ -9,12 +9,18 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any, Callable
 
+import yaml
+
+from ..config_loader import canonical_config_root
 from ..protocol import topics
 from ..protocol.messages import (
+    ARM_JOINT_NAMES,
+    HAND_JOINT_NAMES,
     ArmJointProposal,
     ComponentStatus,
     HandJointCommand,
@@ -27,6 +33,115 @@ from ..sources.common.session_client import SessionClient
 from ..sources.common.target_publisher import SequenceAllocator, TargetPublisher
 from ..zenoh_util import ZenohPub
 from .session_h5 import SessionH5Reader
+
+
+def validate_direct_real_recording(
+    recording: str | Path,
+    *,
+    active_sides: Iterable[str] = ("left", "right"),
+    active_hand_sides: Iterable[str] = ("left", "right"),
+) -> None:
+    """Fail closed before a direct replay can connect a real executor.
+
+    A direct replay is a trusted-file boundary: it must be a complete,
+    canonical session-v1 file and every command frame must match the current
+    robot/hand names, finite values, and immutable hard limits.  Runtime
+    command validation remains necessary, but it must not be the first place
+    an invalid file is discovered.
+    """
+    path = Path(recording).expanduser()
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("direct real replay requires a trusted regular HDF5 file")
+    sides = tuple(active_sides)
+    hand_sides = tuple(active_hand_sides)
+    allowed = {"left", "right"}
+    if (
+        not sides
+        or any(side not in allowed for side in sides)
+        or len(set(sides)) != len(sides)
+        or any(side not in allowed for side in hand_sides)
+        or len(set(hand_sides)) != len(hand_sides)
+    ):
+        raise ValueError("direct real replay sides must be unique left/right values")
+    reader: SessionH5Reader | None = None
+    try:
+        reader = SessionH5Reader(path)
+        attrs = reader.attrs
+        if attrs.get("source_type") != "joint_replay":
+            raise ValueError("direct real replay requires source_type=joint_replay")
+        root = canonical_config_root()
+        arm_config = yaml.safe_load((root / "robot" / "arm.yaml").read_text(encoding="utf-8")) or {}
+        hand_config = yaml.safe_load((root / "robot" / "wuji_hand2.yaml").read_text(encoding="utf-8")) or {}
+        arm_lower = tuple(float(value) for value in arm_config["lower_limits_rad"])
+        arm_upper = tuple(float(value) for value in arm_config["upper_limits_rad"])
+        if len(arm_lower) != 7 or len(arm_upper) != 7 or any(
+            not math.isfinite(value) or lower >= upper
+            for value, lower, upper in zip(arm_lower, arm_lower, arm_upper)
+        ):
+            raise ValueError("robot arm hard limits are invalid")
+        hand_lower = tuple(float(value) for value in hand_config["lower_limits_rad"])
+        hand_upper = tuple(float(value) for value in hand_config["upper_limits_rad"])
+        if len(hand_lower) != 20 or len(hand_upper) != 20 or any(
+            not math.isfinite(value) or lower >= upper
+            for value, lower, upper in zip(hand_lower, hand_lower, hand_upper)
+        ):
+            raise ValueError("Wuji hand hard limits are invalid")
+
+        for side in sides:
+            expected_names = tuple(arm_config[f"{side}_joint_names"])
+            if expected_names != ARM_JOINT_NAMES[side]:
+                raise ValueError(f"robot arm config has non-canonical {side} names")
+            rows = reader.read_arm_command(side)
+            if not rows:
+                raise ValueError(f"direct real replay has no active arm command stream: {side}")
+            for index, row in enumerate(rows):
+                if tuple(row.get("names", ())) != expected_names:
+                    raise ValueError(f"arm command {side}[{index}] has invalid joint order")
+                values = row.get("position_rad")
+                if (
+                    not isinstance(values, (list, tuple))
+                    or len(values) != 7
+                    or any(
+                        not isinstance(value, (int, float))
+                        or isinstance(value, bool)
+                        or not math.isfinite(float(value))
+                        or float(value) < lower
+                        or float(value) > upper
+                        for value, lower, upper in zip(values, arm_lower, arm_upper)
+                    )
+                ):
+                    raise ValueError(f"arm command {side}[{index}] is non-finite or outside hard limits")
+                if row.get("mode") not in {"idle", "teleop", "returning"}:
+                    raise ValueError(f"arm command {side}[{index}] has invalid mode")
+        for side in hand_sides:
+            expected_names = HAND_JOINT_NAMES[side]
+            rows = reader.read_hand_command(side)
+            if not rows:
+                raise ValueError(f"direct real replay has no active hand command stream: {side}")
+            for index, row in enumerate(rows):
+                if tuple(row.get("names", ())) != expected_names:
+                    raise ValueError(f"hand command {side}[{index}] has invalid joint order")
+                values = row.get("position_rad")
+                if (
+                    not isinstance(values, (list, tuple))
+                    or len(values) != 20
+                    or any(
+                        not isinstance(value, (int, float))
+                        or isinstance(value, bool)
+                        or not math.isfinite(float(value))
+                        or float(value) < lower
+                        or float(value) > upper
+                        for value, lower, upper in zip(values, hand_lower, hand_upper)
+                    )
+                ):
+                    raise ValueError(f"hand command {side}[{index}] is non-finite or outside hard limits")
+    except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
+        if isinstance(exc, ValueError) and str(exc).startswith("direct real replay"):
+            raise
+        raise ValueError(f"direct real replay preflight failed: {exc}") from exc
+    finally:
+        if reader is not None:
+            reader.close()
 
 
 _TARGET_LIVELINESS = "tj/live/source/target_replay"
@@ -444,4 +559,4 @@ class JointReplayNode(_ReplayLifecycle):
         self.reader.close(); super().close()
 
 
-__all__ = ["TargetReplaySource", "JointReplayNode"]
+__all__ = ["TargetReplaySource", "JointReplayNode", "validate_direct_real_recording"]

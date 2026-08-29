@@ -301,6 +301,7 @@ launch() {
 recorder_instance=""
 [[ -n "${record_path}" ]] && recorder_instance="${TIANJI_RECORDER_INSTANCE_ID:-$(new_instance_id)}"
 base_env=(
+  "TIANJI_COORDINATOR_INSTANCE_ID=${coordinator_id}"
   "TIANJI_ROUTER_ENDPOINT=${TIANJI_ROUTER_ENDPOINT}"
   "TIANJI_ROUTER_ZID=${TIANJI_ROUTER_ZID}"
   "TIANJI_RUN_ID=${run_id}"

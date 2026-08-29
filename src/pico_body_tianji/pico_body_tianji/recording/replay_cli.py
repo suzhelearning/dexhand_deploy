@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 
 from ..zenoh_util import open_session, require_single_router
-from .replay import JointReplayNode, TargetReplaySource
+from .replay import JointReplayNode, TargetReplaySource, validate_direct_real_recording
+
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -40,9 +41,19 @@ def main(argv: list[str] | None = None) -> int:
     capability = str(os.environ.get("TIANJI_REQUIRED_CAPABILITY", replay_config.get("required_capability", "simulation")))
     if capability not in {"simulation", "real"}:
         raise SystemExit(f"unsupported replay capability: {capability}")
+    active_sides = _sides(args.active_sides)
+    inactive_sides = _sides(args.inactive_sides)
+    active_hand_sides = _sides(args.active_hand_sides)
+    if args.mode == "joint" and capability == "real" and not active_hand_sides:
+        active_hand_sides = ("left", "right")
+    if args.mode == "joint" and capability == "real":
+        if replay_config.get("real_preflight") is not True:
+            raise SystemExit("direct real replay requires explicit real_preflight=true")
+        try:
+            validate_direct_real_recording(args.recording, active_sides=active_sides, active_hand_sides=active_hand_sides)
+        except ValueError as exc:
+            raise SystemExit(f"direct real replay preflight failed: {exc}") from exc
     capabilities = ("simulation",) if capability == "simulation" else ("real", "simulation")
-    if args.mode == "joint" and capability == "real" and replay_config.get("real_preflight") is not True:
-        raise SystemExit("direct real replay requires explicit real_preflight=true")
     rate = float(args.rate or replay_config.get("rate_hz", 60.0))
     if rate <= 0:
         raise SystemExit("replay rate must be positive")
@@ -59,11 +70,11 @@ def main(argv: list[str] | None = None) -> int:
         common = dict(
             session=session,
             router_zid=router,
-            active_sides=_sides(args.active_sides),
-            inactive_sides=_sides(args.inactive_sides),
-            active_hand_sides=_sides(args.active_hand_sides),
+            active_sides=active_sides,
+            inactive_sides=inactive_sides,
+            active_hand_sides=active_hand_sides,
+            inactive_hand_sides=_sides(args.inactive_hand_sides),
             rate_hz=rate,
-            capabilities=capabilities,
             expected_coordinator_instance_id=coordinator,
         )
         if args.mode == "target":
@@ -73,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.recording,
                 source_publisher_instance_id=instance,
                 producer_publisher_instance_id=os.environ.get("TIANJI_PRODUCER_INSTANCE_ID", instance),
+                capabilities=capabilities,
                 **common,
             )
         node.start()

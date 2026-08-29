@@ -217,3 +217,67 @@ git diff --check
 ```
 
 本轮没有 Marvin、Wuji、PICO、Motive 或可用 acquisition stream，未声明任何 physical/real case 通过。`acquisition_live` 仅证明无样本时 fail-closed；fake/headless 产物仍为 `aborted`，不构成设备验收。
+## Review round5 RED（修复前）
+
+- `replay_cli.py` 将 `capabilities` 无条件放入 target replay 构造参数，而 `TargetReplaySource` 不支持该参数；target replay CLI 路由会在启动前抛出 `TypeError`。
+- `run_session.sh` 只给 coordinator 自身传递新生成的 `TIANJI_COORDINATOR_INSTANCE_ID`，source/producer/executor/recorder 的 `base_env` 缺失同一 identity。
+- direct real replay 仅检查 `real_preflight: true`，不扫描 HDF5 arm/hand names、finite 数据和当前 robot/hand hard limits。
+- capture 对缺失的 `schema_version`、`run_id`、`router_zid` 使用 `setdefault` 补齐，可能把非法 wire 消息伪造成合法证据。
+- analyzer 对 coordinator 强制要求不存在的 formal status；authority health 只要出现过一次未 ready 就永久失败；side-less `producer_hand` 无法匹配 side authority；sequence 按 topic 分组导致共享 instance 的合法交错序列被误报 drop。
+- 不可录制 replay/direct case 没有从 protocol capture 计算 tracking/hand-zero evidence；acquisition gate 要求不由 acquisition 发布的 liveliness 且只等待首帧；target/solved 未绑定授权 source/producer instance 或拒绝重复；IK 未强制 solved；fault-recovery 在预期 fault 前即被普通 case gate 拒绝。
+
+本轮 RED 复现目标：在实现修复前运行 focused tests 与各 validation route，记录失败输出；不得用合成 status/protocol/liveliness/zero metrics 将 bundle 判为 pass。
+## Review round5 修复与验证
+
+- target replay 构造只接收 `TargetReplaySource` 支持的参数；`capabilities` 仅传给 joint replay。`run_session.sh` 将生成的 `TIANJI_COORDINATOR_INSTANCE_ID` 放入所有 child 的 `base_env`。direct real replay 在声明 real capability 前调用 `validate_direct_real_recording`，逐帧检查完整 session-v1、canonical arm/hand names、finite 值、mode、frame attrs 与当前 hard limits。
+- capture 对 tianji wire sample 要求完整 `schema_version/publisher_instance_id/router_zid/sequence/timestamp_ns`，用 `ProtocolEnvelope.from_dict` 验证，缺失或 router 不匹配直接丢弃；acquisition 外部 envelope 保留原字段，不补造 schema。coordinator 现在实际发布 `tianji/coordinator/status` 的 typed `ComponentStatus`。
+- analyzer 按 publisher instance 合并 status/protocol sequence，按递增最新 authority status 判定健康，side-less hand producer status 可覆盖 manifest 的 active sides；target/solved 只接受 manifest 授权 instance、重复关联直接失败；IK 三 backend 要求 target-to-solved；不可录制 replay 从 protocol capture 计算 tracking/limits/phase velocity/hand-zero（hand-zero 必须发生在 returning 后 idle）；fault-recovery 允许预期 fault，但必须具备全 executor matching ack、same-tick unhealthy/no-motion/lockout。
+- acquisition observer 需要同一 stream instance/router 的连续递增多帧，runner gate 至少 3 帧且速率不低于 50Hz；不要求 acquisition 未声明的 tj/live token。fake/headless 仍固定 aborted，不构造设备 pass。
+
+实际命令输出：
+
+```text
+# RED（修复前）
+PYTHONPATH=src/pico_body_tianji python3 -m unittest tests.test_validation_tools
+FAILED/ERROR（target capabilities、capture envelope、authority side/health、sequence drop、acquisition thresholds、IK solved、replay tracking 等 round5 focused failure）
+
+# focused（修复后）
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_validation_tools
+..........................
+Ran 26 tests in 2.937s
+OK
+
+pixi run validation-run -- --list
+（18 个固定 case id）
+
+rm -rf /tmp/t9-r5-final-fake && pixi run validation-run -- --case pico_sim --output /tmp/t9-r5-final-fake --fake --headless && pixi run validation-analyze -- /tmp/t9-r5-final-fake
+.../20260829T045131Z_pico_sim_e0bc512a
+{"bundles": 1, "run_ids": ["20260829T045131Z_pico_sim_e0bc512a"]}
+
+rm -rf /tmp/t9-r5-final-stop && pixi run validation-run -- --case pico_sim --output /tmp/t9-r5-final-stop --fake --headless --danger-stop collision_risk && pixi run validation-analyze -- /tmp/t9-r5-final-stop
+.../20260829T045132Z_pico_sim_879c3ec6
+{"bundles": 1, "run_ids": ["20260829T045132Z_pico_sim_879c3ec6"]}
+
+rm -rf /tmp/t9-r5-final-acq && TIANJI_ROUTER_ZID=unreachable-router pixi run validation-run -- --case acquisition_live --output /tmp/t9-r5-final-acq --duration 1
+.../20260829T045139Z_acquisition_live_830e7023
+acquisition_rc=1
+pixi run validation-analyze -- /tmp/t9-r5-final-acq
+{"bundles": 1, "run_ids": ["20260829T045139Z_acquisition_live_830e7023"]}
+
+rm -rf /tmp/t9-r5-final-target && pixi run validation-run -- --case target_replay_sim --output /tmp/t9-r5-final-target --fake --headless && pixi run validation-analyze -- /tmp/t9-r5-final-target
+.../20260829T045140Z_target_replay_sim_58bd7ec6
+{"bundles": 1, "run_ids": ["20260829T045140Z_target_replay_sim_58bd7ec6"]}
+
+PYTHONPATH=src/pico_body_tianji TIANJI_REQUIRED_CAPABILITY=real pixi run python -m pico_body_tianji.recording.replay_cli joint /tmp/does-not-exist.h5 --config src/pico_body_tianji/config/replay/joint_real.yaml --headless
+direct real replay preflight failed: direct real replay requires a trusted regular HDF5 file
+
+validation-analyze 对 tampered manifest 返回：
+validation-analyze failed: checksum mismatch: manifest.yaml
+
+pixi run python -m py_compile scripts/validation/run_case.py scripts/validation/analyze_runs.py src/pico_body_tianji/pico_body_tianji/recording/replay.py src/pico_body_tianji/pico_body_tianji/recording/replay_cli.py src/pico_body_tianji/pico_body_tianji/coordination/arm_command_coordinator.py
+bash -n scripts/run_session.sh scripts/common.sh scripts/run_source.sh scripts/run_producer.sh scripts/run_executor.sh scripts/test.sh
+git diff --check
+（以上均 exit 0）
+```
+
+未完成项与约束：本轮仍无 Marvin、Wuji、PICO、Motive 或可用 acquisition stream，未执行任何实体运动，未声明 real/physical case 通过。fake/headless 仅验证 bundle/schema/safety capture；真实 managed-router、设备 tracking、fault recovery 与 Task8/Task5 parked 未验收，必须由操作者按 runbook 采集完整 capture 后再运行 `validation-analyze`，缺失 capture 只能 fail/unverified，不能伪造 pass。

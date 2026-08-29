@@ -304,6 +304,7 @@ class ArmCommandCoordinator:
                 self._publishers[side] = session.declare_publisher(topics.arm_command(side))
         if hasattr(session, "declare_publisher"):
             self._publishers["state"] = session.declare_publisher(topics.SESSION_STATE)
+            self._publishers["status"] = session.declare_publisher(topics.COORDINATOR_STATUS)
             self._publishers["home"] = session.declare_publisher(topics.AT_HOME)
             self._publishers["complete"] = session.declare_publisher(topics.RETURN_COMPLETE)
 
@@ -733,6 +734,22 @@ class ArmCommandCoordinator:
         for side, command in commands.items():
             self._publish(side, command.to_dict())
         self._publish("state", self._state.to_dict())
+        status = ComponentStatus(
+            1,
+            self._sequence,
+            timestamp_ns,
+            "coordinator_arm",
+            "arm",
+            self._state.state,
+            self._state.state != "fault",
+            self._state.state != "fault",
+            [str(self.profile.get("required_capability", "simulation"))],
+            self._fault_reason if self._state.state == "fault" else None,
+            {"authority": "final_command_and_session_state"},
+            self.publisher_instance_id,
+            self.router_zid,
+        )
+        self._publish("status", status.to_dict())
         self._publish("home", self._at_home.to_dict())
         self._publish("complete", self._return_complete.to_dict())
         return commands

@@ -100,12 +100,25 @@ def validate_operator_finalization(outcome: str, events: Iterable[str], *, rc: i
 class AlignedStreamObservation:
     """Fail-closed observer for the external acquisition aligned stream."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, min_samples: int = 2, min_rate_hz: float = 0.0) -> None:
+        if min_samples < 1 or min_rate_hz < 0.0:
+            raise ValueError("invalid aligned-stream observation thresholds")
+        self.min_samples = int(min_samples)
+        self.min_rate_hz = float(min_rate_hz)
         self.samples = 0
         self.complete = False
         self.stream_instance_id: str | None = None
         self.router_zid: str | None = None
         self.last_sequence: int | None = None
+        self._first_timestamp_ns: int | None = None
+        self._last_timestamp_ns: int | None = None
+
+    @property
+    def rate_hz(self) -> float:
+        if self.samples < 2 or self._first_timestamp_ns is None or self._last_timestamp_ns is None:
+            return 0.0
+        elapsed = self._last_timestamp_ns - self._first_timestamp_ns
+        return (self.samples - 1) / (elapsed / 1e9) if elapsed > 0 else 0.0
 
     def accept(self, row: Mapping[str, Any]) -> bool:
         required = ("stream_instance_id", "stream_sequence", "router_zid", "left_valid", "right_valid")
@@ -120,13 +133,24 @@ class AlignedStreamObservation:
             self.stream_instance_id, self.router_zid = instance, router
         if instance != self.stream_instance_id or router != self.router_zid:
             return False
-        if self.last_sequence is not None and sequence <= self.last_sequence:
+        if self.last_sequence is not None and sequence != self.last_sequence + 1:
             return False
         if not isinstance(row["left_valid"], bool) or not isinstance(row["right_valid"], bool):
             return False
+        timestamp = row.get("timestamp_ns", row.get("time_ns"))
+        if timestamp is not None:
+            if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+                return False
+            if self._last_timestamp_ns is not None and timestamp <= self._last_timestamp_ns:
+                return False
+        elif self.min_rate_hz > 0.0:
+            return False
         self.last_sequence = sequence
         self.samples += 1
-        self.complete = self.samples > 0
+        if timestamp is not None:
+            self._first_timestamp_ns = timestamp if self._first_timestamp_ns is None else self._first_timestamp_ns
+            self._last_timestamp_ns = timestamp
+        self.complete = self.samples >= self.min_samples and self.rate_hz >= self.min_rate_hz
         return True
 
 
@@ -490,11 +514,23 @@ class ManagedEvidenceCapture:
         payload = self._payload(sample)
         if payload is None:
             return
+        # Protocol records must already carry their complete wire envelope.
+        # The capture layer may add only local run/topic metadata; it must
+        # never invent schema or router identity for malformed samples.
+        required = {"schema_version", "publisher_instance_id", "router_zid", "sequence", "timestamp_ns"}
+        if not required.issubset(payload) or payload.get("schema_version") != 1:
+            return
+        try:
+            ProtocolEnvelope.from_dict({key: payload[key] for key in required})
+        except (TypeError, ValueError):
+            return
+        router = str(payload.get("router_zid", ""))
+        expected_router = str(os.environ.get("TIANJI_ROUTER_ZID", ""))
+        if not router or (expected_router and router != expected_router):
+            return
         key = self._key(sample)
-        payload.setdefault("schema_version", 1)
-        payload.setdefault("run_id", self.run_id)
-        payload.setdefault("topic", key)
-        payload.setdefault("router_zid", payload.get("router_zid") or os.environ.get("TIANJI_ROUTER_ZID", ""))
+        payload["run_id"] = self.run_id
+        payload["topic"] = key
         if key.endswith("/status"):
             self._append("status.jsonl", payload)
         else:
@@ -811,7 +847,6 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
         )
     return result
 
-
 def _run_fake(bundle: Path, manifest: dict[str, Any], status: Any, args: argparse.Namespace) -> int:
     _write_status(status, event="preflight_passed", component="validation", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], mode="fake_headless", physical_validation=False)
     capture = {
@@ -827,13 +862,25 @@ def _run_fake(bundle: Path, manifest: dict[str, Any], status: Any, args: argpars
         event, details = _parse_event(raw)
         _write_operator_event(bundle / "operator_events.jsonl", manifest["publisher_instance_ids"]["validation_supervisor"], manifest["run_id"], event, details)
     if args.danger_stop:
-        expected = ["fake_arm_executor"]
+        expected = [
+            entry["publisher_instance_id"]
+            for entry in manifest.get("authority_contract", [])
+            if entry.get("component_role") == "executor_arm"
+        ]
+        expected += [
+            entry["publisher_instance_id"]
+            for entry in manifest.get("authority_contract", [])
+            if entry.get("component_role") == "executor_hand"
+        ]
+        expected = list(dict.fromkeys(item for item in expected if item))
+        if not expected:
+            expected = ["fake_arm_executor"]
         supervisor = SafetyStopSupervisor(manifest["run_id"], manifest["publisher_instance_ids"]["validation_supervisor"], manifest["router_zid"])
         stop = supervisor.issue(args.danger_stop, expected, publish=lambda _: None, wait_ack=lambda _: {
             executor: {"schema_version": 1, "publisher_instance_id": executor, "router_zid": manifest["router_zid"], "sequence": 1, "timestamp_ns": monotonic_ns(), "executor_id": executor, "run_id": manifest["run_id"], "latched": True, "reason": args.danger_stop}
             for executor in expected
         })
-        _write_status(status, event="safety_stop", component="validation", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], reason=args.danger_stop, expected_executor_ids=expected, acked_executor_ids=list(stop.acked_executor_ids), ack_complete=stop.accepted, new_motion_commands_after_stop=False, lockout=True)
+        _write_status(status, event="safety_stop", component="validation", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], reason=args.danger_stop, expected_executor_ids=expected, acked_executor_ids=list(stop.acked_executor_ids), ack_complete=stop.accepted, new_motion_commands_after_stop=False, lockout=True, executor_safety_evidence={"same_tick_ack": stop.accepted, "unhealthy": stop.accepted, "no_motion_commands": stop.accepted})
         if not stop.accepted:
             _write_operator_event(bundle / "operator_events.jsonl", manifest["publisher_instance_ids"]["validation_supervisor"], manifest["run_id"], "physical_estop_required", stop.reason)
     _write_status(status, event="finished", component="validation", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], exit_reason="fake_headless_only", physical_validation=False)
@@ -844,7 +891,7 @@ def _run_acquisition(bundle: Path, manifest: dict[str, Any], status: Any, args: 
     """Observe the acquisition-owned aligned stream; never manufacture a sample."""
     try:
         capture = ManagedEvidenceCapture(str(manifest["router"]["endpoint"]), bundle, manifest["run_id"])
-        observation = AlignedStreamObservation()
+        observation = AlignedStreamObservation(min_samples=3, min_rate_hz=50.0)
 
         def on_aligned(sample: Any) -> None:
             payload = capture._payload(sample)
@@ -854,11 +901,10 @@ def _run_acquisition(bundle: Path, manifest: dict[str, Any], status: Any, args: 
             if not isinstance(hands, Mapping):
                 return
             row = dict(payload)
-            row["schema_version"] = 1
             row["run_id"] = manifest["run_id"]
             row["topic"] = "mocap/aligned/hands"
             row["publisher_instance_id"] = str(payload.get("stream_instance_id", ""))
-            row["router_zid"] = str(payload.get("router_zid", manifest["router_zid"]))
+            row["router_zid"] = str(payload.get("router_zid", ""))
             row["left_valid"] = bool(isinstance(hands.get("left"), Mapping) and hands["left"].get("valid", False))
             row["right_valid"] = bool(isinstance(hands.get("right"), Mapping) and hands["right"].get("valid", False))
             if observation.accept(row):
