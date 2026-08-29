@@ -69,10 +69,23 @@ required_capability="$(profile_value required_capability)"
 active_sides="$(profile_value active_sides)"
 inactive_sides="$(profile_value inactive_sides)"
 hand_mode="$(profile_value hand_mode)"
+active_hand_sides="$(profile_value active_hand_sides)"
+hand_executor="$(profile_value hand_executor)"
+hand_overlay="$(profile_value hand_overlay)"
+[[ -n "${active_hand_sides}" ]] || active_hand_sides="${active_sides}"
+[[ -n "${hand_executor}" ]] || hand_executor=none
+[[ -n "${hand_overlay}" ]] || hand_overlay=none
 [[ -n "${source_config}" && -n "${arm_executor_config}" && -n "${coordinator_config}" ]] || {
   printf '%s\n' '错误：session profile 缺少 source/executor/coordinator config。' >&2
   exit 2
 }
+if [[ "${hand_mode}" == disabled ]]; then
+  hand_executor=none
+  active_hand_sides=""
+elif [[ "${hand_executor}" != wuji_hand2 && "${hand_executor}" != mujoco ]]; then
+  printf '错误：hand-enabled profile 必须选择唯一 hand_executor: %s\n' "${hand_executor}" >&2
+  exit 2
+fi
 if [[ "${required_capability}" == real && "${confirm_real}" != true ]]; then
   printf '%s\n' '错误：real profile 必须显式提供 --confirm-real。' >&2
   exit 2
@@ -122,7 +135,13 @@ run_id="$(new_instance_id)"
 coordinator_id="$(new_instance_id)"
 source_instance="$(new_instance_id)"
 arm_producer_instance=""
-[[ -n "${arm_producer_config}" && "${arm_producer_config}" != null ]] && arm_producer_instance="$(new_instance_id)"
+arm_producer_id="arm_ik_producer"
+if [[ "${source_id}" == joint_replay ]]; then
+  arm_producer_instance="$(new_instance_id)"
+  arm_producer_id="joint_replay"
+elif [[ -n "${arm_producer_config}" && "${arm_producer_config}" != null ]]; then
+  arm_producer_instance="$(new_instance_id)"
+fi
 arm_executor_instance="$(new_instance_id)"
 if [[ "${source_id}" == target_replay || "${source_id}" == joint_replay ]]; then
   [[ -n "${input_path}" && -f "${input_path}" ]] || {
@@ -130,11 +149,32 @@ if [[ "${source_id}" == target_replay || "${source_id}" == joint_replay ]]; then
     exit 2
   }
 fi
-hand_producer_instance=""
-hand_executor_instance=""
-if [[ "${hand_mode}" != disabled ]]; then
-  hand_producer_instance="$(new_instance_id)"
-  hand_executor_instance="$(new_instance_id)"
+declare -a hand_side_array=()
+declare -a hand_producer_id_array=()
+declare -a hand_producer_instance_array=()
+declare -a hand_executor_instance_array=()
+if [[ -n "${active_hand_sides}" ]]; then
+  IFS=',' read -r -a hand_side_array <<< "${active_hand_sides}"
+  for hand_side in "${hand_side_array[@]}"; do
+    [[ "${hand_side}" == left || "${hand_side}" == right ]] || {
+      printf '错误：active_hand_sides 包含非法 side: %s\n' "${hand_side}" >&2
+      exit 2
+    }
+    hand_executor_instance_array+=("$(new_instance_id)")
+    if [[ "${source_id}" == h5_replay && "${hand_mode}" == direct ]]; then
+      hand_producer_id_array+=("h5_direct")
+      hand_producer_instance_array+=("${source_instance}")
+    elif [[ "${source_id}" == joint_replay ]]; then
+      hand_producer_id_array+=("joint_replay")
+      hand_producer_instance_array+=("${arm_producer_instance}")
+    elif [[ "${hand_executor}" == wuji_hand2 ]]; then
+      hand_producer_id_array+=("wuji_retarget_${hand_side}")
+      hand_producer_instance_array+=("$(new_instance_id)")
+    else
+      hand_producer_id_array+=("disabled")
+      hand_producer_instance_array+=("disabled")
+    fi
+  done
 fi
 export TIANJI_RUN_ID="${run_id}"
 export TIANJI_ROUTER_ENDPOINT="${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
@@ -147,21 +187,61 @@ if ! router_zid="$(require_router)"; then
 fi
 export TIANJI_ROUTER_ZID="${router_zid}"
 export TIANJI_ACTIVE_SIDES="${active_sides}"
-export TIANJI_ACTIVE_HAND_SIDES="${active_sides}"
+export TIANJI_ACTIVE_HAND_SIDES="${active_hand_sides}"
 export TIANJI_INACTIVE_HAND_SIDES="${inactive_sides}"
-export TIANJI_ARM_PRODUCER_LOGICAL_ID="arm_ik_producer"
+export TIANJI_ARM_PRODUCER_LOGICAL_ID="${arm_producer_id}"
 export TIANJI_ARM_PRODUCER_INSTANCE_ID="${arm_producer_instance}"
-hand_producer_id="wuji_retarget"
-[[ "${source_id}" == h5_replay && "${hand_mode}" == direct ]] && hand_producer_id="h5_direct"
-[[ "${source_id}" == joint_replay ]] && hand_producer_id="joint_replay"
-export TIANJI_HAND_PRODUCER_ID="${hand_producer_id}"
-if [[ "${source_id}" == h5_replay && "${hand_mode}" == direct ]]; then
-  hand_producer_instance="${source_instance}"
-else
-  hand_producer_instance="${hand_producer_instance}"
+hand_producer_id="disabled"
+hand_producer_instance="disabled"
+hand_input_instance="disabled"
+if ((${#hand_side_array[@]} > 0)); then
+  hand_producer_id="${hand_producer_id_array[0]}"
+  hand_producer_instance="${hand_producer_instance_array[0]}"
+  if [[ "${hand_mode}" == retarget ]]; then
+    hand_input_instance="${source_instance}"
+  else
+    hand_input_instance="${hand_producer_instance}"
+  fi
 fi
+export TIANJI_HAND_PRODUCER_ID="${hand_producer_id}"
 export TIANJI_HAND_PRODUCER_INSTANCE_ID="${hand_producer_instance}"
+export TIANJI_HAND_INPUT_INSTANCE_ID="${hand_input_instance}"
 export TIANJI_SOURCE_INSTANCE_ID="${source_instance}"
+hand_authority_rows=""
+for hand_index in "${!hand_side_array[@]}"; do
+  hand_authority_rows+="${hand_side_array[hand_index]}|${hand_producer_id_array[hand_index]}|${hand_producer_instance_array[hand_index]}|${hand_executor_instance_array[hand_index]},"
+done
+authorities_json="$(
+  pixi run python - \
+    "${source_id}" "${source_instance}" "${arm_producer_id}" "${arm_producer_instance}" \
+    "${arm_executor_config##*/}" "${arm_executor_instance}" "${coordinator_id}" \
+    "${router_zid}" "${hand_authority_rows}" <<'PY'
+import json
+import sys
+
+source, source_instance, arm_producer, arm_producer_instance, executor_config, executor_instance, coordinator, router, rows = sys.argv[1:]
+executor = "marvin" if executor_config == "marvin.yaml" else "mujoco"
+disabled = {"logical_id": "disabled", "publisher_instance_id": "disabled", "router_zid": router, "enabled": False}
+hand_producers = {"left": dict(disabled), "right": dict(disabled)}
+hand_executors = {"left": dict(disabled), "right": dict(disabled)}
+for row in rows.split(","):
+    if not row:
+        continue
+    side, producer, producer_instance, executor_instance = row.split("|")
+    hand_producers[side] = {"logical_id": producer, "publisher_instance_id": producer_instance, "router_zid": router}
+    hand_executors[side] = {"logical_id": f"wuji_{side}", "publisher_instance_id": executor_instance, "router_zid": router}
+print(json.dumps({
+    "source": {"logical_id": source, "publisher_instance_id": source_instance, "router_zid": router},
+    "producer_arm": {"logical_id": arm_producer, "publisher_instance_id": arm_producer_instance or "disabled", "router_zid": router, "enabled": bool(arm_producer_instance)},
+    "producer_hand": hand_producers,
+    "coordinator_arm": {"logical_id": "arm", "publisher_instance_id": coordinator, "router_zid": router},
+    "executor_arm": {"logical_id": executor, "publisher_instance_id": executor_instance, "router_zid": router},
+    "executor_hand": hand_executors,
+}, separators=(",", ":")))
+PY
+)"
+[[ -n "${authorities_json}" ]] || { printf '%s\n' '错误：无法构造完整 authority mapping。' >&2; exit 1; }
+export TIANJI_AUTHORITIES="${authorities_json}"
 activate_bundle_runtime
 if ! existing_tokens="$(read_teleop_node_list)"; then
   printf '%s\n' '错误：无法完成启动前 live domain preflight。' >&2
@@ -187,31 +267,60 @@ launch() {
     sleep 0.1
   done
 }
-base_env=("TIANJI_ROUTER_ENDPOINT=${TIANJI_ROUTER_ENDPOINT}" "TIANJI_ROUTER_ZID=${TIANJI_ROUTER_ZID}" "TIANJI_COORDINATOR_INSTANCE_ID=${coordinator_id}" "TIANJI_RUN_ID=${run_id}" "TIANJI_REQUIRED_CAPABILITY=${required_capability}" "TIANJI_HAND_MODE=${hand_mode}" "TIANJI_HAND_PRODUCER_ID=${hand_producer_id}" "TIANJI_HAND_PRODUCER_INSTANCE_ID=${hand_producer_instance}" "TIANJI_ARM_PRODUCER_INSTANCE_ID=${arm_producer_instance}")
+recorder_instance=""
+[[ -n "${record_path}" ]] && recorder_instance="$(new_instance_id)"
+base_env=(
+  "TIANJI_ROUTER_ENDPOINT=${TIANJI_ROUTER_ENDPOINT}"
+  "TIANJI_ROUTER_ZID=${TIANJI_ROUTER_ZID}"
+  "TIANJI_COORDINATOR_INSTANCE_ID=${coordinator_id}"
+  "TIANJI_RUN_ID=${run_id}"
+  "TIANJI_REQUIRED_CAPABILITY=${required_capability}"
+  "TIANJI_HAND_MODE=${hand_mode}"
+  "TIANJI_HAND_PRODUCER_ID=${hand_producer_id}"
+  "TIANJI_HAND_PRODUCER_INSTANCE_ID=${hand_producer_instance}"
+  "TIANJI_HAND_INPUT_INSTANCE_ID=${hand_input_instance}"
+  "TIANJI_ARM_PRODUCER_INSTANCE_ID=${arm_producer_instance}"
+  "TIANJI_AUTHORITIES=${TIANJI_AUTHORITIES}"
+)
 if [[ -n "${record_path}" ]]; then
-  launch recorder "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="$(new_instance_id)" TIANJI_RECORD_PATH="${record_path}" TIANJI_RECORD_SOURCE_TYPE="${source_id}" python -m pico_body_tianji.recording.session_recorder
+  launch recorder "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${recorder_instance}" TIANJI_RECORD_PATH="${record_path}" TIANJI_RECORD_SOURCE_TYPE="${source_id}" TIANJI_RECORDING_CONFIG="$(canonical_config recording/session.yaml)" python -m pico_body_tianji.recording.session_recorder
 fi
 launch coordinator "${base_env[@]}" TIANJI_COORDINATOR_INSTANCE_ID="${coordinator_id}" TIANJI_COORDINATOR_CONFIG="$(canonical_config "${coordinator_config}")" python "${BUNDLE_ROOT}/src/pico_body_tianji/scripts/arm_command_coordinator"
-source_args=("${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${source_instance}" TIANJI_SOURCE_INSTANCE_ID="${source_instance}" TIANJI_PRODUCER_INSTANCE_ID="${hand_producer_instance}" bash "${SCRIPT_DIR}/run_source.sh" --source "${source_id}" --config "$(canonical_config "${source_config}")")
+source_args=("${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${source_instance}" TIANJI_SOURCE_INSTANCE_ID="${source_instance}" TIANJI_PRODUCER_INSTANCE_ID="${arm_producer_instance:-${hand_producer_instance}}" bash "${SCRIPT_DIR}/run_source.sh" --source "${source_id}" --config "$(canonical_config "${source_config}")")
 if [[ "${source_id}" == h5_replay ]]; then
   source_args+=(-- "${input_path}")
   if [[ "${required_capability}" == real ]]; then source_args+=(--speed 0.25 --yaw-deg 0); fi
 elif [[ "${source_id}" == mocap_live && "${required_capability}" == real ]]; then
   source_args+=(--param speed:=0.25 --param yaw_deg:=0)
 elif [[ "${source_id}" == target_replay || "${source_id}" == joint_replay ]]; then
-  source_args+=(-- "${input_path}" --active-hand-sides "${active_sides}" --inactive-hand-sides "${inactive_sides}")
+  source_args+=(-- "${input_path}" --active-hand-sides "${active_hand_sides}" --inactive-hand-sides "${inactive_sides}")
 fi
 source_args+=("${extra_args[@]}")
 launch_arm_executor() {
+  local hand_args=()
+  if [[ "${hand_executor}" == mujoco && -n "${active_hand_sides}" ]]; then
+    hand_args+=(--hand-sides "${active_hand_sides}")
+  else
+    # Wuji is the sole hand executor authority for hand-enabled sim/replay.
+    hand_args+=(--hand-sides "")
+  fi
   if [[ "${arm_executor_config}" == executors/mujoco.yaml ]]; then
-    launch arm_executor "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_executor_instance}" bash "${SCRIPT_DIR}/run_executor.sh" --executor mujoco --config "$(canonical_config "${arm_executor_config}")"
+    launch arm_executor "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_executor_instance}" bash "${SCRIPT_DIR}/run_executor.sh" --executor mujoco --config "$(canonical_config "${arm_executor_config}")" "${hand_args[@]}"
   else
     launch arm_executor "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_executor_instance}" bash "${SCRIPT_DIR}/run_executor.sh" --executor marvin --config "$(canonical_config "${arm_executor_config}")" --confirm-real
   fi
 }
 launch_hand_executor() {
-  [[ "${hand_mode}" != disabled ]] || return 0
-  launch hand_executor "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${hand_executor_instance}" bash "${SCRIPT_DIR}/run_executor.sh" --executor wuji_hand2 --mode "${hand_mode}" --side right --config "$(canonical_config executors/wuji_hand2.yaml)"
+  [[ "${hand_mode}" != disabled && "${hand_executor}" == wuji_hand2 ]] || return 0
+  for hand_index in "${!hand_side_array[@]}"; do
+    launch "hand_executor_${hand_side_array[hand_index]}" "${base_env[@]}" \
+      TIANJI_COMPONENT_INSTANCE_ID="${hand_executor_instance_array[hand_index]}" \
+      TIANJI_HAND_PRODUCER_ID="${hand_producer_id_array[hand_index]}" \
+      TIANJI_HAND_PRODUCER_INSTANCE_ID="${hand_producer_instance_array[hand_index]}" \
+      TIANJI_HAND_INPUT_INSTANCE_ID="${hand_input_instance}" \
+      bash "${SCRIPT_DIR}/run_executor.sh" --executor wuji_hand2 --mode "${hand_mode}" \
+      --side "${hand_side_array[hand_index]}" --config "$(canonical_config executors/wuji_hand2.yaml)"
+  done
 }
 launch_arm_producer() {
   [[ -n "${arm_producer_config}" && "${arm_producer_config}" != null ]] || return 0

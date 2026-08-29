@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from ..protocol import topics
 from ..protocol.messages import (
@@ -21,8 +22,7 @@ from ..protocol.messages import (
     strict_loads,
 )
 from ..zenoh_util import declare_component_liveliness
-from .session_h5 import SessionH5Writer
-
+from .session_h5 import SCHEMA_NAME, SCHEMA_VERSION, SessionH5Writer
 
 class RecorderProtocolError(ValueError):
     """A malformed or profile-incompatible message reached the recorder."""
@@ -36,6 +36,7 @@ _RAW = {
 
 
 def _payload(value: Any) -> Any:
+
     if isinstance(value, dict):
         return value
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -44,6 +45,33 @@ def _payload(value: Any) -> Any:
     if payload is not None:
         return strict_loads(bytes(payload))
     return value
+_RECORDING_CONFIG_KEYS = frozenset({"flush_interval_s", "schema_name", "schema_version"})
+
+
+def _recording_config(value: Mapping[str, Any] | None, *, flush_interval_s: float) -> dict[str, Any]:
+    if value is None:
+        value = {
+            "flush_interval_s": flush_interval_s,
+            "schema_name": SCHEMA_NAME,
+            "schema_version": SCHEMA_VERSION,
+        }
+    if not isinstance(value, Mapping) or set(value) != _RECORDING_CONFIG_KEYS:
+        raise ValueError(
+            "recording config must contain exactly flush_interval_s, schema_name and schema_version"
+        )
+    try:
+        interval = float(value["flush_interval_s"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("recording flush_interval_s must be numeric") from exc
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError("recording flush_interval_s must be finite and positive")
+    if value["schema_name"] != SCHEMA_NAME or value["schema_version"] != SCHEMA_VERSION:
+        raise ValueError("unsupported session recording schema")
+    return {
+        "flush_interval_s": interval,
+        "schema_name": str(value["schema_name"]),
+        "schema_version": str(value["schema_version"]),
+    }
 
 
 def _key_map() -> dict[str, tuple[type[Any], str, str | None]]:
@@ -76,6 +104,7 @@ class SessionRecorderNode:
         router_zid: str,
         publisher_instance_id: str | None = None,
         flush_interval_s: float = 1.0,
+        recording_config: Mapping[str, Any] | None = None,
         clock: Callable[[], int] | None = None,
     ) -> None:
         publisher_instance_id = publisher_instance_id or __import__("os").environ.get("TIANJI_COMPONENT_INSTANCE_ID") or "recorder"
@@ -98,12 +127,18 @@ class SessionRecorderNode:
             if session is not None and hasattr(session, "declare_publisher")
             else None
         )
+        self.recording_config = _recording_config(
+            recording_config,
+            flush_interval_s=flush_interval_s,
+        )
         self.writer = SessionH5Writer(
             output_path,
             source_type=source_type,
             robot_model=robot_model,
             router_zid=router_zid,
-            flush_interval_s=flush_interval_s,
+            flush_interval_s=self.recording_config["flush_interval_s"],
+            schema_name=self.recording_config["schema_name"],
+            schema_version=self.recording_config["schema_version"],
             clock=clock or __import__("time").monotonic_ns,
         )
         self._resources: list[Any] = []

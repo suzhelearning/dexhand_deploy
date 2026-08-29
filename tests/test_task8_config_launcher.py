@@ -67,6 +67,21 @@ class Task8ConfigTreeTest(unittest.TestCase):
             finally:
                 bad.unlink()
 
+    def test_hand_enabled_profiles_select_one_hand_executor_authority(self) -> None:
+        for profile in ("h5_sim", "h5_real", "target_replay_sim", "joint_replay_sim"):
+            with self.subTest(profile=profile):
+                value = yaml.safe_load((CONFIG / "sessions" / f"{profile}.yaml").read_text())
+                self.assertEqual(value["hand_executor"], "wuji_hand2")
+                self.assertIn(value["hand_overlay"], {"none", "mujoco"})
+                self.assertNotEqual(value["hand_executor"], value["hand_overlay"])
+
+    def test_session_launcher_wires_authorities_and_disables_mujoco_hand_overlay(self) -> None:
+        launcher = (SCRIPTS / "run_session.sh").read_text(encoding="utf-8")
+        self.assertIn("TIANJI_AUTHORITIES", launcher)
+        self.assertIn("TIANJI_RECORDING_CONFIG=", launcher)
+        self.assertIn('hand_args+=(--hand-sides "")', launcher)
+        self.assertIn('hand_executor}" == wuji_hand2', launcher)
+
 
 class Task8LauncherTest(unittest.TestCase):
     def test_new_launcher_scripts_exist_and_are_executable(self) -> None:

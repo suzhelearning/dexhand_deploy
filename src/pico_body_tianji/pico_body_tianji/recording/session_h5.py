@@ -82,29 +82,50 @@ def _finite(value: Any, field: str) -> np.ndarray:
 class SessionH5Writer:
     """Create and append one session-v1 recording."""
 
-    def __init__(self, path: str | Path, *, source_type: str, robot_model: str, router_zid: str, flush_interval_s: float = 1.0, overwrite: bool = False, clock: Any = time.monotonic_ns) -> None:
-        if source_type not in SOURCE_TYPES: raise SessionH5Error(f"unsupported source_type: {source_type}")
-        if not robot_model or not router_zid: raise SessionH5Error("robot_model and router_zid are required")
-        if flush_interval_s <= 0: raise SessionH5Error("flush_interval_s must be positive")
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        source_type: str,
+        robot_model: str,
+        router_zid: str,
+        flush_interval_s: float = 1.0,
+        schema_name: str = SCHEMA_NAME,
+        schema_version: str = SCHEMA_VERSION,
+        overwrite: bool = False,
+        clock: Any = time.monotonic_ns,
+    ) -> None:
+        if source_type not in SOURCE_TYPES:
+            raise SessionH5Error(f"unsupported source_type: {source_type}")
+        if not robot_model or not router_zid:
+            raise SessionH5Error("robot_model and router_zid are required")
+        if flush_interval_s <= 0:
+            raise SessionH5Error("flush_interval_s must be positive")
+        if schema_name != SCHEMA_NAME or schema_version != SCHEMA_VERSION:
+            raise SessionH5Error("unsupported session HDF5 schema")
         self.path = Path(path)
-        if self.path.exists() and not overwrite: raise FileExistsError(f"refusing to overwrite existing recording: {self.path}")
+        if self.path.exists() and not overwrite:
+            raise FileExistsError(f"refusing to overwrite existing recording: {self.path}")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._file = h5py.File(self.path, "w")
-        self._closed = False; self._complete = False; self._clock = clock
-        self._flush_interval_s = float(flush_interval_s); self._last_flush = time.monotonic()
+        self._closed = False
+        self._complete = False
+        self._clock = clock
+        self._flush_interval_s = float(flush_interval_s)
+        self._last_flush = time.monotonic()
         self._timeline_start: int | None = None
+        self._schema_name = schema_name
+        self._schema_version = schema_version
         self._initialize_layout(source_type, robot_model, router_zid)
-
-    @property
-    def file(self) -> h5py.File:
-        if self._closed: raise RuntimeError("session writer is closed")
-        return self._file
-
-    @property
-    def complete(self) -> bool: return self._complete
-
     def _initialize_layout(self, source_type: str, robot_model: str, router_zid: str) -> None:
-        self._file.attrs.update(schema_name=SCHEMA_NAME, schema_version=SCHEMA_VERSION, source_type=source_type, robot_model=robot_model, router_zid=router_zid, complete=False)
+        self._file.attrs.update(
+            schema_name=self._schema_name,
+            schema_version=self._schema_version,
+            source_type=source_type,
+            robot_model=robot_model,
+            router_zid=router_zid,
+            complete=False,
+        )
         raw = self._file.create_group("raw")
         pico = raw.create_group("pico_controller")
         for name, shape, dtype in (("time_ns", (), np.int64), ("source_time_ns", (), np.int64), ("source_time_valid", (), np.bool_), ("publisher_instance_id", (), _STRING), ("sequence", (), np.int64), ("left_pose", (7,), np.float64), ("right_pose", (7,), np.float64), ("right_a_pressed", (), np.bool_)): _empty_dataset(pico, name, shape, dtype=dtype)

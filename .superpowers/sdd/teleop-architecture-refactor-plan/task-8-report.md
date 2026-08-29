@@ -91,3 +91,48 @@ git diff --check
 ```
 
 未运行真实 H5/Zenoh router 因当前环境无 operator acquisition session；validate-only 与 physical/display overlay 仍需实际 H5/设备验收。
+
+## Round 4/5 修复（Task8）
+
+- hand-enabled sim profile 新增 `hand_executor`、`hand_overlay`、`active_hand_sides`：h5/target/joint sim 统一由 Wuji 按 side 成为唯一 hand executor；MuJoCo arm executor 显式使用空 `--hand-sides`，仅保留被动 overlay，不再为同一 side 声明第二个 hand state/status authority。Wuji retarget 的 producer instance 与 executor instance 分离并写入正确 token/status/command；direct 仍只接受 H5/JointReplay 的唯一 command producer。
+- `run_session.sh` 在 spawn 前预分配并构造完整 `TIANJI_AUTHORITIES` JSON（source、producer_arm、producer_hand、coordinator_arm、executor_arm、executor_hand，含 logical/instance/router，hand 按 side）；coordinator 严格校验并拒绝未授权 component、hand status/state identity，launcher 未配置 mapping 时入口直接失败。
+- `SessionRecorderNode` 严格加载 `config/recording/session.yaml` 的 schema/flush 字段；`SessionH5Writer` 应用配置并拒绝不支持 schema。session recorder 捕获 SIGTERM/SIGINT，受管 TERM 走 flush/close 完成 HDF5，异常 abort/强杀仍保留 `complete=false`。
+
+Round 4/5 实际命令与输出：
+
+```text
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest \
+  tests.test_task8_config_launcher tests.test_session_recorder \
+  tests.test_arm_coordinator tests.test_task5_executor_contract tests.test_session_h5
+Ran 53 tests ... OK
+
+bash -n scripts/*.sh
+PYTHONPATH=src/pico_body_tianji pixi run python -m py_compile <affected modules>
+git diff --check
+# 全部通过
+
+pixi run -e ik-build cmake -S src/pico_body_tianji -B build/task8-cmake \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/staging/ik"
+pixi run -e ik-build cmake --build build/task8-cmake --parallel 2
+pixi run -e ik-build cmake --install build/task8-cmake
+# configure/build/install 通过；仅 Pinocchio/Boost CMP0167 开发警告
+
+TIANJI_OFFICIAL_SDK_ROOT="$PWD/runtime/tianji_official" \
+  bash scripts/deploy_ik_runtime.sh
+# 部署通过；runtime/staging/source Python 与 canonical config 同步，RUNTIME_TREE_SHA256 已更新
+```
+
+诊断/replay focused 命令：
+
+```text
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest \
+  tests.test_mocap_h5_replay tests.test_mocap_h5 tests.test_session_replay tests.test_h5_replay
+# 32 tests 中 30 个通过；2 个既有回归测试仍引用已删除的旧 viewer 入口，
+# FileNotFoundError: src/pico_body_tianji/scripts/mujoco_joint_viewer.py
+
+PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest \
+  tests.test_mocap_h5_wrist_replay
+# 既有测试仍引用已删除的旧 mujoco_h5_wrist_replay.py，FileNotFoundError
+```
+
+未完成/限制：未启动外部 acquisition ACL/router，未进行真实 H5/Marvin/Wuji/急停及 DISPLAY overlay 验收；上述两个旧 viewer 测试需后续迁移到 canonical diagnostics 入口。未运行 full suite、formatter 或 lint。

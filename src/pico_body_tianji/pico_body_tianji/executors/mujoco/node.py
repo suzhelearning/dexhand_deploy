@@ -38,6 +38,7 @@ from ...protocol.messages import (
     strict_loads,
 )
 from ...mujoco_urdf import portable_mujoco_urdf
+from ..wuji_hand2.config import WujiHandConfig
 from ...zenoh_util import key, open_session, require_single_router, declare_component_liveliness
 
 _LOG = logging.getLogger(__name__)
@@ -654,20 +655,32 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--urdf", type=Path, default=None)
     parser.add_argument("--rate", type=float, default=60.0)
     parser.add_argument("--run-id", default="")
+    parser.add_argument("--hand-sides", default=None, help="comma-separated hand sides; empty disables MuJoCo hand authority")
     parser.add_argument("--publisher-instance-id", default=os.environ.get("TIANJI_COMPONENT_INSTANCE_ID", "mujoco"))
     parser.add_argument("--coordinator-instance-id", default=os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID", "coordinator"))
     return parser.parse_args(argv)
 
-
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    configured: Mapping[str, Any] = {}
     if args.config is not None:
         import yaml
         configured = yaml.safe_load(args.config.read_text(encoding="utf-8")) or {}
+        if not isinstance(configured, Mapping):
+            raise SystemExit("MuJoCo config must be a mapping")
         if args.urdf is None and configured.get("urdf"):
             args.urdf = Path(configured["urdf"])
         if args.rate == 60.0 and configured.get("rate_hz"):
             args.rate = float(configured["rate_hz"])
+    if args.hand_sides is None:
+        configured_sides = configured.get("hand_sides", ())
+        if isinstance(configured_sides, str):
+            args.hand_sides = configured_sides
+        else:
+            args.hand_sides = ",".join(str(side) for side in configured_sides)
+    hand_sides = tuple(side.strip() for side in str(args.hand_sides).split(",") if side.strip())
+    if any(side not in SIDES for side in hand_sides):
+        raise SystemExit("--hand-sides must contain only left/right")
     try:
         import mujoco
     except ImportError as exc:
@@ -685,6 +698,7 @@ def main(argv: list[str] | None = None) -> int:
             publisher_instance_id=args.publisher_instance_id,
             router_zid=router,
             coordinator_instance_id=args.coordinator_instance_id,
+            hand_sides=hand_sides,
             run_id=args.run_id or None,
             safety_supervisor_instance_id=os.environ.get("TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID"),
         )

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +56,88 @@ class SessionRecorderTest(unittest.TestCase):
             path.touch()
             with self.assertRaises(FileExistsError):
                 SessionRecorderNode(_Session(), path, source_type="pico_controller", robot_model="marvin", router_zid="router")
+
+    def test_recording_config_is_applied_to_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            node = SessionRecorderNode(
+                _Session(),
+                Path(directory) / "session.h5",
+                source_type="pico_controller",
+                robot_model="marvin",
+                router_zid="router",
+                recording_config={
+                    "flush_interval_s": 0.25,
+                    "schema_name": "tianji-teleop-session",
+                    "schema_version": "1.0",
+                },
+            )
+            self.assertEqual(node.recording_config["flush_interval_s"], 0.25)
+            self.assertEqual(node.writer._flush_interval_s, 0.25)
+            node.close()
+
+    def test_sigterm_gracefully_closes_recorder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "marker.json"
+            config = Path(__file__).parents[1] / "src" / "pico_body_tianji" / "config" / "recording" / "session.yaml"
+            code = textwrap.dedent(
+                """
+                import json
+                import os
+                import pico_body_tianji.recording.session_recorder as module
+
+                marker = os.environ["MARKER"]
+                class FakeSession:
+                    def close(self):
+                        pass
+                class FakeNode:
+                    def __init__(self, *args, **kwargs):
+                        with open(marker, "w", encoding="utf-8") as handle:
+                            json.dump({"closed": False, "kwargs": kwargs}, handle)
+                    def flush(self):
+                        pass
+                    def close(self):
+                        with open(marker, "r+", encoding="utf-8") as handle:
+                            value = json.load(handle)
+                            value["closed"] = True
+                            handle.seek(0)
+                            json.dump(value, handle)
+                            handle.truncate()
+                module.open_session = lambda: FakeSession()
+                module.require_single_router = lambda session, expected: "router"
+                module.SessionRecorderNode = FakeNode
+                raise SystemExit(module.main())
+                """
+            )
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PYTHONPATH": str(Path(__file__).parents[1] / "src" / "pico_body_tianji")
+                    + os.pathsep
+                    + env.get("PYTHONPATH", ""),
+                    "TIANJI_RECORD_PATH": str(Path(directory) / "session.h5"),
+                    "TIANJI_RECORD_SOURCE_TYPE": "pico_controller",
+                    "TIANJI_COMPONENT_INSTANCE_ID": "recorder-instance",
+                    "TIANJI_ROUTER_ZID": "router",
+                    "TIANJI_RECORDING_CONFIG": str(config),
+                    "MARKER": str(marker),
+                }
+            )
+            process = subprocess.Popen([sys.executable, "-c", code], env=env)
+            try:
+                for _ in range(100):
+                    if marker.exists():
+                        break
+                    __import__("time").sleep(0.01)
+                self.assertTrue(marker.exists(), "recorder child did not initialize")
+                process.send_signal(signal.SIGTERM)
+                process.wait(timeout=3)
+                value = json.loads(marker.read_text(encoding="utf-8"))
+                self.assertTrue(value["closed"])
+                self.assertEqual(value["kwargs"]["recording_config"]["schema_version"], "1.0")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
 
 
 if __name__ == "__main__":

@@ -4,4 +4,8 @@ arm_executor_config: executors/mujoco.yaml
 coordinator_config: coordinator/arm.yaml
 required_capability: simulation
 active_sides: [left, right]
+inactive_sides: []
 hand_mode: auto
+hand_executor: wuji_hand2
+hand_overlay: mujoco
+active_hand_sides: [left, right]

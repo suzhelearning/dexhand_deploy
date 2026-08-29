@@ -72,7 +72,6 @@ fi
 shopt -s nullglob
 for cleanup_root in "${RUNTIME_BIN}" "${STAGING_BIN}"; do
   for stale in \
-    "${cleanup_root}"/pico_controller_* \
     "${cleanup_root}"/marvin_hardware_* \
     "${cleanup_root}"/mocap_keyboard_* \
     "${cleanup_root}"/mujoco_joint_viewer* \

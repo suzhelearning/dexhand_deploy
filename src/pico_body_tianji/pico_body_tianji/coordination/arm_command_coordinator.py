@@ -125,6 +125,12 @@ class ArmCommandCoordinator:
         self.router_zid = router_zid
         self.clock = clock
         self.profile = dict(profile or {})
+        if "authorities" in self.profile:
+            self.authorities = self._validate_authorities(self.profile["authorities"])
+        else:
+            # Direct unit users may construct a coordinator without launcher
+            # wiring; the production entry point always supplies this map.
+            self.authorities = None
         self.robot = robot_config if isinstance(robot_config, ArmRobotConfig) else (ArmRobotConfig.from_mapping(robot_config) if isinstance(robot_config, Mapping) else ArmRobotConfig.load(robot_config))
         self.config = self._coordinator_config(coordinator_config)
         self._sequence = 0
@@ -157,6 +163,66 @@ class ArmCommandCoordinator:
         )
         if session is not None:
             self._setup_transport(session)
+    @staticmethod
+    def _validate_authorities(value: Any) -> dict[str, Any]:
+        roles = ("source", "producer_arm", "producer_hand", "coordinator_arm", "executor_arm", "executor_hand")
+        if not isinstance(value, Mapping) or set(value) != set(roles):
+            raise ValueError("authorities must contain exactly the six canonical roles")
+
+        def identity(raw: Any, role: str) -> dict[str, Any]:
+            if not isinstance(raw, Mapping):
+                raise ValueError(f"authority {role} must be an identity mapping")
+            required = {"logical_id", "publisher_instance_id", "router_zid"}
+            if set(raw) - required - {"enabled"} or not required <= set(raw):
+                raise ValueError(f"authority {role} identity fields are incomplete")
+            result = {
+                "logical_id": str(raw["logical_id"]),
+                "publisher_instance_id": str(raw["publisher_instance_id"]),
+                "router_zid": str(raw["router_zid"]),
+            }
+            if not all(result.values()):
+                raise ValueError(f"authority {role} identity fields must be non-empty")
+            if "enabled" in raw:
+                result["enabled"] = bool(raw["enabled"])
+            return result
+
+        result: dict[str, Any] = {}
+        for role in roles:
+            raw = value[role]
+            if role in {"producer_hand", "executor_hand"} and isinstance(raw, Mapping) and "logical_id" not in raw:
+                if set(raw) != {"left", "right"}:
+                    raise ValueError(f"authority {role} side mapping must contain left/right")
+                result[role] = {side: identity(raw[side], f"{role}/{side}") for side in ("left", "right")}
+            else:
+                result[role] = identity(raw, role)
+        return result
+
+    def _expected_authority(self, role: str, side: str | None = None) -> Mapping[str, Any] | None:
+        if self.authorities is None:
+            return None
+        value = self.authorities.get(role)
+        if side is not None and isinstance(value, Mapping) and "logical_id" not in value:
+            value = value.get(side)
+        return value if isinstance(value, Mapping) else None
+
+    def _matches_authority(self, role: str, logical_id: str, instance: str, router: str, *, side: str | None = None) -> bool:
+        expected = self._expected_authority(role, side)
+        if expected is None and self.authorities is not None:
+            value = self.authorities.get(role)
+            if isinstance(value, Mapping) and "logical_id" not in value and side is None:
+                return any(
+                    self._matches_authority(role, logical_id, instance, router, side=candidate)
+                    for candidate in ("left", "right")
+                )
+        if expected is None:
+            return self.authorities is None
+        return (
+            bool(expected.get("enabled", True))
+            and logical_id == expected.get("logical_id")
+            and instance == expected.get("publisher_instance_id")
+            and router == expected.get("router_zid")
+        )
+
 
     @staticmethod
     def _coordinator_config(raw: Mapping[str, Any] | str | os.PathLike[str] | None) -> dict[str, float]:
@@ -216,12 +282,25 @@ class ArmCommandCoordinator:
         return timed is not None and 0 <= now_ns - timed.received_ns <= int(self.config["state_timeout_s"] * 1e9)
 
     def _domain_ready(self, role: str, now_ns: int) -> bool:
+        side_map = self.authorities is not None and role in {"producer_hand", "executor_hand"} and isinstance(self.authorities.get(role), Mapping) and "logical_id" not in self.authorities[role]
+        if side_map:
+            for side in tuple(self.profile.get("hand_sides", ("left", "right"))):
+                expected = self._expected_authority(role, side)
+                matches = [
+                    timed for (entry_role, entry_id), timed in self._statuses.items()
+                    if entry_role == role
+                    and self._fresh(timed, now_ns)
+                    and expected is not None
+                    and self._matches_authority(role, entry_id, timed.value.publisher_instance_id, timed.value.router_zid, side=side)
+                ]
+                if len(matches) != 1 or not matches[0].value.ready or not matches[0].value.healthy:
+                    return False
+            return True
         entries = [timed for (entry_role, _), timed in self._statuses.items() if entry_role == role and self._fresh(timed, now_ns)]
         if len(entries) != 1:
             return False
         status = entries[0].value
-        expected = self.profile.get("authorities", {}).get(role, {}) if isinstance(self.profile.get("authorities", {}), Mapping) else {}
-        if expected and (status.component_id != expected.get("logical_id") or status.publisher_instance_id != expected.get("publisher_instance_id") or status.router_zid != expected.get("router_zid", self.router_zid)):
+        if not self._matches_authority(role, status.component_id, status.publisher_instance_id, status.router_zid):
             return False
         return status.ready and status.healthy and self.profile.get("required_capability", "simulation") in status.capabilities
     def update_component(self, status: ComponentStatus | Mapping[str, Any], *, received_ns: int | None = None) -> None:
@@ -232,6 +311,10 @@ class ArmCommandCoordinator:
             return
         if parsed.router_zid != self.router_zid:
             self._enter_fault("component router_zid mismatch")
+            return
+        diagnostic_side = parsed.diagnostics.get("side") if isinstance(parsed.diagnostics, Mapping) else None
+        if not self._matches_authority(parsed.component_role, parsed.component_id, parsed.publisher_instance_id, parsed.router_zid, side=diagnostic_side):
+            self._enter_fault(f"component authority mismatch for {parsed.component_role}/{parsed.component_id}")
             return
         key = (parsed.component_role, parsed.component_id)
         previous = self._statuses.get(key)
@@ -282,6 +365,15 @@ class ArmCommandCoordinator:
         if parsed.router_zid != self.router_zid:
             self._enter_fault("hand executor router_zid mismatch")
             return
+        if not self._matches_authority(
+            "executor_hand",
+            f"wuji_{parsed.side}",
+            parsed.publisher_instance_id,
+            parsed.router_zid,
+            side=parsed.side,
+        ):
+            self._enter_fault(f"hand executor authority mismatch for {parsed.side}")
+            return
         previous = self._hand_status.get(parsed.side)
         baseline = self._hand_status_baseline.get(parsed.side)
         if previous is not None and baseline is not None:
@@ -304,6 +396,15 @@ class ArmCommandCoordinator:
             return
         if parsed.router_zid != self.router_zid:
             self._enter_fault("hand state router_zid mismatch")
+            return
+        if not self._matches_authority(
+            "executor_hand",
+            f"wuji_{parsed.side}",
+            parsed.publisher_instance_id,
+            parsed.router_zid,
+            side=parsed.side,
+        ):
+            self._enter_fault(f"hand state executor authority mismatch for {parsed.side}")
             return
         status = self._hand_status.get(parsed.side)
         if status is not None and status.value.publisher_instance_id != parsed.publisher_instance_id:
@@ -680,8 +781,16 @@ def main() -> int:
     endpoint = os.environ.get("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447")
     instance = os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID")
     router = os.environ.get("TIANJI_ROUTER_ZID")
-    if not instance or not router:
-        raise RuntimeError("TIANJI_COORDINATOR_INSTANCE_ID and TIANJI_ROUTER_ZID are required")
+    authorities_raw = os.environ.get("TIANJI_AUTHORITIES", "")
+    if not instance or not router or not authorities_raw:
+        raise RuntimeError(
+            "TIANJI_COORDINATOR_INSTANCE_ID, TIANJI_ROUTER_ZID and "
+            "TIANJI_AUTHORITIES are required"
+        )
+    try:
+        authorities = json.loads(authorities_raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("TIANJI_AUTHORITIES must be valid JSON") from exc
     from ..zenoh_util import open_session, require_single_router
     session = open_session(endpoint)
     router = require_single_router(session, router)
@@ -697,6 +806,7 @@ def main() -> int:
             "hand_mode": hand_mode,
             "hand_enabled": hand_mode != "disabled",
             "hand_sides": tuple(filter(None, os.environ.get("TIANJI_ACTIVE_HAND_SIDES", os.environ.get("TIANJI_ACTIVE_SIDES", "left,right")).split(","))),
+            "authorities": authorities,
         },
         coordinator_config=coordinator_config,
     )

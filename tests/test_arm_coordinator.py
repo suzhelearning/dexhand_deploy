@@ -89,6 +89,31 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
         self.assertEqual(self.coordinator.state.intent_sequence, 7)
         self.assertFalse(self.coordinator.at_home.value)
 
+    def test_launcher_authority_mapping_rejects_foreign_component_identity(self):
+        disabled = {
+            "logical_id": "disabled",
+            "publisher_instance_id": "disabled",
+            "router_zid": "router-1",
+            "enabled": False,
+        }
+        authorities = {
+            "source": {"logical_id": "src", "publisher_instance_id": "src-instance", "router_zid": "router-1"},
+            "producer_arm": {"logical_id": "ik", "publisher_instance_id": "ik-instance", "router_zid": "router-1"},
+            "producer_hand": {"left": disabled, "right": disabled},
+            "coordinator_arm": {"logical_id": "arm", "publisher_instance_id": "coord-1", "router_zid": "router-1"},
+            "executor_arm": {"logical_id": "mujoco", "publisher_instance_id": "mujoco-instance", "router_zid": "router-1"},
+            "executor_hand": {"left": disabled, "right": disabled},
+        }
+        coordinator = ArmCommandCoordinator(
+            session=None,
+            publisher_instance_id="coord-1",
+            router_zid="router-1",
+            profile={"active_sides": ["right"], "required_capability": "simulation", "authorities": authorities},
+            clock=lambda: 1_000_000_000,
+        )
+        coordinator.update_component(_status("source", "unexpected", 1_000_000_000))
+        self.assertEqual(coordinator.state.state, "fault")
+
     def test_reject_does_not_mutate_state_and_requires_new_intent(self):
         before = self.coordinator.state
         result = self.coordinator.handle_intent(SimpleNamespace(action="start", sequence=9, source="src", reason="run"))

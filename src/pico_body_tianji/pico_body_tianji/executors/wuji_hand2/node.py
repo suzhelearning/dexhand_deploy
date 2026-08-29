@@ -96,6 +96,7 @@ class WujiHandExecutor:
         router_zid: str,
         authorized_producer: str,
         authorized_publisher_instance_id: str | None = None,
+        producer_publisher_instance_id: str | None = None,
         coordinator_instance_id: str | None = None,
         authorized_target_source: str | None = None,
         config: WujiHandConfig | Mapping[str, Any] | str | os.PathLike[str] | None = None,
@@ -122,8 +123,11 @@ class WujiHandExecutor:
         self.router_zid = router_zid
         self.authorized_producer = authorized_producer
         self.authorized_publisher_instance_id = authorized_publisher_instance_id
+        self.producer_publisher_instance_id = producer_publisher_instance_id or publisher_instance_id
         self.coordinator_instance_id = coordinator_instance_id
         self.authorized_target_source = authorized_target_source
+        if not self.producer_publisher_instance_id:
+            raise ValueError("producer publisher instance identity is required")
         self.config = config if isinstance(config, WujiHandConfig) else WujiHandConfig.from_mapping(config) if isinstance(config, Mapping) else WujiHandConfig.load(config)
         self.session = session
         self.device = device
@@ -218,7 +222,7 @@ class WujiHandExecutor:
             )
             if self.mode == "retarget":
                 self._live_tokens["producer"] = self.session.liveliness().declare_token(
-                    f"tj/live/producer/hand/{self.authorized_producer}/{self.publisher_instance_id}"
+                    f"tj/live/producer/hand/{self.authorized_producer}/{self.producer_publisher_instance_id}"
                 )
 
     def on_session_state(self, value: SessionState | Mapping[str, Any] | Any) -> None:
@@ -406,6 +410,7 @@ class WujiHandExecutor:
     def tick(self, *, now_ns: int | None = None) -> HandJointCommand | None:
         now_ns = int(self.clock()) if now_ns is None else int(now_ns)
         self._sequence += 1
+        command: HandJointCommand | None = None
         if self._safety_locked:
             self._publish_state(now_ns)
             return None
@@ -413,16 +418,12 @@ class WujiHandExecutor:
             self._expire_to_return("coordinator teleop state expired")
         if not self._real_admission_ok():
             self._mark_unhealthy(self._last_error or "real capability denied")
-            self._publish_state(now_ns)
-            self._publish_status()
-            return None
-        command: HandJointCommand | None = None
         if self._tracking_allowed(now_ns):
             if self.mode == "retarget" and self._latest_target is not None:
                 values = _retarget_keypoints(self._latest_target.keypoints_m, self.config)
                 command = HandJointCommand(
                     1, self._sequence, now_ns, self.authorized_producer, self.side,
-                    list(self.config.joint_names), values, self.publisher_instance_id, self.router_zid,
+                    list(self.config.joint_names), values, self.producer_publisher_instance_id, self.router_zid,
                 )
                 self._last_command = command
                 _put(self._publishers.get("command"), command.to_dict())
@@ -471,12 +472,17 @@ class WujiHandExecutor:
                 if role == "producer_hand"
                 else f"wuji_{self.side}"
             )
+            publisher_instance_id = (
+                self.producer_publisher_instance_id
+                if role == "producer_hand"
+                else self.publisher_instance_id
+            )
             component = ComponentStatus(
                 1, self._status_sequence, now, role, component_id,
                 self.mode, healthy, healthy,
                 ["simulation"] if self.dry_run else ["real"], self._last_error,
                 {"side": self.side, "mode": self.mode, "at_zero": self.at_zero, "tracking_allowed": tracking},
-                self.publisher_instance_id, self.router_zid,
+                publisher_instance_id, self.router_zid,
             )
             _put(self._publishers.get("component"), component.to_dict())
 
