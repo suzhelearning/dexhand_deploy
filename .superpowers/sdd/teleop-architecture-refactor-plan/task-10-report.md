@@ -53,6 +53,7 @@
 - `SafetyStopResult` 保存 request/ack timestamps；managed stop 不把 coordinator wire command 当 SDK motion，缺少每 executor command-counter evidence 时 no-motion 为 unverified/fail，并按 request/ack/status 时间窗判断 same-tick unhealthy/lockout。
 - Marvin fault reconnect 在 deadline 内等待 fresh bounded returning command；fault 不可降级，正常 timeout 保留 local bounded Home failsafe。
 - real capability provider 改为受保护 regular-file typed attestation；环境变量仅能选择文件路径，缺失/不安全/格式错误默认 denied。
+- C++ Wuji bridge now exposes a monotonic `commands_sent` diagnostic counter for real SDK-send/no-motion evidence; C++ build remains externally blocked.
 - Round2 command：定向 `py_compile`、`pixi run unittest`、`bash -n`、`git diff --check`。
   - Result：38 tests passed，1 managed Wuji process class skip（endpoint unavailable）；所有语法、shell 与 diff 检查通过。
 

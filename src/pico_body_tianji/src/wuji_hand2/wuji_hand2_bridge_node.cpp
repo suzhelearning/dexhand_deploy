@@ -281,7 +281,7 @@ private:
   bool safety_locked_{false};
   std::uint64_t last_safety_sequence_{0};
   std::uint64_t wire_sequence_{0};
-  std::uint64_t status_sequence_{0};
+  std::uint64_t commands_sent_{0};
   std::uint64_t last_session_sequence_{0};
   std::string last_error_;
   WujiHand2Device * active_device_{nullptr};
@@ -481,7 +481,8 @@ void WujiHand2Bridge::publish_status(const std::string &error) {
           << ",\"diagnostics\":{\"side\":" << quote(params_.side)
           << ",\"mode\":" << quote(params_.mode) << ",\"at_zero\":"
           << (at_zero ? "true" : "false") << ",\"tracking_allowed\":"
-          << (tracking ? "true" : "false") << "}}";
+          << (tracking ? "true" : "false") << ",\"commands_sent\":"
+          << commands_sent_ << "}}";
       component_status_pub_->put(zenoh::Bytes(out.str()));
     };
     if (params_.mode == "retarget") {
@@ -613,6 +614,9 @@ int WujiHand2Bridge::run() {
           std::lock_guard<std::mutex> guard(mutex_);
           tracking_allowed_ = false;
           last_error_ = "device send failed: " + error;
+        } else {
+          std::lock_guard<std::mutex> guard(mutex_);
+          ++commands_sent_;
         }
         float measured[kJointCount]{};
         float velocity[kJointCount]{};
