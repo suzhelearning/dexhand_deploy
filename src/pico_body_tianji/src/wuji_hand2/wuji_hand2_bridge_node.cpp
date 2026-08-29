@@ -281,6 +281,7 @@ private:
   bool safety_locked_{false};
   std::uint64_t last_safety_sequence_{0};
   std::uint64_t wire_sequence_{0};
+  std::uint64_t status_sequence_{0};
   std::uint64_t commands_sent_{0};
   std::uint64_t last_session_sequence_{0};
   std::string last_error_;

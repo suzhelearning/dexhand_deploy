@@ -317,6 +317,7 @@ base_env=(
   "TIANJI_HAND_INPUT_INSTANCE_ID=${hand_input_instance}"
   "TIANJI_ARM_PRODUCER_INSTANCE_ID=${arm_producer_instance}"
   "TIANJI_AUTHORITIES=${TIANJI_AUTHORITIES}"
+  "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID=${TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID:-}"
 )
 if [[ "${required_capability}" == real ]]; then
   # Real admission is process-issued and fail-closed.  Speed/yaw are fixed by

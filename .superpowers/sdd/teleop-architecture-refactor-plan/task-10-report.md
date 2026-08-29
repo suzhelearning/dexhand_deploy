@@ -57,6 +57,14 @@
 - Round2 command：定向 `py_compile`、`pixi run unittest`、`bash -n`、`git diff --check`。
   - Result：38 tests passed，1 managed Wuji process class skip（endpoint unavailable）；所有语法、shell 与 diff 检查通过。
 
+## Task10 round3 follow-up
+
+- 恢复 C++ Wuji bridge 的 `status_sequence_` 声明，补充真实 SDK `commands_sent` 证据计数。
+- Frame0 diagnostics topic 纳入 source authority contract；source intent、coordinator latch、SafetyStop control topics 均保持严格身份校验。
+- managed SafetyStop 在 session executor 未 ready 时不发布且不成功；进入 stop 后等待所有 arm/hand matching ack，并按 request/ack/status monotonic 时间窗计算 same-tick evidence。
+- real validation 增加 `--real-preflight-file`，要求 regular-file、run/router/supervisor-bound typed attestation；普通环境变量不能自报通过，默认 denied。
+- Round3 command：定向 35 tests（validation 26、PICO entry 1、Marvin 8）全部通过；Wuji 3 canonical unit tests已通过，managed process因endpoint缺失skip；py_compile、bash -n、git diff-check通过。C++构建受zenohd/SDK环境阻塞，未虚报通过。
+
 ## 未能执行与外部阻塞
 
 - acquisition `pixi run test` 未在本次修改中触碰；历史 ledger 记录其 151 tests 中仅有用户 dirty baseline 导致的 2 个 `tests/test_object_offset.py` offset 失败，采集仓库用户修改未覆盖。

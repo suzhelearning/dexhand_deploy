@@ -353,14 +353,19 @@ class ZenohSafetyTransport:
     def publish(self, request: SafetyStopRequest) -> None:
         self.publisher.put(json.dumps(request.to_dict(), separators=(",", ":")).encode("utf-8"), encoding="application/json")
 
-    def wait_ack(self, request: SafetyStopRequest) -> Mapping[str, Any]:
+    def wait_ack(
+        self,
+        request: SafetyStopRequest,
+        expected_executor_ids: Iterable[str] = (),
+    ) -> Mapping[str, Any]:
+        del request
+        expected = {str(item) for item in expected_executor_ids if str(item)}
         deadline = time.monotonic() + self.timeout_s
         while time.monotonic() < deadline:
             self._event.wait(timeout=max(0.0, min(0.1, deadline - time.monotonic())))
-            if self._acks:
-                # Return one row per executor; duplicate rows do not conceal a
-                # missing executor because the supervisor validates the set.
-                return {str(row.get("executor_id", "")): row for row in self._acks}
+            values = {str(row.get("executor_id", "")): row for row in self._acks}
+            if values and (not expected or expected.issubset(values)):
+                return values
         return {str(row.get("executor_id", "")): row for row in self._acks}
 
     def close(self) -> None:
@@ -664,7 +669,7 @@ def _authority_contract(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
             "liveliness": f"tj/live/{live_role}/{logical_id}/{instance}",
         })
 
-    add("source", source_logical, ids.get("source"), None, ["tianji/source/status", "tianji/session/intent", f"tianji/raw/{source}", f"tianji/target/arm/{{side}}", f"tianji/target/hand/{{side}}"], "source")
+    add("source", source_logical, ids.get("source"), None, ["tianji/source/status", "tianji/session/intent", f"tianji/raw/{source}", f"tianji/target/arm/{{side}}", f"tianji/target/hand/{{side}}", "tianji/diagnostics/h5/frame0_hand_skeleton"], "source")
     if ids.get("producer_arm"):
         producer_logical = "joint_replay" if producer == "joint_replay" else producer
         if producer_logical == "ik":
@@ -823,10 +828,33 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
         except (OSError, json.JSONDecodeError, TypeError):
             return []
     before_status_rows = _records("status.jsonl")
+    # A danger stop is meaningful only after every enabled executor has
+    # published a fresh ready/healthy status.  Never emit a stop (or report a
+    # successful one) for a session that has not reached this gate.
+    executor_ready = all(any(
+        str(row.get("publisher_instance_id", "")) == executor_id
+        and row.get("component_role") in {"executor_arm", "executor_hand"}
+        and row.get("ready") is True and row.get("healthy") is True
+        for row in before_status_rows
+    ) for executor_id in ids)
+    if not executor_ready:
+        request = SafetyStopRequest(
+            ProtocolEnvelope(1, supervisor_id, str(manifest["router_zid"]), 1, monotonic_ns()),
+            str(manifest["run_id"]), args.danger_stop, True,
+        )
+        result = SafetyStopResult(False, True, "session is not ready; safety stop was not published", request, ())
+        _write_status(
+            status, event="safety_stop", component="validation", supervisor=supervisor_id,
+            run_id=str(manifest["run_id"]), reason=args.danger_stop,
+            expected_executor_ids=ids, acked_executor_ids=[], ack_complete=False,
+            new_motion_commands_after_stop=None, lockout=True,
+            executor_safety_evidence={"same_tick_ack": False, "unhealthy": False, "no_motion_commands": False},
+        )
+        return result
     transport: ZenohSafetyTransport | None = None
     try:
         transport = ZenohSafetyTransport(str(manifest["router"]["endpoint"]))
-        result = supervisor.issue(args.danger_stop, ids, publish=transport.publish, wait_ack=transport.wait_ack)
+        result = supervisor.issue(args.danger_stop, ids, publish=transport.publish, wait_ack=lambda request: transport.wait_ack(request, ids))
     except Exception as exc:
         request = SafetyStopRequest(
             ProtocolEnvelope(1, supervisor_id, str(manifest["router_zid"]), supervisor.sequence + 1, monotonic_ns()),
@@ -1034,12 +1062,14 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
     env.update(instance_handoff_environment(manifest))
     env.update({
         "TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID": manifest["publisher_instance_ids"]["validation_supervisor"],
+        "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID": manifest["publisher_instance_ids"]["validation_supervisor"],
         "TIANJI_ROUTER_ZID": manifest["router_zid"],
         "TIANJI_VALIDATION_CASE_ID": manifest["case_id"],
         "TIANJI_VALIDATION_HAND_MODE": str(manifest.get("resolved_hand_mode") or ""),
         "TIANJI_IK_BACKEND": str(manifest.get("ik_backend") or ""),
         "TIANJI_VALIDATION_IK_BACKEND": str(manifest.get("ik_backend") or ""),
         "TIANJI_VALIDATION_PRODUCER": str(manifest.get("producer") or ""),
+        "TIANJI_REAL_PREFLIGHT_FILE": str(getattr(args, "real_preflight_file", "") or ""),
         "MARVIN_ROBOT_IP": str(manifest.get("robot_ip") or ""),
     })
     log_path = bundle / "logs" / "session.log"
@@ -1126,6 +1156,12 @@ def run_case(args: argparse.Namespace) -> int:
         raise PermissionError("--fake cannot be used for real validation")
     if not args.fake and capability == "real" and not args.robot_ip:
         raise PermissionError("real validation requires --robot-ip during preflight")
+    if not args.fake and capability == "real":
+        if not args.real_preflight_file:
+            raise PermissionError("real validation requires --real-preflight-file")
+        attestation = Path(args.real_preflight_file).expanduser()
+        if attestation.is_symlink() or not attestation.is_file():
+            raise PermissionError("real preflight attestation must be a regular file")
     output_root = Path(args.output).expanduser()
     output_root.mkdir(parents=True, exist_ok=True)
     started = utc_now()
@@ -1191,6 +1227,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", "--h5", dest="input")
     parser.add_argument("--prerequisite-root")
     parser.add_argument("--robot-ip")
+    parser.add_argument("--real-preflight-file", help="protected run-bound typed real-capability attestation")
     parser.add_argument("--robot-model")
     parser.add_argument("--motive-rigid-id", action="append")
     parser.add_argument("--ik-backend")
