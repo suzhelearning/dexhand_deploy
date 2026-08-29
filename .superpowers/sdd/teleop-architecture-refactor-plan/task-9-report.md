@@ -113,3 +113,4 @@ git diff --check
 2. managed router/Zenoh、SessionRecorder 的 recorder teardown、headless MuJoCo config、diagnostic calibration instance 和 overlay 第二 authority 需要在最终进程 smoke 中实测；本次 fake smoke 未绕过安全边界，也没有把未测项标 pass。
 3. Marvin reconnect race 需要在 fault/returning 实机或 fake SDK 进程中验证：`fault_return` 只能消费 bounded Home，Home 后仍 fault，重启前不得 teleop。当前 runbook 已把它列为立即停止/失败判据，但本次没有设备证据。
 4. analyzer 依据当前工作树 canonical config/runtime/ACL hash；生成 bundle 后修改这些文件会按设计失败，必须用同一代码/config hash 重跑 case。
+5. managed danger-stop transport 在未捕获真实 executor/SDK 证据时将 `new_motion_commands_after_stop` 标为未验证；analyzer 会拒绝该结果，而不是写入合成的 false。fake/headless 仅使用确定性的 fake executor 证据，并保持 `aborted`。

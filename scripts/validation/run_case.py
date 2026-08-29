@@ -585,7 +585,7 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
         expected_executor_ids=ids,
         acked_executor_ids=list(result.acked_executor_ids),
         ack_complete=result.accepted,
-        new_motion_commands_after_stop=False,
+        new_motion_commands_after_stop=None,
         lockout=True,
     )
     if not result.accepted:
