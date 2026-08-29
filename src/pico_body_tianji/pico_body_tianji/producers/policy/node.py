@@ -55,6 +55,10 @@ class PolicyProducerNode:
         control_rate_hz: float = 90.0,
         maximum_step_rad: float | None = None,
         coordinator_instance_id: str | None = None,
+        expected_executor_id: str | None = None,
+        expected_executor_instance_id: str | None = None,
+        expected_source_id: str | None = None,
+        expected_source_instance_id: str | None = None,
         capabilities: tuple[str, ...] = ("simulation",),
         clock: Any = time.monotonic_ns,
     ) -> None:
@@ -74,6 +78,10 @@ class PolicyProducerNode:
         self.producer_id = str(producer_id)
         self.policy_name = policy_name
         self.coordinator_instance_id = coordinator_instance_id
+        self.expected_executor_id = expected_executor_id
+        self.expected_executor_instance_id = expected_executor_instance_id
+        self.expected_source_id = expected_source_id
+        self.expected_source_instance_id = expected_source_instance_id
         self.capabilities = tuple(capabilities)
         self.clock = clock
         self.control_rate_hz = float(control_rate_hz)
@@ -197,12 +205,13 @@ class PolicyProducerNode:
 
     def on_arm_state(self, value: ArmJointState | Mapping[str, Any] | Any) -> None:
         try:
-            if isinstance(value, ArmJointState):
-                parsed = value
-            else:
-                parsed = ArmJointState.from_dict(self._payload(value))
+            parsed = value if isinstance(value, ArmJointState) else ArmJointState.from_dict(self._payload(value))
             if parsed.router_zid != self.router_zid:
                 raise ProtocolError("arm state router_zid mismatch")
+            if self.expected_executor_id is not None and parsed.executor != self.expected_executor_id:
+                raise ProtocolError("arm state executor authority mismatch")
+            if self.expected_executor_instance_id is not None and parsed.publisher_instance_id != self.expected_executor_instance_id:
+                raise ProtocolError("arm state executor instance mismatch")
             baseline = self._state_baseline
             if baseline is not None:
                 if parsed.publisher_instance_id != baseline[0]:
@@ -221,16 +230,10 @@ class PolicyProducerNode:
 
     def on_session_state(self, value: SessionState | Mapping[str, Any] | Any) -> None:
         try:
-            if isinstance(value, SessionState):
-                parsed = value
-            else:
-                parsed = SessionState.from_dict(self._payload(value))
+            parsed = value if isinstance(value, SessionState) else SessionState.from_dict(self._payload(value))
             if parsed.router_zid != self.router_zid:
                 raise ProtocolError("session state router_zid mismatch")
-            if (
-                self.coordinator_instance_id is not None
-                and parsed.publisher_instance_id != self.coordinator_instance_id
-            ):
+            if self.coordinator_instance_id is not None and parsed.publisher_instance_id != self.coordinator_instance_id:
                 raise ProtocolError("session state coordinator identity mismatch")
             baseline = self._session_baseline
             if baseline is not None:
@@ -250,14 +253,16 @@ class PolicyProducerNode:
             self._session_invalid = True
             self._session_error = f"malformed session state: {exc}"
             self._set_error(self._session_error)
+
     def on_arm_target(self, side: str, value: ArmTargetCommand | Mapping[str, Any] | Any) -> None:
         try:
-            if isinstance(value, ArmTargetCommand):
-                parsed = value
-            else:
-                parsed = ArmTargetCommand.from_dict(self._payload(value))
+            parsed = value if isinstance(value, ArmTargetCommand) else ArmTargetCommand.from_dict(self._payload(value))
             if parsed.envelope.router_zid != self.router_zid or parsed.side != side:
                 raise ProtocolError("arm target identity/side mismatch")
+            if self.expected_source_id is not None and parsed.source != self.expected_source_id:
+                raise ProtocolError("arm target source authority mismatch")
+            if self.expected_source_instance_id is not None and parsed.envelope.publisher_instance_id != self.expected_source_instance_id:
+                raise ProtocolError("arm target source instance mismatch")
             baseline = self._target_baseline.get(side)
             if baseline is not None:
                 if parsed.envelope.publisher_instance_id != baseline[0]:
@@ -266,10 +271,7 @@ class PolicyProducerNode:
                     raise ProtocolError(f"{side} arm target sequence rollback")
                 if parsed.envelope.sequence == baseline[1]:
                     return
-            self._target_baseline[side] = (
-                parsed.envelope.publisher_instance_id,
-                parsed.envelope.sequence,
-            )
+            self._target_baseline[side] = (parsed.envelope.publisher_instance_id, parsed.envelope.sequence)
             self._targets[side] = parsed
         except (ProtocolError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self._set_error(f"malformed {side} arm target: {exc}")
@@ -356,17 +358,16 @@ class PolicyProducerNode:
         if session_state.state != "teleop":
             self._last_error = None
             self._publish_status(phase=session_state.state, ready=True, healthy=True)
-            return {}
-
         try:
             action = self.runner.step(observation)
-            # Reserve the next wire sequence without publishing a placeholder.
-            # A valid teleop status is emitted first, then proposal N+1; if the
-            # action is rejected only the unhealthy status is emitted.
+            # Allocate one sequence for this control tick.  The status and all
+            # side proposals share that allocator point; the analyzer folds
+            # the cross-topic pair and the next tick starts after it.
+            status = self._publish_status(phase="teleop", ready=True, healthy=True)
             proposals = self.action_adapter.adapt(
                 action,
                 observation,
-                sequence=self._sequence + 2,
+                sequence=status.sequence,
                 timestamp_ns=now,
                 arm_targets=self._targets,
             )
@@ -377,7 +378,6 @@ class PolicyProducerNode:
             return {}
 
         self._last_error = None
-        self._publish_status(phase="teleop", ready=True, healthy=True)
         for side, proposal in proposals.items():
             self._put(self._publishers.get(side), proposal.to_dict())
         return proposals
@@ -470,12 +470,25 @@ def main() -> int:
     session = open_session(endpoint)
     router_zid = require_single_router(session, router_zid)
     capabilities = tuple(str(value) for value in config.get("capabilities", ("simulation",)))
+    authority = {}
+    raw_authorities = os.environ.get("TIANJI_AUTHORITIES", "")
+    if raw_authorities:
+        try:
+            authority = json.loads(raw_authorities)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"TIANJI_AUTHORITIES is not valid JSON: {exc}") from exc
+    expected_executor = authority.get("executor_arm", {}) if isinstance(authority, Mapping) else {}
+    expected_source = authority.get("source", {}) if isinstance(authority, Mapping) else {}
     node = PolicyProducerNode(
         session,
         publisher_instance_id=instance,
         router_zid=router_zid,
         producer_id=os.environ.get("TIANJI_PRODUCER_ID", "policy_hold"),
         coordinator_instance_id=coordinator_instance,
+        expected_executor_id=expected_executor.get("logical_id"),
+        expected_executor_instance_id=expected_executor.get("publisher_instance_id"),
+        expected_source_id=expected_source.get("logical_id"),
+        expected_source_instance_id=expected_source.get("publisher_instance_id"),
         control_rate_hz=float(config.get("rate_hz", 90.0)),
         stale_timeout_s=float(config.get("stale_timeout_s", 0.2)),
         maximum_step_rad=float(config.get("maximum_step_rad", 0.0132645022)),

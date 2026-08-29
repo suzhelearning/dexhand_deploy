@@ -118,6 +118,7 @@ class MarvinExecutor:
             freshness_timeout_s=float(options.get("host_status_timeout_s", 1.0)),
             command_timeout_s=float(options["command_timeout_s"]),
             home_tolerance_rad=float(options["home_tolerance_rad"]),
+            expected_authorities=options.get("expected_authorities"),
         )
         self._hardware_safety = HardwareSafetyController(
             left_home_deg=np.degrees(self.robot.left_home_rad),
@@ -333,6 +334,10 @@ class MarvinExecutor:
                         bounded_reconnect = True
                         break
                     self._last_error = "fault reconnect requires fresh bounded returning command"
+                    if time.monotonic() >= deadline:
+                        self._phase = "waiting_for_connection"
+                        self._publish_status()
+                        return False
                     time.sleep(0.02)
                     now = int(self.clock())
                     continue
@@ -643,6 +648,19 @@ def main(argv: list[str] | None = None) -> int:
     if not instance or not coordinator:
         raise RuntimeError("TIANJI_COMPONENT_INSTANCE_ID and TIANJI_COORDINATOR_INSTANCE_ID are required")
     params = {"robot_ip": args.robot_ip}
+    authorities_raw = os.environ.get("TIANJI_AUTHORITIES", "")
+    if authorities_raw:
+        try:
+            authorities = json.loads(authorities_raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"TIANJI_AUTHORITIES is not valid JSON: {exc}") from exc
+        if not isinstance(authorities, Mapping):
+            raise RuntimeError("TIANJI_AUTHORITIES must be a JSON object")
+        params["expected_authorities"] = {
+            role: authorities[role]
+            for role in ("source", "producer_arm")
+            if isinstance(authorities.get(role), Mapping)
+        }
     if args.config:
         import yaml
         configured = yaml.safe_load(open(args.config, encoding="utf-8")) or {}

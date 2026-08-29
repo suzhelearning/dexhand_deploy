@@ -138,16 +138,25 @@ def _verify_checksums(bundle: Path, *, session_required: bool = True) -> dict[st
     if set(listed) != expected:
         missing = sorted(expected - set(listed)); extra = sorted(set(listed) - expected)
         raise AnalysisError(f"checksum set mismatch; missing={missing}, extra={extra}")
-    verified: dict[str, bytes] = {}
+    attestation: dict[str, bytes] = {}
     for name, expected_hash in listed.items():
+        path = bundle / name
+        digest = hashlib.sha256()
         try:
-            payload = (bundle / name).read_bytes()
+            with path.open("rb") as stream:
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    if name == "real-preflight.json":
+                        attestation.setdefault(name, b"")
+                        attestation[name] += chunk
         except OSError as exc:
             raise AnalysisError(f"cannot read checksummed file {name}: {exc}") from exc
-        if hashlib.sha256(payload).hexdigest() != expected_hash:
+        if digest.hexdigest() != expected_hash:
             raise AnalysisError(f"checksum mismatch: {name}")
-        verified[name] = payload
-    return verified
+    return attestation
 def _parse_bound_attestation(raw: bytes) -> dict[str, Any]:
     try:
         value = json.loads(raw.decode("utf-8"))
@@ -365,36 +374,36 @@ def _sequence_metric(sequences: Iterable[Any], instances: Iterable[Any] | None =
 def _folded_protocol_sequence_metric(
     rows: Iterable[tuple[str, int, int, str]],
 ) -> dict[str, int]:
-    """Check global wire ordering while folding legal cross-topic pairs.
+    """Validate allocator points while folding legal paired cross-topic output.
 
-    Coordinators publish both arm commands with one sequence and the IK
-    producer publishes proposal/solved pairs with one sequence.  Those are
-    one protocol point, not duplicate output.  A repeated sequence on the
-    same topic remains an error, as does a rollback after a newer sequence.
+    A producer/coordinator may publish several topics with one allocator
+    sequence in one control tick.  Such cross-topic reuse is legal; repeating
+    a sequence on the same topic is not.  Drops are computed once over the
+    distinct global sequence points, rather than once per topic.
     """
     by_instance: defaultdict[str, list[tuple[int, int, str, int]]] = defaultdict(list)
-    for index, (owner, timestamp, sequence, topic) in enumerate(rows):
-        by_instance[str(owner)].append((int(timestamp), int(sequence), str(topic), index))
+    for index, (instance, order_time, sequence, topic) in enumerate(rows):
+        by_instance[str(instance)].append((int(order_time), int(sequence), str(topic), index))
     drops = 0
     order_errors = 0
     for values in by_instance.values():
         values.sort(key=lambda item: (item[0], item[3]))
-        last_by_topic: dict[str, int] = {}
-        previous: int | None = None
+        last_sequence: int | None = None
+        seen_topic_sequence: set[tuple[str, int]] = set()
         for _timestamp, sequence, topic, _index in values:
-            previous_topic = last_by_topic.get(topic)
-            if previous_topic is not None and sequence <= previous_topic:
+            marker = (topic, sequence)
+            if marker in seen_topic_sequence:
                 order_errors += 1
-            last_by_topic[topic] = sequence
-            if previous is None:
-                previous = sequence
                 continue
-            if sequence < previous:
+            seen_topic_sequence.add(marker)
+            if last_sequence is None:
+                last_sequence = sequence
+                continue
+            if sequence < last_sequence:
                 order_errors += 1
-            elif sequence > previous:
-                drops += max(0, sequence - previous - 1)
-                previous = sequence
-            # Equal sequence from a different topic is the legal folded pair.
+            elif sequence > last_sequence:
+                drops += max(0, sequence - last_sequence - 1)
+                last_sequence = sequence
     return {"drops": drops, "order_errors": order_errors}
 
 
@@ -1060,7 +1069,7 @@ def _validate_pass_gate(bundle: Path, manifest: Mapping[str, Any], case: Mapping
     for stream in evidence["streams"]:
         if not isinstance(rates.get(stream), Mapping) or rates[stream].get("samples", 0) <= 0:
             raise AnalysisError(f"pass requires samples for {stream}")
-    if any(int(value.get("order_errors", 0)) or int(value.get("drops", 0)) for value in rates.values() if isinstance(value, Mapping)) or metrics.get("protocol_order_errors", 0):
+    if any(int(value.get("order_errors", 0)) or int(value.get("drops", 0)) for value in rates.values() if isinstance(value, Mapping)) or metrics.get("protocol_order_errors", 0) or metrics.get("protocol_drops", 0):
         raise AnalysisError("pass cannot contain sequence duplicate/rollback/drop errors")
     for side, value in metrics.get("hard_limit_violations", {}).items():
         if value != 0:

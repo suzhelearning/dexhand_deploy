@@ -17,7 +17,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
-#include <string>
+#include <utility>
 #include <thread>
 
 namespace pico_body_tianji {
@@ -29,6 +29,17 @@ constexpr std::int64_t kFreshnessNs = 500000000;
 std::string env_or(const char *name, const std::string &fallback = {}) {
   const char *value = std::getenv(name);
   return value == nullptr ? fallback : std::string(value);
+}
+
+double env_double(const char *name, double fallback) {
+  const auto value = env_or(name);
+  if (value.empty()) return fallback;
+  std::size_t used = 0;
+  const double result = std::stod(value, &used);
+  if (used != value.size() || !std::isfinite(result)) {
+    throw std::invalid_argument(std::string("invalid numeric environment variable: ") + name);
+  }
+  return result;
 }
 
 std::int64_t now_ns() {
@@ -270,8 +281,30 @@ std::string solved_json(const Target &target, const Eigen::Isometry3d &pose, con
 }  // namespace
 class ArmIkProducer {
 public:
-  ArmIkProducer(zenoh::Session &session, std::string backend, std::string instance, std::string router, std::string coordinator, ArmJointNames names)
-  : session_(session), backend_(std::move(backend)), instance_(std::move(instance)), router_(std::move(router)), coordinator_(std::move(coordinator)) {
+  ArmIkProducer(
+    zenoh::Session &session,
+    std::string backend,
+    std::string instance,
+    std::string router,
+    std::string coordinator,
+    std::string source,
+    std::string source_instance,
+    ArmJointNames names,
+    IkSettings settings,
+    double rate_hz,
+    double freshness_timeout_s)
+  : session_(session), backend_(std::move(backend)), instance_(std::move(instance)),
+    router_(std::move(router)), coordinator_(std::move(coordinator)),
+    source_(std::move(source)), source_instance_(std::move(source_instance)),
+    settings_(std::move(settings)), rate_hz_(rate_hz),
+    freshness_timeout_ns_(static_cast<std::int64_t>(freshness_timeout_s * 1.0e9)),
+    real_capability_(env_or("TIANJI_REQUIRED_CAPABILITY", "simulation") == "real") {
+    if (source_.empty() || source_instance_.empty()) {
+      throw std::invalid_argument("source logical and publisher identities are required");
+    }
+    if (!(rate_hz_ > 0.0) || !(freshness_timeout_ns_ > 0)) {
+      throw std::invalid_argument("IK rate and freshness timeout must be positive");
+    }
     joint_names_ = std::move(names);
     ArmIkBackendOptions options;
     options.urdf_path = env_or("TIANJI_ARM_URDF");
@@ -290,17 +323,17 @@ public:
         zenoh::KeyExpr("tianji/command/arm/" + side),
         [this, index](const zenoh::Sample &sample) { on_command(index, sample.get_payload().as_string()); }, []() {});
     }
-    // Do not expose an authority until every input and output is declared.
-    // If any declaration above throws, the status publisher is destroyed with
-    // this object and no liveliness token or ready status has escaped.
     liveliness_token_ = session_.liveliness_declare_token(zenoh::KeyExpr("tj/live/producer/arm/arm_ik_producer/" + instance_));
     publish_status("");
   }
 
   void run() {
+    const auto period = std::chrono::duration<double>(1.0 / rate_hz_);
+    auto next_tick = Clock::now();
     while (true) {
+      next_tick += std::chrono::duration_cast<Clock::duration>(period);
       tick();
-      std::this_thread::sleep_for(std::chrono::milliseconds(11));
+      std::this_thread::sleep_until(next_tick);
     }
   }
 
@@ -311,12 +344,21 @@ private:
       const std::string expected_side = index == 0 ? "left" : "right";
       if (parsed.side != expected_side) throw std::invalid_argument("target side does not match topic");
       if (parsed.router != router_) throw std::invalid_argument("target router mismatch");
-      if (parsed.timestamp_ns > now_ns()) throw std::invalid_argument("target timestamp is in the future");
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (last_target_sequence_[index].has_value() && parsed.sequence <= *last_target_sequence_[index]) {
-        throw std::invalid_argument("target sequence rollback");
+      if (parsed.source != source_ || parsed.instance != source_instance_) {
+        throw std::invalid_argument("target source authority mismatch");
       }
-      last_target_sequence_[index] = parsed.sequence;
+      if (parsed.timestamp_ns > now_ns()) throw std::invalid_argument("target timestamp is in the future");
+      if (now_ns() - parsed.timestamp_ns > freshness_timeout_ns_) {
+        throw std::invalid_argument("target is stale");
+      }
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (last_target_baseline_[index].has_value()) {
+        const auto [instance, sequence] = *last_target_baseline_[index];
+        if (parsed.instance != instance || parsed.sequence <= sequence) {
+          throw std::invalid_argument("target source instance/sequence rollback");
+        }
+      }
+      last_target_baseline_[index] = std::make_pair(parsed.instance, parsed.sequence);
       targets_[index] = std::move(parsed);
     } catch (const std::exception &error) {
       publish_status(std::string("target rejected: ") + error.what());
@@ -371,19 +413,20 @@ private:
     std::lock_guard<std::mutex> publish_lock(publish_mutex_);
     if (!status_publisher_) return;
     const auto wire_sequence = sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto capabilities = real_capability_ ? "[\"simulation\",\"real\"]" : "[\"simulation\"]";
     status_publisher_->put(zenoh::Bytes("{\"schema_version\":1,\"publisher_instance_id\":" + quote(instance_) + ",\"router_zid\":" + quote(router_) +
       ",\"sequence\":" + std::to_string(wire_sequence) + ",\"timestamp_ns\":" + std::to_string(now_ns()) +
       ",\"component_role\":\"producer_arm\",\"component_id\":\"arm_ik_producer\",\"phase\":\"ready\",\"ready\":true,\"healthy\":" +
-      (error.empty() ? "true" : "false") + ",\"capabilities\":[\"simulation\"],\"error\":" + (error.empty() ? "null" : quote(error)) + ",\"diagnostics\":{}}"));
+      (error.empty() ? "true" : "false") + ",\"capabilities\":" + capabilities + ",\"error\":" + (error.empty() ? "null" : quote(error)) + ",\"diagnostics\":{}}"));
   }
 
   zenoh::Session &session_;
-  std::string backend_, instance_, router_, coordinator_;
+  std::string backend_, instance_, router_, coordinator_, source_, source_instance_;
   IkSettings settings_{};
   std::unique_ptr<ArmIkSolver> solver_;
   ArmJointNames joint_names_{};
   std::array<std::optional<zenoh::Publisher>, 2> proposal_publishers_;
-  std::array<std::optional<std::uint64_t>, 2> last_target_sequence_;
+  std::array<std::optional<std::pair<std::string, std::uint64_t>>, 2> last_target_baseline_;
   std::array<std::optional<zenoh::Publisher>, 2> solved_publishers_;
   std::array<std::optional<zenoh::Subscriber<void>>, 2> target_subscribers_;
   std::array<std::optional<zenoh::Subscriber<void>>, 2> command_subscribers_;
@@ -395,6 +438,9 @@ private:
   std::array<ArmJointVector, 2> current_{ArmJointVector::Zero(), ArmJointVector::Zero()};
   std::mutex mutex_;
   std::atomic<std::uint64_t> sequence_{0};
+  double rate_hz_{90.0};
+  std::int64_t freshness_timeout_ns_{500000000};
+  bool real_capability_{false};
 };
 
 }  // namespace
@@ -409,12 +455,28 @@ int main() {
     const auto instance = read_env("TIANJI_COMPONENT_INSTANCE_ID");
     const auto coordinator = read_env("TIANJI_COORDINATOR_INSTANCE_ID");
     const auto router = read_env("TIANJI_ROUTER_ZID");
-    if (instance.empty() || coordinator.empty() || router.empty()) {
-      throw std::invalid_argument("TIANJI_COMPONENT_INSTANCE_ID, TIANJI_COORDINATOR_INSTANCE_ID and TIANJI_ROUTER_ZID are required");
+    const auto source = read_env("TIANJI_SOURCE_LOGICAL_ID", "source");
+    const auto source_instance = read_env("TIANJI_SOURCE_INSTANCE_ID");
+    if (instance.empty() || coordinator.empty() || router.empty() || source_instance.empty()) {
+      throw std::invalid_argument("component, coordinator, router and source identities are required");
     }
     const auto endpoint = read_env("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447");
     const auto arm_config_path = read_env("TIANJI_ARM_CONFIG");
     const auto joint_names = pico_body_tianji::load_arm_joint_names(arm_config_path);
+    const double rate_hz = pico_body_tianji::env_double("TIANJI_IK_RATE_HZ", 90.0);
+    const double freshness_timeout_s = pico_body_tianji::env_double("TIANJI_IK_FRESHNESS_TIMEOUT_S", 0.5);
+    pico_body_tianji::IkSettings settings;
+    settings.maximum_joint_step_rad = pico_body_tianji::env_double("TIANJI_IK_MAXIMUM_JOINT_STEP_RAD", settings.maximum_joint_step_rad);
+    settings.position_tolerance_m = pico_body_tianji::env_double("TIANJI_IK_POSITION_TOLERANCE_M", settings.position_tolerance_m);
+    settings.orientation_tolerance_rad = pico_body_tianji::env_double("TIANJI_IK_ORIENTATION_TOLERANCE_RAD", settings.orientation_tolerance_rad);
+    settings.control_period_s = 1.0 / rate_hz;
+    settings.official_worker_timeout_ms = static_cast<int>(pico_body_tianji::env_double("TIANJI_IK_WORKER_TIMEOUT_MS", settings.official_worker_timeout_ms));
+    settings.official_worker_restart_attempts = static_cast<int>(pico_body_tianji::env_double("TIANJI_IK_WORKER_RESTART_ATTEMPTS", settings.official_worker_restart_attempts));
+    if (settings.maximum_joint_step_rad <= 0.0 || settings.position_tolerance_m <= 0.0 ||
+        settings.orientation_tolerance_rad <= 0.0 || settings.official_worker_timeout_ms <= 0 ||
+        settings.official_worker_restart_attempts < 0) {
+      throw std::invalid_argument("invalid canonical IK producer settings");
+    }
     if (endpoint.find('\"') != std::string::npos) throw std::invalid_argument("invalid router endpoint");
     auto config = zenoh::Config::create_default();
     config.insert_json5("mode", "\"client\"");
@@ -425,7 +487,9 @@ int main() {
       throw std::runtime_error("expected exactly one router with matching TIANJI_ROUTER_ZID");
     }
     pico_body_tianji::ArmIkProducer node(
-      session, read_env("TIANJI_IK_BACKEND", "pinocchio_cpp"), instance, router, coordinator, joint_names);
+      session, read_env("TIANJI_IK_BACKEND", "pinocchio_cpp"), instance, router,
+      coordinator, source, source_instance, joint_names, settings, rate_hz,
+      freshness_timeout_s);
     node.run();
   } catch (const std::exception &error) {
     std::cerr << "arm_ik_producer failed: " << error.what() << std::endl;

@@ -40,10 +40,15 @@ printf '%s\n' "managed test router: endpoint=${router_endpoint} zid=${router_zid
 
 # doctor consumes this endpoint; it must not start a second router.
 "${SCRIPT_DIR}/doctor.sh"
-PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${PYTHONPATH:-}" python -m unittest \
-  tests.test_task8_config_launcher \
-  tests.test_protocol \
-  tests.test_session_h5 \
-  tests.test_session_recorder \
-  tests.test_session_replay \
-  tests.test_policy_producer
+PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${PYTHONPATH:-}" python - <<'PY'
+import sys
+import unittest
+
+loader = unittest.defaultTestLoader
+suite = loader.discover("tests", pattern="test*.py")
+# e2e_* is intentionally outside unittest's test*.py convention, but the
+# canonical Wuji transport/process smoke must remain in the product suite.
+suite.addTests(loader.loadTestsFromName("tests.e2e_wuji_hand2_dry"))
+result = unittest.TextTestRunner(verbosity=2).run(suite)
+raise SystemExit(0 if result.wasSuccessful() else 1)
+PY

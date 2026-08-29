@@ -2,9 +2,22 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 from ...zenoh_util import open_session, require_single_router
 from .node import WujiHandExecutor
+
+
+def _native_bridge() -> Path | None:
+    configured = os.environ.get("TIANJI_WUJI_NATIVE_BRIDGE")
+    candidates = [Path(configured)] if configured else []
+    root = Path(os.environ.get("PICO_BODY_TIANJI_BUNDLE_ROOT", Path(__file__).resolve().parents[5]))
+    candidates.extend((
+        root / "staging/ik/lib/pico_body_tianji/wuji_hand2_bridge",
+        root / "runtime/pico_body_tianji/lib/pico_body_tianji/wuji_hand2_bridge.bin",
+        root / "build/ik/wuji_hand2_bridge",
+    ))
+    return next((path for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -14,6 +27,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if not args.dry_run:
+        native = _native_bridge()
+        if native is None:
+            print(
+                "real Wuji executor requires native wuji_hand2_bridge and a connected SDK device; "
+                "refusing Python no-op fallback",
+                file=__import__("sys").stderr,
+            )
+            return 1
+        if args.config:
+            os.environ["TIANJI_WUJI_CONFIG"] = str(Path(args.config).resolve())
+        os.execv(str(native), [str(native), "--mode", args.mode, "--side", args.side])
+        raise AssertionError("os.execv returned unexpectedly")
     session = open_session()
     executor = None
     try:

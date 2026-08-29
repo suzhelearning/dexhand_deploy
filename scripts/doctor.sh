@@ -83,7 +83,24 @@ for file in "${required_files[@]}"; do
   fi
 done
 runtime_bin="${PROJECT_PREFIX}/lib/pico_body_tianji"
-required_programs=(arm_ik_producer tianji_official_ik_probe tianji_official_ik_worker wuji_hand2_bridge pico_controller_source mocap_live mocap_h5_replay target_replay joint_replay session_recorder arm_command_coordinator policy_hold_producer mujoco_executor marvin_executor wuji_hand2_executor trace_metrics real_diagnostic h5_wrist_diagnostic joint_watcher)
+allowed_programs=(
+  arm_ik_producer tianji_official_ik_probe tianji_official_ik_worker
+  wuji_hand2_bridge pico_controller_source mocap_live mocap_h5_replay
+  target_replay joint_replay session_recorder arm_command_coordinator
+  policy_hold_producer mujoco_executor marvin_executor wuji_hand2_executor
+  trace_metrics real_diagnostic h5_wrist_diagnostic joint_watcher
+  mocap_calibration
+)
+for artifact in "${runtime_bin}"/*; do
+  [[ -e "${artifact}" ]] || continue
+  program="$(basename -- "${artifact}")"
+  program="${program%.bin}"
+  case " ${allowed_programs[*]} " in
+    *" ${program} "*) ;;
+    *) printf '错误：runtime 存在未授权的非 canonical entry: %s\n' "${artifact}" >&2; exit 1 ;;
+  esac
+done
+required_programs=("${allowed_programs[@]}")
 for program in "${required_programs[@]}"; do
   if [[ ! -x "${runtime_bin}/${program}" && ! -x "${runtime_bin}/${program}.bin" ]]; then
     printf '错误：runtime 缺少 canonical entry: %s\n' "${program}" >&2

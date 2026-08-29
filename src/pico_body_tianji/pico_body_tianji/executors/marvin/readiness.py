@@ -46,6 +46,7 @@ class MarvinReadiness:
         freshness_timeout_s: float = 1.0,
         command_timeout_s: float = 0.2,
         home_tolerance_rad: float = np.deg2rad(1.0),
+        expected_authorities: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         if not router_zid:
             raise ValueError("router_zid is required")
@@ -61,12 +62,18 @@ class MarvinReadiness:
         self.freshness_timeout_ns = int(float(freshness_timeout_s) * 1e9)
         self.command_timeout_ns = int(float(command_timeout_s) * 1e9)
         self.home_tolerance_rad = float(home_tolerance_rad)
+        self.expected_authorities = {
+            str(role): dict(value)
+            for role, value in (expected_authorities or {}).items()
+            if isinstance(value, Mapping) and value.get("enabled", True)
+        }
         self._components: dict[tuple[str, str], _Timed] = {}
         self._component_instances: dict[tuple[str, str], str] = {}
         self._commands: dict[str, _Timed] = {}
         self._command_baseline: dict[str, tuple[str, int]] = {}
         self._state: _Timed | None = None
         self._arm_state: _Timed | None = None
+        self.last_error = ""
     @staticmethod
     def _received(value: int | float | None) -> int:
         if value is None:
@@ -79,7 +86,6 @@ class MarvinReadiness:
     def _fresh(self, value: _Timed | None, now_ns: int, timeout_ns: int | None = None) -> bool:
         timeout_ns = self.freshness_timeout_ns if timeout_ns is None else timeout_ns
         return value is not None and 0 <= now_ns - value.received_ns <= timeout_ns
-
     def observe_component(self, status: ComponentStatus | Mapping[str, Any], *, received_ns: int | float | None = None) -> None:
         try:
             status = status if isinstance(status, ComponentStatus) else ComponentStatus.from_dict(status)
@@ -89,6 +95,15 @@ class MarvinReadiness:
         if status.router_zid != self.router_zid:
             self.last_error = "component router_zid mismatch"
             return
+        expected = self.expected_authorities.get(status.component_role)
+        if expected is not None:
+            if (
+                str(expected.get("logical_id", "")) != status.component_id
+                or str(expected.get("publisher_instance_id", "")) != status.publisher_instance_id
+                or str(expected.get("router_zid", self.router_zid)) != status.router_zid
+            ):
+                self.last_error = f"component authority mismatch for {status.component_role}/{status.component_id}"
+                return
         key = (status.component_role, status.component_id)
         previous = self._component_instances.get(key)
         if previous is not None and previous != status.publisher_instance_id:

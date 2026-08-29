@@ -23,6 +23,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--active-hand-sides", default="")
     parser.add_argument("--inactive-hand-sides", default="left,right")
     parser.add_argument("--record", default=None, help="rejected: replay profiles cannot be recorded")
+    parser.add_argument(
+        "--auto-start",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="headless mode requests coordinator authorization before replay (default: true)",
+    )
+    parser.add_argument("--pause-after", type=float, default=None, help="pause after this many seconds")
+    parser.add_argument("--resume-after", type=float, default=None, help="resume after this many seconds")
+    parser.add_argument("--return-after", type=float, default=None, help="request return after this many seconds")
     return parser
 
 def _sides(raw: str) -> tuple[str, ...]:
@@ -88,8 +97,30 @@ def main(argv: list[str] | None = None) -> int:
                 **common,
             )
         node.start()
+        started_at = time.monotonic()
+        paused = False
+        returned = False
+        if args.auto_start:
+            try:
+                node.request_start()
+            except (TimeoutError, RuntimeError) as exc:
+                raise SystemExit(f"replay start authorization failed: {exc}") from exc
         while True:
+            elapsed = time.monotonic() - started_at
+            if args.pause_after is not None and not paused and elapsed >= args.pause_after:
+                node.pause()
+                paused = True
+            if args.resume_after is not None and paused and elapsed >= args.resume_after:
+                node.resume()
+                paused = False
+            if args.return_after is not None and not returned and elapsed >= args.return_after:
+                node.request_return()
+                returned = True
+            node.tick()
+            if node.phase in {"armed", "fault"} and (returned or getattr(node, "_return_requested", False)):
+                break
             time.sleep(1.0 / rate)
+        return 0
     except KeyboardInterrupt:
         return 0
     finally:

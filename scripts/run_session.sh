@@ -124,16 +124,28 @@ if [[ "${source_id}" == h5_replay ]]; then
     exit 2
   }
   if [[ "${hand_mode}" == auto ]]; then
-    if pixi run python - "${input_path}" <<'PY'
+    if PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${PYTHONPATH:-}" pixi run python - "${input_path}" "${active_hand_sides}" <<'PY'
 import sys
-import h5py
-with h5py.File(sys.argv[1], "r") as handle:
-    found = any("wuji2_joints" in str(key) for key in handle.keys())
-    def visit(name, obj):
-        nonlocal_found[0] |= "wuji2_joints" in name
-    nonlocal_found = [found]
-    handle.visititems(visit)
-    raise SystemExit(0 if nonlocal_found[0] else 1)
+import numpy as np
+from pico_body_tianji.sources.mocap.h5 import load_mocap_h5
+recording = load_mocap_h5(sys.argv[1])
+sides = tuple(side for side in sys.argv[2].split(",") if side)
+if not sides:
+    raise SystemExit("auto hand mode requires at least one active hand side")
+for side in sides:
+    if side not in {"left", "right"}:
+        raise SystemExit(f"invalid active hand side: {side}")
+    if side != "right":
+        raise SystemExit("h5_replay canonical hand publisher supports only active right side")
+    hand = recording.hands[side]
+    joints = hand.wuji2_joints
+    valid = hand.valid
+    if joints is None or joints.shape != (recording.frame_count, 20):
+        raise SystemExit(f"active hand side {side} has no canonical wuji2_joints dataset")
+    if not bool(valid.any()):
+        raise SystemExit(f"active hand side {side} has no valid frames")
+    if not bool(np.isfinite(joints[valid]).all()):
+        raise SystemExit(f"active hand side {side} has nonfinite direct joint frames")
 PY
     then hand_mode=direct
     else hand_mode=retarget
@@ -290,7 +302,11 @@ launch() {
   local label="$1"; shift
   setsid env "$@" >"${TELEOP_RUNTIME_DIR}/${run_id}-${label}.log" 2>&1 &
   local pid=$!
-  register_teleop_process_group "${pid}" "${label}" 5
+  if ! register_teleop_process_group "${pid}" "${label}" 5; then
+    kill -TERM -- "-${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+    return 1
+  fi
   for _ in {1..20}; do
     if ! kill -0 "${pid}" 2>/dev/null; then
       printf '错误：组件 %s 在启动阶段退出。\n' "${label}" >&2
@@ -298,7 +314,12 @@ launch() {
     fi
     sleep 0.1
   done
+  child_pids+=("${pid}")
+  child_labels+=("${label}")
 }
+declare -a child_pids=()
+declare -a child_labels=()
+session_shutdown_requested=false
 recorder_instance=""
 [[ -n "${record_path}" ]] && recorder_instance="${TIANJI_RECORDER_INSTANCE_ID:-$(new_instance_id)}"
 base_env=(
@@ -315,9 +336,12 @@ base_env=(
   "TIANJI_HAND_PRODUCER_ID=${hand_producer_id}"
   "TIANJI_HAND_PRODUCER_INSTANCE_ID=${hand_producer_instance}"
   "TIANJI_HAND_INPUT_INSTANCE_ID=${hand_input_instance}"
+  "TIANJI_SOURCE_LOGICAL_ID=${source_id}"
+  "TIANJI_SOURCE_INSTANCE_ID=${source_instance}"
   "TIANJI_ARM_PRODUCER_INSTANCE_ID=${arm_producer_instance}"
   "TIANJI_AUTHORITIES=${TIANJI_AUTHORITIES}"
   "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID=${TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID:-}"
+  "TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID=${TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID:-${TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID:-}}"
   "TIANJI_REAL_PREFLIGHT_FD=${TIANJI_REAL_PREFLIGHT_FD:-}"
   "TIANJI_REAL_PREFLIGHT_SCANNER_FD=${TIANJI_REAL_PREFLIGHT_SCANNER_FD:-}"
 )
@@ -335,6 +359,14 @@ if [[ -n "${record_path}" ]]; then
   launch recorder "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${recorder_instance}" TIANJI_RECORD_PATH="${record_path}" TIANJI_RECORD_SOURCE_TYPE="${source_id}" TIANJI_RECORDING_CONFIG="$(canonical_config recording/session.yaml)" python -m pico_body_tianji.recording.session_recorder
 fi
 launch coordinator "${base_env[@]}" TIANJI_COORDINATOR_INSTANCE_ID="${coordinator_id}" TIANJI_COORDINATOR_CONFIG="$(canonical_config "${coordinator_config}")" python "${BUNDLE_ROOT}/src/pico_body_tianji/scripts/arm_command_coordinator"
+if [[ "${profile}" == h5_real && "${hand_overlay}" == mujoco ]]; then
+  overlay_entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/h5_wrist_diagnostic"
+  [[ -x "${overlay_entry}" ]] || {
+    printf '错误：h5_real 要求 passive Frame0 overlay，但入口不存在：%s\n' "${overlay_entry}" >&2
+    exit 1
+  }
+  launch h5_wrist_overlay "${base_env[@]}" python "${overlay_entry}" "${input_path}" --viewer
+fi
 source_args=("${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${source_instance}" TIANJI_SOURCE_INSTANCE_ID="${source_instance}" TIANJI_PRODUCER_INSTANCE_ID="${arm_producer_instance:-${hand_producer_instance}}" bash "${SCRIPT_DIR}/run_source.sh" --source "${source_id}" --config "$(canonical_config "${source_config}")")
 if [[ "${source_id}" == h5_replay ]]; then
   source_args+=(-- "${input_path}")
@@ -390,4 +422,20 @@ else
 fi
 printf '%s\n' "session ${profile} started; router_zid=${router_zid}; run_id=${run_id}"
 printf '%s\n' "session_startup_complete run_id=${run_id}; profile=${profile}; router_zid=${router_zid}"
-wait
+while true; do
+  for index in "${!child_pids[@]}"; do
+    pid="${child_pids[index]}"
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      child_status=0
+      wait "${pid}" || child_status=$?
+      session_shutdown_requested=true
+      if ((child_status == 0)); then
+        printf '组件 %s 已受控退出，开始反序清理。\n' "${child_labels[index]}" >&2
+        exit 0
+      fi
+      printf '错误：组件 %s 在运行期间异常退出 (status=%s)，开始反序清理。\n' "${child_labels[index]}" "${child_status}" >&2
+      exit "${child_status}"
+    fi
+  done
+  sleep 0.1
+done

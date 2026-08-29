@@ -597,6 +597,61 @@ def _launcher_startup_timeout(manifest: Mapping[str, Any]) -> float:
         }
     )
     return max(15.0, float(max(1, components) * 3))
+def _executor_ready_timeout(manifest: Mapping[str, Any]) -> float:
+    """Bound the readiness wait from the profile's safety configuration."""
+    profile = _profile_config(str(manifest.get("profile", "")))
+    values = [float(_launcher_startup_timeout(manifest))]
+    config_root = canonical_config_root()
+    for config_name in (profile.get("coordinator_config"), profile.get("arm_executor_config"), "executors/wuji_hand2.yaml"):
+        if not config_name:
+            continue
+        try:
+            config = yaml.safe_load((config_root / str(config_name)).read_text(encoding="utf-8")) or {}
+            for key in ("home_minimum_duration_s", "enable_timeout_s", "connection_wait_s", "hand_return_timeout_s"):
+                value = float(config.get(key, 0.0))
+                if math.isfinite(value) and value > 0.0:
+                    values.append(value)
+        except (OSError, TypeError, ValueError, yaml.YAMLError):
+            continue
+    # Include a scheduling margin and one extra status period per configured
+    # component; there is no fixed post-marker five-second shortcut.
+    return max(values) + max(2.0, float(len(manifest.get("authority_contract", []))) * 0.5)
+
+
+def _latest_ready_executor(rows: list[Mapping[str, Any]], executor_id: str, manifest: Mapping[str, Any]) -> bool:
+    expected = [
+        entry for entry in manifest.get("authority_contract", [])
+        if str(entry.get("publisher_instance_id", "")) == executor_id
+        and entry.get("component_role") in {"executor_arm", "executor_hand"}
+    ]
+    candidates = [
+        row for row in rows
+        if str(row.get("publisher_instance_id", "")) == executor_id
+        and row.get("component_role") in {"executor_arm", "executor_hand"}
+    ]
+    if not candidates or not expected:
+        return False
+    latest = max(candidates, key=lambda row: int(row.get("sequence", -1)) if isinstance(row.get("sequence"), int) else -1)
+    authority = expected[0]
+    diagnostics = latest.get("diagnostics")
+    side = diagnostics.get("side") if isinstance(diagnostics, Mapping) else latest.get("side")
+    if (
+        latest.get("component_role") != authority.get("component_role")
+        or latest.get("component_id") != authority.get("logical_id")
+        or (authority.get("side") is not None and side != authority.get("side"))
+    ):
+        return False
+    timestamp = latest.get("timestamp_ns")
+    if not isinstance(timestamp, int) or isinstance(timestamp, bool):
+        return False
+    now = monotonic_ns()
+    if timestamp > now or now - timestamp > int(_executor_ready_timeout(manifest) * 1e9):
+        return False
+    return (
+        latest.get("router_zid") == manifest.get("router_zid")
+        and latest.get("ready") is True
+        and latest.get("healthy") is True
+    )
 
 
 
@@ -791,19 +846,28 @@ def _prerequisites_passed(root: Path, prerequisites: Iterable[str]) -> tuple[boo
     return not missing, missing
 
 
-def _h5_contains_hand_joints(path: Path | None) -> bool:
+def _h5_contains_hand_joints(path: Path | None, active_sides: Iterable[str] = ("right",)) -> bool:
+    """Return true only when every active side has valid direct-joint frames."""
     if path is None or not path.is_file():
         return False
     try:
-        import h5py
-        with h5py.File(path, "r") as file:
-            found = False
-            def visit(name: str, _obj: Any) -> None:
-                nonlocal found
-                found = found or "wuji2_joints" in name
-            file.visititems(visit)
-            return found
-    except (OSError, ModuleNotFoundError):
+        from pico_body_tianji.sources.mocap.h5 import load_mocap_h5
+        recording = load_mocap_h5(path)
+        import numpy as np
+        sides = tuple(str(side) for side in active_sides)
+        if not sides:
+            return False
+        for side in sides:
+            if side not in {"left", "right"}:
+                return False
+            joints = recording.hands[side].wuji2_joints
+            valid = recording.hands[side].valid
+            if joints is None or joints.shape != (recording.frame_count, 20) or not bool(valid.any()):
+                return False
+            if not bool(np.isfinite(joints[valid]).all()):
+                return False
+        return True
+    except (OSError, ValueError, ModuleNotFoundError, ImportError):
         return False
 
 
@@ -813,7 +877,7 @@ def _resolved_hand_mode(case: Mapping[str, Any], profile: str, input_path: Path 
         return mode
     if profile == "target_replay_sim":
         return "retarget"
-    return "direct" if _h5_contains_hand_joints(input_path) else "retarget"
+    return "direct" if _h5_contains_hand_joints(input_path, case.get("active_sides", ("right",))) else "retarget"
 
 
 def _instance_map(manifest: Mapping[str, Any], key: str) -> dict[str, str]:
@@ -1039,18 +1103,18 @@ def _managed_stop(
         timeout_s=_launcher_startup_timeout(manifest),
         process=process,
     )
-    ready_deadline = time.monotonic() + 5.0
+    ready_deadline = time.monotonic() + _executor_ready_timeout(manifest)
     executor_ready = False
     if startup_ready:
         while time.monotonic() < ready_deadline:
             before_status_rows = _records("status.jsonl")
-            executor_ready = all(any(
-                str(row.get("publisher_instance_id", "")) == executor_id
-                and row.get("component_role") in {"executor_arm", "executor_hand"}
-                and row.get("ready") is True and row.get("healthy") is True
-                for row in before_status_rows
-            ) for executor_id in ids)
+            executor_ready = all(
+                _latest_ready_executor(before_status_rows, executor_id, manifest)
+                for executor_id in ids
+            )
             if executor_ready:
+                break
+            if process is not None and process.poll() is not None:
                 break
             time.sleep(0.05)
     if not executor_ready:

@@ -93,8 +93,30 @@ case "${executor_id}" in
     ;;
   wuji_hand2)
     [[ "${mode}" == direct || "${mode}" == retarget ]] || { printf '%s\n' 'Wuji executor requires --mode direct|retarget' >&2; exit 2; }
-    args=(--mode "${mode}" --side "${side}" --config "${config}")
-    [[ "${required_capability}" == simulation ]] && args+=(--dry-run)
-    exec python "${entry}" "${args[@]}" "$@"
+    export TIANJI_WUJI_CONFIG="${config}"
+    rate="$(
+      pixi run python - "${config}" <<'PY'
+import sys
+import yaml
+value = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+print(value.get("rate_hz", 100))
+PY
+    )"
+    args=(--mode "${mode}" --side "${side}" --rate "${rate}")
+    if [[ "${required_capability}" == simulation ]]; then
+      exec python "${entry}" "${args[@]}" --dry-run "$@"
+    fi
+    native=""
+    for candidate in \
+      "${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/wuji_hand2_bridge" \
+      "${BUNDLE_ROOT}/runtime/pico_body_tianji/lib/pico_body_tianji/wuji_hand2_bridge.bin" \
+      "${PROJECT_PREFIX}/lib/pico_body_tianji/wuji_hand2_bridge"; do
+      if [[ -x "${candidate}" ]]; then native="${candidate}"; break; fi
+    done
+    if [[ -z "${native}" ]]; then
+      printf '%s\n' '错误：real Wuji executor requires the native wuji_hand2_bridge with SDK support; refusing Python no-op fallback.' >&2
+      exit 1
+    fi
+    exec "${native}" "${args[@]}" "$@"
     ;;
 esac

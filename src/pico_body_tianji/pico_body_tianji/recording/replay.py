@@ -365,8 +365,6 @@ class TargetReplaySource(_ReplayLifecycle):
         for side in self.active_hand_sides:
             if not self._hands[side]: raise ValueError(f"recording has no active hand stream: {side}")
         self._check_recorded_times()
-        if self.reader.attrs.get("router_zid") != router_zid:
-            raise ValueError("recording router_zid does not match replay router")
         super().__init__(session=session, source="target_replay", source_publisher_instance_id=publisher_instance_id, router_zid=router_zid, expected_coordinator_instance_id=expected_coordinator_instance_id, rate_hz=rate_hz, clock=clock, session_client=session_client)
         self._publisher = TargetPublisher(session, source="target_replay", publisher_instance_id=publisher_instance_id, router_zid=router_zid, clock=clock, allocator=self._source_allocator) if session is not None else None
         self._register_liveliness(f"{_TARGET_LIVELINESS}/{publisher_instance_id}")
@@ -470,8 +468,6 @@ class JointReplayNode(_ReplayLifecycle):
             if not self._arms[side]: raise ValueError(f"recording has no active arm command stream: {side}")
         for side in self.active_hand_sides:
             if not self._hands[side]: raise ValueError(f"recording has no active hand command stream: {side}")
-        if self.reader.attrs.get("router_zid") != router_zid:
-            raise ValueError("recording router_zid does not match replay router")
         super().__init__(session=session, source="joint_replay", source_publisher_instance_id=source_publisher_instance_id, router_zid=router_zid, expected_coordinator_instance_id=expected_coordinator_instance_id, rate_hz=rate_hz, clock=clock, session_client=session_client)
         self.producer_publisher_instance_id = producer_publisher_instance_id; self._producer_allocator = SequenceAllocator(); self._producer_publishers: dict[str, ZenohPub] = {}
         self._source_liveliness = f"{_JOINT_SOURCE_LIVELINESS}/{source_publisher_instance_id}"; self._producer_liveliness = f"{_JOINT_PRODUCER_LIVELINESS}/{producer_publisher_instance_id}"

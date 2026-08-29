@@ -489,7 +489,7 @@ void WujiHand2Bridge::publish_status(const std::string &error) {
     if (params_.mode == "retarget") {
       component("producer_hand", params_.logical_producer);
     }
-    component("executor_hand", params_.side);
+    component("executor_hand", "wuji_" + params_.side);
   }
 }
 int WujiHand2Bridge::run() {
@@ -518,7 +518,7 @@ int WujiHand2Bridge::run() {
   }
   executor_live_token_ = std::make_unique<zenoh::LivelinessToken>(
     session_.liveliness_declare_token(zenoh::KeyExpr(
-      "tj/live/executor/hand/" + params_.side + "/" + params_.instance)));
+      "tj/live/executor/hand/wuji_" + params_.side + "/" + params_.instance)));
 
   std::unique_ptr<WujiRetargeter> retargeter;
   if (params_.mode == "retarget") {

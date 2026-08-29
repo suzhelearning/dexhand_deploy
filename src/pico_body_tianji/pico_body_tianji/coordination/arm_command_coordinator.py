@@ -320,6 +320,7 @@ class ArmCommandCoordinator:
         return timed is not None and 0 <= now_ns - timed.received_ns <= int(self.config["state_timeout_s"] * 1e9)
 
     def _domain_ready(self, role: str, now_ns: int) -> bool:
+        required_capability = self.profile.get("required_capability", "simulation")
         side_map = self.authorities is not None and role in {"producer_hand", "executor_hand"} and isinstance(self.authorities.get(role), Mapping) and "logical_id" not in self.authorities[role]
         if side_map:
             for side in self._profile_hand_sides():
@@ -331,7 +332,12 @@ class ArmCommandCoordinator:
                     and expected is not None
                     and self._matches_authority(role, entry_id, timed.value.publisher_instance_id, timed.value.router_zid, side=side)
                 ]
-                if len(matches) != 1 or not matches[0].value.ready or not matches[0].value.healthy:
+                if (
+                    len(matches) != 1
+                    or not matches[0].value.ready
+                    or not matches[0].value.healthy
+                    or required_capability not in matches[0].value.capabilities
+                ):
                     return False
             return True
         entries = [timed for (entry_role, _), timed in self._statuses.items() if entry_role == role and self._fresh(timed, now_ns)]
@@ -340,7 +346,7 @@ class ArmCommandCoordinator:
         status = entries[0].value
         if not self._matches_authority(role, status.component_id, status.publisher_instance_id, status.router_zid):
             return False
-        return status.ready and status.healthy and self.profile.get("required_capability", "simulation") in status.capabilities
+        return status.ready and status.healthy and required_capability in status.capabilities
     def update_component(self, status: ComponentStatus | Mapping[str, Any], *, received_ns: int | None = None) -> None:
         try:
             parsed = status if isinstance(status, ComponentStatus) else ComponentStatus.from_dict(status)
@@ -685,27 +691,6 @@ class ArmCommandCoordinator:
                 return
             if any(abs(x - old) > self.config["maximum_command_step_rad"] for x, old in zip(candidate.position_rad, self._safe_command[side])):
                 self._enter_fault("proposal exceeds maximum command step")
-    def _check_teleop_health(self, now_ns: int) -> None:
-        if self._state.state != "teleop":
-            return
-        for role in ("source", "producer_arm"):
-            if not self._domain_ready(role, now_ns):
-                self._enter_returning(f"{role} stale or unhealthy", now_ns)
-                return
-        if not self._domain_ready("executor_arm", now_ns) or not self._fresh(self._arm_state, now_ns):
-            self._enter_fault("executor arm/state stale or unhealthy")
-            return
-        if self._hand_enabled():
-            if not self._domain_ready("producer_hand", now_ns):
-                self._enter_returning("producer_hand stale or unhealthy", now_ns)
-                return
-            if not all(self._fresh(self._hand_status.get(side), now_ns) and self._hand_status[side].value.healthy for side in self._profile_hand_sides()):
-                self._enter_fault("hand executor status stale or unhealthy")
-                return
-        for side in self.profile.get("active_sides", ("left", "right")):
-            if not self._fresh(self._proposals.get(side), now_ns):
-                self._enter_returning("arm proposal timeout", now_ns)
-                return
 
     def tick(self, *, now_ns: int | None = None) -> dict[str, ArmJointCommand]:
         now_ns = self.clock() if now_ns is None else int(now_ns)
