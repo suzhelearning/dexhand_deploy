@@ -30,9 +30,10 @@ from pico_body_tianji.config_loader import canonical_config_root
 from scripts.validation.run_case import BUNDLE_SCHEMA, BUNDLE_VERSION, MATRIX_PATH, load_matrix, sha256_file, sha256_tree
 
 REQUIRED_FILES = frozenset({
-    "manifest.yaml", "session.h5", "status.jsonl", "operator_events.jsonl",
+    "manifest.yaml", "status.jsonl", "operator_events.jsonl",
     "liveliness.jsonl", "protocol.jsonl", "operator_result.yaml", "checksums.sha256",
 })
+SESSION_OPTIONAL_PROFILES = frozenset({"target_replay_sim", "joint_replay_sim", "acquisition_live"})
 OUTCOMES = frozenset({"pass", "fail", "aborted"})
 
 
@@ -80,7 +81,7 @@ def _bundle_paths(root: Path) -> list[Path]:
     return paths
 
 
-def _verify_checksums(bundle: Path) -> None:
+def _verify_checksums(bundle: Path, *, session_required: bool = True) -> None:
     checksum = bundle / "checksums.sha256"
     try:
         lines = checksum.read_text(encoding="utf-8").splitlines()
@@ -98,7 +99,10 @@ def _verify_checksums(bundle: Path) -> None:
         if name in listed or not path.is_file() or name == "checksums.sha256" or Path(name).is_absolute() or ".." in Path(name).parts:
             raise AnalysisError(f"invalid checksum path: {name}")
         listed[name] = parts[0].lower()
-    expected = set(REQUIRED_FILES - {"checksums.sha256"}) | {path.relative_to(bundle).as_posix() for path in (bundle / "logs").glob("*") if path.is_file()}
+    expected = set(REQUIRED_FILES - {"checksums.sha256"})
+    if session_required:
+        expected.add("session.h5")
+    expected |= {path.relative_to(bundle).as_posix() for path in (bundle / "logs").glob("*") if path.is_file()}
     if set(listed) != expected:
         missing = sorted(expected - set(listed)); extra = sorted(set(listed) - expected)
         raise AnalysisError(f"checksum set mismatch; missing={missing}, extra={extra}")
@@ -278,25 +282,69 @@ def _metrics_from_h5(file: h5py.File, manifest: Mapping[str, Any]) -> dict[str, 
         else:
             command_velocity[side] = None
         saturation[side] = int(np.sum((positions <= lower + 1e-9) | (positions >= upper - 1e-9))) if len(lower) == positions.shape[1] else 0
-    target_solved = {"samples": 0, "max_position_error_m": None, "max_orientation_error_rad": None, "note": "solved pose is not stored in session-v1"}
+    target_solved = {"samples": 0, "max_position_error_m": "unavailable", "max_orientation_error_rad": "unavailable", "note": "session-v1 stores no solved-pose stream"}
     events = _stream_metric(file, "meta/session_events", None)
     event_states: list[str] = []
+    event_times: list[int] = []
     if "meta/session_events/state" in file:
         event_states = [value.decode() if isinstance(value, bytes) else str(value) for value in file["meta/session_events/state"][:]]
+        event_times = [int(value) for value in file["meta/session_events/time_ns"][:]]
     home_time = None
-    if "teleop" in event_states and "idle" in event_states:
-        home_time = events.get("duration_s")
+    if "teleop" in event_states:
+        start_index = event_states.index("teleop")
+        for index in range(start_index + 1, len(event_states)):
+            if event_states[index] == "idle":
+                home_time = max(0.0, (event_times[index] - event_times[start_index]) / 1e9)
+                break
+    tracking_values: list[float] = []
+    if "joint/state/arm" in file:
+        state_group = file["joint/state/arm"]
+        state_times = np.asarray(state_group["time_ns"][:], dtype=np.int64)
+        state_positions = np.asarray(state_group["position_rad"][:], dtype=float)
+        for side_index, side in enumerate(("left", "right")):
+            command_path = f"joint/command/arm/{side}"
+            if command_path not in file or not len(state_times):
+                continue
+            command_group = file[command_path]
+            command_times = np.asarray(command_group["time_ns"][:], dtype=np.int64)
+            command_positions = np.asarray(command_group["position_rad"][:], dtype=float)
+            for timestamp, position in zip(command_times, command_positions):
+                state_index = int(np.searchsorted(state_times, timestamp, side="left"))
+                state_index = min(state_index, len(state_times) - 1)
+                state_position = state_positions[state_index, side_index * 7:(side_index + 1) * 7]
+                error = np.asarray(position) - state_position
+                if np.isfinite(error).all():
+                    tracking_values.append(float(np.max(np.abs(error))))
+    hand_zero_times: list[float] = []
+    hand_config_path = canonical_config_root() / "robot" / "wuji_hand2.yaml"
+    hand_config = yaml.safe_load(hand_config_path.read_text(encoding="utf-8")) if hand_config_path.is_file() else {}
+    zero = np.asarray(hand_config.get("zero_position_rad", []), dtype=float)
+    tolerance = np.asarray(hand_config.get("zero_tolerance_rad", []), dtype=float)
+    for side in ("left", "right"):
+        path = f"joint/state/hand/{side}"
+        if path not in file or not len(zero) or not len(tolerance):
+            continue
+        group = file[path]
+        positions = np.asarray(group["position_rad"][:], dtype=float)
+        times = np.asarray(group["time_ns"][:], dtype=np.int64)
+        for index, position in enumerate(positions):
+            if len(position) == len(zero) and np.isfinite(position).all() and np.all(np.abs(position - zero) <= tolerance):
+                hand_zero_times.append(float(times[index]) / 1e9)
+                break
+    tracking = {
+        "samples": len(tracking_values),
+        "max_error_rad": max(tracking_values) if tracking_values else "unavailable",
+    }
     return {
         "rates": streams,
         "target_to_solved_error": target_solved,
         "joint_step_rad": command_step,
         "joint_velocity_rad_s": command_velocity,
         "saturation_count": saturation,
-        "proposal_rejections": 0,
-        "command_feedback_tracking": {"samples": 0, "max_error_rad": None, "note": "feedback pairing is unavailable in empty or non-paired streams"},
+        "proposal_rejections": None,
+        "command_feedback_tracking": tracking,
         "home_time_s": home_time,
-        "hand_zero_time_s": None,
-        "fault_reasons": [],
+        "hand_zero_time_s": max(hand_zero_times) if hand_zero_times else "unavailable",
         "soft_stop_reasons": [],
         "session_event_states": Counter(event_states),
     }
@@ -316,16 +364,54 @@ def _verify_operator_events(bundle: Path, manifest: Mapping[str, Any]) -> list[d
 
 
 def analyze_bundle(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
-    missing = [name for name in REQUIRED_FILES if not (bundle / name).is_file()]
+    manifest_preview = _yaml(bundle / "manifest.yaml")
+    session_required = manifest_preview.get("profile") not in SESSION_OPTIONAL_PROFILES
+    required = set(REQUIRED_FILES)
+    if session_required:
+        required.add("session.h5")
+    missing = [name for name in required if not (bundle / name).is_file()]
     if missing:
         raise AnalysisError(f"bundle missing required files: {sorted(missing)}")
-    _verify_checksums(bundle)
+    _verify_checksums(bundle, session_required=session_required)
     manifest = _verify_manifest(bundle, matrix)
     statuses = _verify_status(bundle, manifest)
     _verify_capture(bundle, manifest)
     operator = _verify_operator_result(bundle)
     events = _verify_operator_events(bundle, manifest)
-    metrics = _verify_h5(bundle, manifest)
+    if session_required or (bundle / "session.h5").is_file():
+        metrics = _verify_h5(bundle, manifest)
+    else:
+        metrics = {
+            "rates": {},
+            "target_to_solved_error": {"samples": 0, "max_position_error_m": "unavailable", "max_orientation_error_rad": "unavailable", "note": "replay/acquisition profile is not session-recordable in this run"},
+            "joint_step_rad": {}, "joint_velocity_rad_s": {}, "saturation_count": {},
+            "proposal_rejections": "unavailable",
+            "command_feedback_tracking": {"samples": 0, "max_error_rad": "unavailable", "note": "no session HDF5"},
+            "home_time_s": "unavailable", "hand_zero_time_s": "unavailable",
+            "fault_reasons": [], "soft_stop_reasons": [], "session_event_states": {},
+        }
+    rejection_events = [row for row in statuses if row.get("event") in {"proposal_rejected", "producer_unhealthy", "action_rejected"}]
+    metrics["proposal_rejections"] = len(rejection_events) if rejection_events else "unavailable"
+    metrics["fault_reasons"] = [str(row.get("reason") or row.get("error")) for row in statuses if row.get("event") in {"fault", "fault_latched"} and (row.get("reason") or row.get("error"))]
+    metrics["soft_stop_reasons"] = [str(row.get("reason") or row.get("error")) for row in statuses if row.get("event") in {"soft_stop", "safety_stop"} and (row.get("reason") or row.get("error"))]
+    solved_errors = []
+    for row in _json_lines(bundle / "protocol.jsonl"):
+        target = row.get("target_position_m")
+        solved = row.get("solved_position_m")
+        if isinstance(target, list) and isinstance(solved, list) and len(target) == len(solved):
+            try:
+                error = np.asarray(target, dtype=float) - np.asarray(solved, dtype=float)
+                if np.isfinite(error).all():
+                    solved_errors.append(float(np.linalg.norm(error)))
+            except (TypeError, ValueError):
+                continue
+    if solved_errors:
+        metrics["target_to_solved_error"] = {
+            "samples": len(solved_errors),
+            "max_position_error_m": max(solved_errors),
+            "max_orientation_error_rad": "unavailable",
+            "note": "protocol target/solved position pairing",
+        }
     return {
         "schema_name": "tianji-validation-analysis",
         "schema_version": BUNDLE_VERSION,

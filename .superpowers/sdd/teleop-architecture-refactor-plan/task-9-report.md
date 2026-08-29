@@ -73,6 +73,40 @@ PYTHONPATH=src/pico_body_tianji pixi run python - <<'PY' ... instance-handoff-ok
 
 本次没有 Marvin、Wuji、PICO、Motive 或可执行设备结果，未进行物理动作，未声明任何 real case 通过。fake/headless 产物仅证明 bundle/schema/safety 记录链路，`operator_result.outcome=aborted`。真正验收必须按 runbook 由操作者在设备现场完成并重新运行 `validation-analyze`。
 
+## Review round1 修复
+
+- prerequisite gate 改为扫描 manifest `case_id`，并调用 analyzer 完整验证 checksums/schema/current config/runtime/ACL hash 与 operator outcome；目录名或手工 outcome 不再绕过。
+- run_case 增加受控 `--operator-outcome pass|fail|aborted`，要求显式 operator event，fake 始终 aborted；managed children 继承准确 instance handoff 与 IK backend；child 非零退出向上传播。
+- replay profile 不再强制 `--record`，也不在缺失 recording 时制造 complete 空 HDF5；acquisition observation 同样不写空 session。
+- analyzer 的 tracking 使用 command/state 最近时间配对，hand zero 使用 Wuji zero/tolerance，proposal rejection/fault/soft-stop 来自 status；无记录时标为 `unavailable` 而非伪造零值。
+- 增加 managed liveliness/protocol capture 文件和每个 child log 收集基础；危险 stop 保持 locked、要求 matching ack；manifest fake 模式只记录实际 supervisor。
+
+Round1 验证：
+
+```text
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_validation_tools
+........
+Ran 8 tests ... OK
+
+pixi run validation-run -- --list
+# 18 fixed IDs
+
+pixi run validation-run -- --case pico_sim --output /tmp/tianji-validation-round1 --fake --headless
+pixi run validation-analyze -- /tmp/tianji-validation-round1
+{"bundles": 1, ...}
+
+pixi run validation-run -- --case pico_sim --output /tmp/tianji-validation-round1-danger --fake --headless --danger-stop collision_risk
+pixi run validation-analyze -- /tmp/tianji-validation-round1-danger
+{"bundles": 1, ...}
+
+pixi run validation-run -- --case target_replay_sim --output /tmp/tianji-validation-replay --fake --headless
+pixi run validation-analyze -- /tmp/tianji-validation-replay
+{"bundles": 1, ...}; session.h5 不存在
+
+pixi run python -m py_compile scripts/validation/run_case.py scripts/validation/analyze_runs.py
+bash -n scripts/run_session.sh
+git diff --check
+```
 ## 跨任务风险与最终阻塞项
 
 1. `run_session.sh` 已接入 validation 的显式 handoff：run_id、source、arm producer/executor、coordinator、recorder，以及每侧 hand producer/executor 均由环境变量传入；run_case managed manifest 使用同一批 UUID，fake bundle 只记录实际 validation supervisor，不记录未启动 child 的随机 ID。仍需最终 managed router smoke 证明 children 实际 status/liveliness 与 manifest 一致。

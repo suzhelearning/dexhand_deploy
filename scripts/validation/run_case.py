@@ -326,9 +326,11 @@ def _write_operator_event(path: Path, supervisor: str, run_id: str, event: str, 
 
 def _write_checksums(bundle: Path) -> None:
     names = [
-        "manifest.yaml", "session.h5", "status.jsonl", "operator_events.jsonl",
+        "manifest.yaml", "status.jsonl", "operator_events.jsonl",
         "liveliness.jsonl", "protocol.jsonl", "operator_result.yaml",
     ]
+    if (bundle / "session.h5").is_file():
+        names.insert(1, "session.h5")
     names += sorted(path.relative_to(bundle).as_posix() for path in (bundle / "logs").glob("*") if path.is_file())
     with (bundle / "checksums.sha256").open("w", encoding="utf-8") as stream:
         for name in names:
@@ -365,24 +367,29 @@ def _create_empty_session(path: Path, source_type: str, router_zid: str) -> None
 
 
 def _prerequisites_passed(root: Path, prerequisites: Iterable[str]) -> tuple[bool, list[str]]:
+    """Accept only bundles validated by analyzer, never directory-name hints."""
     missing: list[str] = []
     if not prerequisites:
         return True, missing
-    if not root.exists():
-        return False, list(prerequisites)
+    try:
+        from scripts.validation.analyze_runs import AnalysisError, analyze_bundle
+    except ImportError as exc:
+        raise RuntimeError(f"cannot load prerequisite analyzer: {exc}") from exc
+    matrix = load_matrix()
     for prerequisite in prerequisites:
         found = False
-        for candidate in root.glob(f"*_{prerequisite}"):
-            result = candidate / "operator_result.yaml"
-            if not result.is_file():
-                continue
-            try:
-                value = yaml.safe_load(result.read_text(encoding="utf-8")) or {}
-                found = value.get("outcome") == "pass"
-            except (OSError, yaml.YAMLError):
-                found = False
-            if found:
-                break
+        if root.is_dir():
+            for candidate in sorted(path for path in root.iterdir() if path.is_dir() and (path / "manifest.yaml").is_file()):
+                try:
+                    manifest = yaml.safe_load((candidate / "manifest.yaml").read_text(encoding="utf-8")) or {}
+                    if manifest.get("case_id") != prerequisite:
+                        continue
+                    report = analyze_bundle(candidate, matrix)
+                    found = report.get("operator_outcome") == "pass"
+                except (AnalysisError, OSError, yaml.YAMLError, ValueError):
+                    found = False
+                if found:
+                    break
         if not found:
             missing.append(prerequisite)
     return not missing, missing
@@ -601,9 +608,7 @@ def _run_fake(bundle: Path, manifest: dict[str, Any], status: Any, args: argpars
         "publisher_instance_id": manifest["publisher_instance_ids"]["validation_supervisor"],
         "mode": "fake_headless",
     }
-    for name in ("liveliness.jsonl", "protocol.jsonl"):
-        (bundle / name).write_text(json.dumps(capture, separators=(",", ":")) + "\n", encoding="utf-8")
-    if not (bundle / "session.h5").exists():
+    if manifest["profile"] not in {"target_replay_sim", "joint_replay_sim", "acquisition_live"} and not (bundle / "session.h5").exists():
         _create_empty_session(bundle / "session.h5", _source_type(manifest["profile"]), manifest["router_zid"])
     for raw in args.operator_event or []:
         event, details = _parse_event(raw)
@@ -633,9 +638,10 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
             run_id=manifest["run_id"],
             note="StreamHub is external; run acquisition observation in its own terminal",
         )
-        _create_empty_session(bundle / "session.h5", _source_type(profile), manifest["router_zid"])
         return 0
-    command = ["bash", str(ROOT / "scripts" / "run_session.sh"), "--profile", profile, "--record", str(bundle / "session.h5")]
+    command = ["bash", str(ROOT / "scripts" / "run_session.sh"), "--profile", profile]
+    if profile not in {"target_replay_sim", "joint_replay_sim"}:
+        command += ["--record", str(bundle / "session.h5")]
     if args.input:
         command += ["--input", args.input]
     if args.confirm_real:
@@ -647,6 +653,7 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
     env.update({
         "TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID": manifest["publisher_instance_ids"]["validation_supervisor"],
         "TIANJI_ROUTER_ZID": manifest["router_zid"],
+        "TIANJI_IK_BACKEND": str(manifest.get("ik_backend") or ""),
     })
     log_path = bundle / "logs" / "session.log"
     with log_path.open("w", encoding="utf-8") as log:
@@ -689,10 +696,21 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
             process.terminate()
             process.wait(timeout=5)
         _write_status(status, event="session_finished", component="run_session", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], exit_reason=exit_reason, process_returncode=process.returncode)
-    if not (bundle / "session.h5").exists():
-        _create_empty_session(bundle / "session.h5", _source_type(profile), manifest["router_zid"])
+    runtime_dir = Path(env.get("PICO_TIANJI_RUNTIME_DIR", os.environ.get("PICO_TIANJI_RUNTIME_DIR", "/tmp")))
+    for child_log in runtime_dir.glob(f"{manifest['run_id']}-*.log"):
+        destination = bundle / "logs" / f"{child_log.stem}.log"
+        try:
+            shutil.copy2(child_log, destination)
+        except OSError:
+            # Missing child log is evidence of failed capture; retain the
+            # validation log and let analyzer/checksum expose what is present.
+            continue
+    if profile not in {"target_replay_sim", "joint_replay_sim", "acquisition_live"} and not (bundle / "session.h5").exists():
+        raise RuntimeError("session recorder did not produce session.h5")
     if stop_result is not None and not stop_result.accepted:
         return 1
+    if process.returncode not in (0, -2, -15):
+        return int(process.returncode or 1)
     return 0
 
 
@@ -741,10 +759,23 @@ def run_case(args: argparse.Namespace) -> int:
     manifest["ended_at"] = utc_now()
     manifest["exit_reason"] = "fake_headless_only" if args.fake else "operator_or_session_exit"
     (bundle / "manifest.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
-    # A fake/headless run is intentionally aborted; no physical observation is
-    # fabricated. A real run also remains aborted until operator_result is
-    # changed by the operator via a deliberate command.
-    _write_operator_result(bundle / "operator_result.yaml", outcome="aborted", notes="No physical acceptance claim; record operator result after completing the runbook.")
+    if not args.fake:
+        for raw in args.operator_event or []:
+            event, details = _parse_event(raw)
+            _write_operator_event(bundle / "operator_events.jsonl", supervisor, run_id, event, details)
+    requested_outcome = "aborted" if args.fake else (args.operator_outcome or "aborted")
+    if requested_outcome in {"pass", "fail"} and not (args.operator_event or []):
+        requested_outcome = "fail"
+        args.operator_notes = (args.operator_notes or "") + " operator outcome requires at least one explicit operator event"
+        rc = max(rc, 1)
+    if requested_outcome == "pass" and rc != 0:
+        requested_outcome = "fail"
+        args.operator_notes = (args.operator_notes or "") + " session exited non-zero"
+    _write_operator_result(
+        bundle / "operator_result.yaml",
+        outcome=requested_outcome,
+        notes=args.operator_notes or ("No physical acceptance claim; record operator result after completing the runbook." if requested_outcome == "aborted" else "Operator recorded outcome with explicit event."),
+    )
     _write_checksums(bundle)
     print(bundle)
     return rc
@@ -764,6 +795,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--robot-model")
     parser.add_argument("--motive-rigid-id", action="append")
     parser.add_argument("--ik-backend")
+    parser.add_argument("--operator-outcome", choices=sorted(OUTCOMES), help="explicit operator result; fake mode remains aborted")
+    parser.add_argument("--operator-notes", default="")
     parser.add_argument("--operator-event", "--event", action="append")
     parser.add_argument("--danger-stop", choices=sorted(DANGEROUS_STOPS), help="explicitly issue a latched danger stop; never automatic")
     parser.add_argument("--extra", nargs=argparse.REMAINDER)
