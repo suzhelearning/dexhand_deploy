@@ -35,6 +35,8 @@ joint_replay_sim = { cmd = "bash scripts/run_session.sh --profile joint_replay_s
 diagnostic-mocap-calibration-sim = { cmd = "bash scripts/run_session.sh --profile diagnostic_mocap_calibration_sim" }
 wuji_hand2_dry = { cmd = "bash scripts/run_session.sh --profile h5_sim" }
 wuji_hand2_real = { cmd = "bash scripts/run_session.sh --profile h5_real" }
+validation-run = "python scripts/validation/run_case.py"
+validation-analyze = "python scripts/validation/analyze_runs.py"
 
 # C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。
 # 编译器使用 Ubuntu 24.04 系统 GCC 13；脚本会在编译前严格检查它们与

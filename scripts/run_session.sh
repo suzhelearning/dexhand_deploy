@@ -131,18 +131,18 @@ PY
   fi
 fi
 if [[ "${hand_mode}" == auto ]]; then hand_mode=retarget; fi
-run_id="$(new_instance_id)"
-coordinator_id="$(new_instance_id)"
-source_instance="$(new_instance_id)"
+run_id="${TIANJI_RUN_ID:-$(new_instance_id)}"
+coordinator_id="${TIANJI_COORDINATOR_INSTANCE_ID:-$(new_instance_id)}"
+source_instance="${TIANJI_SOURCE_INSTANCE_ID:-$(new_instance_id)}"
 arm_producer_instance=""
 arm_producer_id="arm_ik_producer"
 if [[ "${source_id}" == joint_replay ]]; then
-  arm_producer_instance="$(new_instance_id)"
+  arm_producer_instance="${TIANJI_ARM_PRODUCER_INSTANCE_ID:-$(new_instance_id)}"
   arm_producer_id="joint_replay"
 elif [[ -n "${arm_producer_config}" && "${arm_producer_config}" != null ]]; then
-  arm_producer_instance="$(new_instance_id)"
+  arm_producer_instance="${TIANJI_ARM_PRODUCER_INSTANCE_ID:-$(new_instance_id)}"
 fi
-arm_executor_instance="$(new_instance_id)"
+arm_executor_instance="${TIANJI_ARM_EXECUTOR_INSTANCE_ID:-$(new_instance_id)}"
 if [[ "${source_id}" == target_replay || "${source_id}" == joint_replay ]]; then
   [[ -n "${input_path}" && -f "${input_path}" ]] || {
     printf '%s\n' '错误：replay profile 需要 session HDF5 位置参数或 --input PATH。' >&2
@@ -153,6 +153,21 @@ declare -a hand_side_array=()
 declare -a hand_producer_id_array=()
 declare -a hand_producer_instance_array=()
 declare -a hand_executor_instance_array=()
+lookup_instance() {
+  local mapping="$1"
+  local wanted_side="$2"
+  local pair=""
+  local value=""
+  IFS=',' read -r -a mapping_pairs <<< "${mapping}"
+  for pair in "${mapping_pairs[@]}"; do
+    if [[ "${pair%%=*}" == "${wanted_side}" ]]; then
+      value="${pair#*=}"
+      [[ -n "${value}" ]] && printf '%s\n' "${value}"
+      return 0
+    fi
+  done
+  return 1
+}
 if [[ -n "${active_hand_sides}" ]]; then
   IFS=',' read -r -a hand_side_array <<< "${active_hand_sides}"
   for hand_side in "${hand_side_array[@]}"; do
@@ -160,7 +175,9 @@ if [[ -n "${active_hand_sides}" ]]; then
       printf '错误：active_hand_sides 包含非法 side: %s\n' "${hand_side}" >&2
       exit 2
     }
-    hand_executor_instance_array+=("$(new_instance_id)")
+    mapped_hand_executor=""
+    mapped_hand_executor="$(lookup_instance "${TIANJI_HAND_EXECUTOR_INSTANCES:-}" "${hand_side}" || true)"
+    hand_executor_instance_array+=("${mapped_hand_executor:-$(new_instance_id)}")
     if [[ "${source_id}" == h5_replay && "${hand_mode}" == direct ]]; then
       hand_producer_id_array+=("h5_direct")
       hand_producer_instance_array+=("${source_instance}")
@@ -169,7 +186,9 @@ if [[ -n "${active_hand_sides}" ]]; then
       hand_producer_instance_array+=("${arm_producer_instance}")
     elif [[ "${hand_executor}" == wuji_hand2 ]]; then
       hand_producer_id_array+=("wuji_retarget_${hand_side}")
-      hand_producer_instance_array+=("$(new_instance_id)")
+      mapped_hand_producer=""
+      mapped_hand_producer="$(lookup_instance "${TIANJI_HAND_PRODUCER_INSTANCES:-}" "${hand_side}" || true)"
+      hand_producer_instance_array+=("${mapped_hand_producer:-$(new_instance_id)}")
     else
       hand_producer_id_array+=("disabled")
       hand_producer_instance_array+=("disabled")
@@ -268,11 +287,12 @@ launch() {
   done
 }
 recorder_instance=""
-[[ -n "${record_path}" ]] && recorder_instance="$(new_instance_id)"
+[[ -n "${record_path}" ]] && recorder_instance="${TIANJI_RECORDER_INSTANCE_ID:-$(new_instance_id)}"
 base_env=(
   "TIANJI_ROUTER_ENDPOINT=${TIANJI_ROUTER_ENDPOINT}"
   "TIANJI_ROUTER_ZID=${TIANJI_ROUTER_ZID}"
   "TIANJI_COORDINATOR_INSTANCE_ID=${coordinator_id}"
+  "TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID=${TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID:-}"
   "TIANJI_RUN_ID=${run_id}"
   "TIANJI_REQUIRED_CAPABILITY=${required_capability}"
   "TIANJI_HAND_MODE=${hand_mode}"

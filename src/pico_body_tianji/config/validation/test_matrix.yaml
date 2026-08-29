@@ -1,0 +1,237 @@
+schema_name: tianji-validation-matrix
+schema_version: "1.0"
+cases:
+  acquisition_live:
+    profile: acquisition_live
+    required_devices: [router, acquisition, aligned_mocap]
+    required_capability: simulation
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 1.0
+    acceleration_ratio: 1.0
+    max_duration_s: 300
+    prerequisites: []
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  pico_sim:
+    profile: pico_sim
+    required_devices: [router, headless_mujoco]
+    required_capability: simulation
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 1.0
+    acceleration_ratio: 1.0
+    max_duration_s: 300
+    prerequisites: []
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  mocap_live_sim:
+    profile: mocap_live_sim
+    required_devices: [router, acquisition, aligned_mocap, headless_mujoco]
+    required_capability: simulation
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 1.0
+    acceleration_ratio: 1.0
+    max_duration_s: 300
+    prerequisites: [acquisition_live]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  h5_sim:
+    profile: h5_sim
+    required_devices: [router, h5_input, headless_mujoco]
+    required_capability: simulation
+    active_sides: [right]
+    hand_mode: auto
+    velocity_ratio: 1.0
+    acceleration_ratio: 1.0
+    max_duration_s: 600
+    prerequisites: []
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  ik_pinocchio_cpp:
+    profile: pico_sim
+    required_devices: [router, headless_mujoco, ik_pinocchio_cpp]
+    required_capability: simulation
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 1.0
+    acceleration_ratio: 1.0
+    max_duration_s: 300
+    prerequisites: [pico_sim]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  ik_pinocchio_qp:
+    profile: pico_sim
+    required_devices: [router, headless_mujoco, ik_pinocchio_qp]
+    required_capability: simulation
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 1.0
+    acceleration_ratio: 1.0
+    max_duration_s: 300
+    prerequisites: [pico_sim]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  ik_tianji_official:
+    profile: pico_sim
+    required_devices: [router, headless_mujoco, ik_tianji_official]
+    required_capability: simulation
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 1.0
+    acceleration_ratio: 1.0
+    max_duration_s: 300
+    prerequisites: [pico_sim]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  target_replay_sim:
+    profile: target_replay_sim
+    required_devices: [router, session_h5, headless_mujoco]
+    required_capability: simulation
+    active_sides: [left, right]
+    hand_mode: auto
+    velocity_ratio: 1.0
+    acceleration_ratio: 1.0
+    max_duration_s: 600
+    prerequisites: []
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  joint_replay_sim:
+    profile: joint_replay_sim
+    required_devices: [router, session_h5, headless_mujoco]
+    required_capability: simulation
+    active_sides: [left, right]
+    hand_mode: direct
+    velocity_ratio: 1.0
+    acceleration_ratio: 1.0
+    max_duration_s: 600
+    prerequisites: []
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  policy_hold_sim:
+    profile: pico_sim
+    required_devices: [router, headless_mujoco, policy_runner]
+    required_capability: simulation
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 1.0
+    acceleration_ratio: 1.0
+    max_duration_s: 300
+    prerequisites: [pico_sim]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  marvin_pico_real_10pct:
+    profile: pico_real
+    required_devices: [router, pico_controller, marvin_arm]
+    required_capability: real
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 0.1
+    acceleration_ratio: 0.1
+    max_duration_s: 300
+    prerequisites: [pico_sim, acquisition_live]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  marvin_mocap_live_real_10pct:
+    profile: mocap_live_real
+    required_devices: [router, acquisition, aligned_mocap, marvin_arm]
+    required_capability: real
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 0.1
+    acceleration_ratio: 0.1
+    max_duration_s: 300
+    prerequisites: [mocap_live_sim, acquisition_live]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  marvin_h5_real_10pct:
+    profile: h5_real
+    required_devices: [router, h5_input, marvin_arm]
+    required_capability: real
+    active_sides: [right]
+    hand_mode: auto
+    velocity_ratio: 0.1
+    acceleration_ratio: 0.1
+    max_duration_s: 600
+    prerequisites: [h5_sim]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  wuji_retarget_dry:
+    profile: h5_sim
+    required_devices: [router, h5_input, wuji_hand2_dry]
+    required_capability: simulation
+    active_sides: [right]
+    hand_mode: retarget
+    velocity_ratio: 0.1
+    acceleration_ratio: 0.1
+    max_duration_s: 600
+    prerequisites: [h5_sim]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  wuji_retarget_real:
+    profile: h5_real
+    required_devices: [router, h5_input, wuji_hand2_real]
+    required_capability: real
+    active_sides: [right]
+    hand_mode: retarget
+    velocity_ratio: 0.1
+    acceleration_ratio: 0.1
+    max_duration_s: 600
+    prerequisites: [wuji_retarget_dry, h5_sim]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  wuji_direct_real:
+    profile: joint_replay_sim
+    required_devices: [router, session_h5, wuji_hand2_real]
+    required_capability: real
+    active_sides: [left, right]
+    hand_mode: direct
+    velocity_ratio: 0.1
+    acceleration_ratio: 0.1
+    max_duration_s: 600
+    prerequisites: [joint_replay_sim]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  fault_recovery_sim:
+    profile: pico_sim
+    required_devices: [router, headless_mujoco, fault_injection_harness]
+    required_capability: simulation
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 0.1
+    acceleration_ratio: 0.1
+    max_duration_s: 600
+    prerequisites: [pico_sim]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
+  fault_recovery_real:
+    profile: pico_real
+    required_devices: [router, pico_controller, marvin_arm, fault_injection_harness]
+    required_capability: real
+    active_sides: [left, right]
+    hand_mode: disabled
+    velocity_ratio: 0.1
+    acceleration_ratio: 0.1
+    max_duration_s: 600
+    prerequisites: [fault_recovery_sim, marvin_pico_real_10pct]
+    stop_criteria:
+      dangerous: [wrong_direction_or_side, physical_limit, collision_risk, feedback_stale, tracking_threshold, device_or_servo_error, duplicate_authority, router_zid_change, emergency_stop]
+      controlled: [operator_normal_end_with_fresh_feedback]
