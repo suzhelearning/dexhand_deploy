@@ -114,3 +114,39 @@ git diff --check
 3. Marvin reconnect race 需要在 fault/returning 实机或 fake SDK 进程中验证：`fault_return` 只能消费 bounded Home，Home 后仍 fault，重启前不得 teleop。当前 runbook 已把它列为立即停止/失败判据，但本次没有设备证据。
 4. analyzer 依据当前工作树 canonical config/runtime/ACL hash；生成 bundle 后修改这些文件会按设计失败，必须用同一代码/config hash 重跑 case。
 5. managed danger-stop transport 在未捕获真实 executor/SDK 证据时将 `new_motion_commands_after_stop` 标为未验证；analyzer 会拒绝该结果，而不是写入合成的 false。fake/headless 仅使用确定性的 fake executor 证据，并保持 `aborted`。
+## Review round2 修复与验证
+
+- case contract 现在按固定 case id 路由 profile/producer/backend；不匹配 `--ik-backend` fail closed，real env 同时传 `MARVIN_ROBOT_IP`。
+- prerequisite 继续要求 manifest case、checksums、当前 config/runtime/ACL hash 和 analyzer 通过；operator finalization 要求显式事件，collision/emergency 不能 pass。
+- replay 不带 `--record`；acquisition/ replay 缺少真实观测时不创建 complete 空 HDF5，acquisition status 明确 `complete=false`/非零失败。
+- analyzer 的 tracking 通过 HDF5 command/state 最近时间配对，hand zero 使用当前 Wuji zero/tolerance；proposal rejection/fault/soft-stop 从 status，target/solved 优先从 protocol 样本计算，无样本输出 `unavailable`。
+
+实际命令输出：
+
+```text
+pixi run validation-run -- --list
+# 18 fixed IDs
+
+pixi run validation-run -- --case pico_sim --output /tmp/tianji-validation-r2 --fake --headless
+.../20260829T031914Z_pico_sim_d3d81a0c
+pixi run validation-analyze -- /tmp/tianji-validation-r2
+{"bundles": 1, "run_ids": ["20260829T031914Z_pico_sim_d3d81a0c"]}
+
+pixi run validation-run -- --case pico_sim --output /tmp/tianji-validation-r2-danger --fake --headless --danger-stop collision_risk
+.../20260829T031923Z_pico_sim_22be4185
+pixi run validation-analyze -- /tmp/tianji-validation-r2-danger
+{"bundles": 1, "run_ids": ["20260829T031923Z_pico_sim_22be4185"]}
+
+pixi run validation-run -- --case target_replay_sim --output /tmp/tianji-validation-r2-replay --fake --headless
+.../20260829T031925Z_target_replay_sim_02cc1cb5
+pixi run validation-analyze -- /tmp/tianji-validation-r2-replay
+{"bundles": 1, "run_ids": ["20260829T031925Z_target_replay_sim_02cc1cb5"]}
+
+PYTHONPATH=src/pico_body_tianji pixi run python -m unittest tests.test_validation_tools
+...........
+Ran 11 tests ... OK
+
+pixi run python -m py_compile scripts/validation/run_case.py scripts/validation/analyze_runs.py
+bash -n scripts/run_session.sh
+git diff --check
+```

@@ -412,6 +412,12 @@ def analyze_bundle(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
             "max_orientation_error_rad": "unavailable",
             "note": "protocol target/solved position pairing",
         }
+    if operator["outcome"] == "pass":
+        if manifest.get("fake"):
+            raise AnalysisError("fake/headless bundle cannot be pass")
+        rates = metrics.get("rates", {})
+        if not any(value.get("samples", 0) for value in rates.values() if isinstance(value, Mapping)):
+            raise AnalysisError("pass requires recorded authority samples")
     return {
         "schema_name": "tianji-validation-analysis",
         "schema_version": BUNDLE_VERSION,

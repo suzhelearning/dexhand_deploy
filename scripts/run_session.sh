@@ -72,6 +72,9 @@ hand_mode="$(profile_value hand_mode)"
 active_hand_sides="$(profile_value active_hand_sides)"
 hand_executor="$(profile_value hand_executor)"
 hand_overlay="$(profile_value hand_overlay)"
+if [[ "${TIANJI_VALIDATION_PRODUCER:-}" == policy_hold ]]; then
+  arm_producer_config="producers/policy_hold.yaml"
+fi
 [[ -n "${active_hand_sides}" ]] || active_hand_sides="${active_sides}"
 [[ -n "${hand_executor}" ]] || hand_executor=none
 [[ -n "${hand_overlay}" ]] || hand_overlay=none

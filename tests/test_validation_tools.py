@@ -139,6 +139,33 @@ class ValidationToolsTest(unittest.TestCase):
             'TIANJI_RECORDER_INSTANCE_ID:-$(new_instance_id)',
         ):
             self.assertIn(expression, launcher)
+    def test_case_contract_routes_profile_backend_and_rejects_conflicting_backend(self):
+        from scripts.validation.run_case import build_session_contract
+
+        command = build_session_contract("ik_pinocchio_qp", {"ik_backend": None})
+        self.assertEqual(command["profile"], "pico_sim")
+        self.assertEqual(command["producer"], "ik")
+        self.assertEqual(command["ik_backend"], "pinocchio_qp")
+        with self.assertRaises(ValueError):
+            build_session_contract("ik_pinocchio_qp", {"ik_backend": "pinocchio_cpp"})
+
+    def test_operator_finalization_rejects_collision_pass(self):
+        from scripts.validation.run_case import validate_operator_finalization
+
+        with self.assertRaises(ValueError):
+            validate_operator_finalization("pass", ["collision_risk"], rc=0)
+        self.assertEqual(validate_operator_finalization("fail", ["collision_risk"], rc=1), "fail")
+
+    def test_acquisition_observation_requires_samples_and_tracks_instance(self):
+        from scripts.validation.run_case import AlignedStreamObservation
+
+        observation = AlignedStreamObservation()
+        self.assertFalse(observation.complete)
+        observation.accept({"stream_instance_id": "stream-a", "stream_sequence": 1, "router_zid": "router", "left_valid": True, "right_valid": False})
+        observation.accept({"stream_instance_id": "stream-a", "stream_sequence": 2, "router_zid": "router", "left_valid": True, "right_valid": False})
+        self.assertTrue(observation.complete)
+        self.assertEqual(observation.samples, 2)
+        self.assertFalse(observation.accept({"stream_instance_id": "stream-b", "stream_sequence": 1, "router_zid": "router", "left_valid": True, "right_valid": False}))
 
 
 if __name__ == "__main__":

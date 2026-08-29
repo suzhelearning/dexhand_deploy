@@ -47,6 +47,81 @@ DANGEROUS_STOPS = frozenset({
 
 def monotonic_ns() -> int:
     return time.monotonic_ns()
+    
+CASE_CONTRACTS = {
+    "acquisition_live": {"profile": "acquisition_live", "producer": "acquisition", "ik_backend": None},
+    "pico_sim": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "mocap_live_sim": {"profile": "mocap_live_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "h5_sim": {"profile": "h5_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "ik_pinocchio_cpp": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "ik_pinocchio_qp": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_qp"},
+    "ik_tianji_official": {"profile": "pico_sim", "producer": "ik", "ik_backend": "tianji_official"},
+    "target_replay_sim": {"profile": "target_replay_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "joint_replay_sim": {"profile": "joint_replay_sim", "producer": "joint_replay", "ik_backend": None},
+    "policy_hold_sim": {"profile": "pico_sim", "producer": "policy_hold", "ik_backend": None},
+    "marvin_pico_real_10pct": {"profile": "pico_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "marvin_mocap_live_real_10pct": {"profile": "mocap_live_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "marvin_h5_real_10pct": {"profile": "h5_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "wuji_retarget_dry": {"profile": "h5_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "wuji_retarget_real": {"profile": "h5_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "wuji_direct_real": {"profile": "joint_replay_sim", "producer": "joint_replay", "ik_backend": None},
+    "fault_recovery_sim": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+    "fault_recovery_real": {"profile": "pico_real", "producer": "ik", "ik_backend": "pinocchio_cpp"},
+}
+
+
+def build_session_contract(case_id: str, overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        contract = dict(CASE_CONTRACTS[case_id])
+    except KeyError as exc:
+        raise ValueError(f"unknown validation case: {case_id}") from exc
+    override = dict(overrides or {})
+    requested = override.get("ik_backend")
+    if requested is not None and requested != contract["ik_backend"]:
+        raise ValueError(f"case {case_id} requires IK backend {contract['ik_backend']!r}, got {requested!r}")
+    return contract
+
+
+def validate_operator_finalization(outcome: str, events: Iterable[str], *, rc: int) -> str:
+    if outcome not in OUTCOMES:
+        raise ValueError(f"invalid operator outcome: {outcome}")
+    events = tuple(str(event) for event in events)
+    if outcome == "pass" and (rc != 0 or any(event in DANGEROUS_STOPS for event in events)):
+        raise ValueError("dangerous stop or non-zero run cannot be finalized as pass")
+    return outcome
+
+
+class AlignedStreamObservation:
+    """Fail-closed observer for the external acquisition aligned stream."""
+
+    def __init__(self) -> None:
+        self.samples = 0
+        self.complete = False
+        self.stream_instance_id: str | None = None
+        self.router_zid: str | None = None
+        self.last_sequence: int | None = None
+
+    def accept(self, row: Mapping[str, Any]) -> bool:
+        required = ("stream_instance_id", "stream_sequence", "router_zid", "left_valid", "right_valid")
+        if any(key not in row for key in required):
+            return False
+        instance = str(row["stream_instance_id"])
+        router = str(row["router_zid"])
+        sequence = row["stream_sequence"]
+        if not instance or not router or isinstance(sequence, bool) or not isinstance(sequence, int):
+            return False
+        if self.stream_instance_id is None:
+            self.stream_instance_id, self.router_zid = instance, router
+        if instance != self.stream_instance_id or router != self.router_zid:
+            return False
+        if self.last_sequence is not None and sequence <= self.last_sequence:
+            return False
+        if not isinstance(row["left_valid"], bool) or not isinstance(row["right_valid"], bool):
+            return False
+        self.last_sequence = sequence
+        self.samples += 1
+        self.complete = self.samples > 0
+        return True
 
 
 def utc_now() -> str:
@@ -449,7 +524,8 @@ def instance_handoff_environment(manifest: Mapping[str, Any]) -> dict[str, str]:
 def _build_manifest(case_id: str, case: Mapping[str, Any], profile: str, run_id: str, supervisor: str, router_zid: str, started: str, args: argparse.Namespace) -> dict[str, Any]:
     profile_config = _profile_config(profile)
     source = profile_config.get("source_config", "")
-    backend = args.ik_backend or ("pinocchio_cpp" if case_id == "ik_pinocchio_cpp" else "pinocchio_qp" if case_id == "ik_pinocchio_qp" else "tianji_official" if case_id == "ik_tianji_official" else None)
+    contract = build_session_contract(case_id, {"ik_backend": args.ik_backend})
+    backend = contract["ik_backend"]
     input_path = Path(args.input).expanduser() if args.input else None
     instance_ids: dict[str, Any] = {"validation_supervisor": supervisor}
     if not args.fake:
@@ -485,6 +561,7 @@ def _build_manifest(case_id: str, case: Mapping[str, Any], profile: str, run_id:
         "run_id": run_id,
         "case_id": case_id,
         "profile": profile,
+        "producer": contract["producer"],
         "required_devices": list(case["required_devices"]),
         "required_capability": case["required_capability"],
         "active_sides": list(case["active_sides"]),
@@ -632,13 +709,15 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
     if profile == "acquisition_live":
         _write_status(
             status,
-            event="acquisition_observation_required",
+            event="acquisition_observation_missing",
             component="acquisition",
             supervisor=manifest["publisher_instance_ids"]["validation_supervisor"],
             run_id=manifest["run_id"],
-            note="StreamHub is external; run acquisition observation in its own terminal",
+            healthy=False,
+            complete=False,
+            error="external StreamHub observation is required; no sample was recorded",
         )
-        return 0
+        return 1
     command = ["bash", str(ROOT / "scripts" / "run_session.sh"), "--profile", profile]
     if profile not in {"target_replay_sim", "joint_replay_sim"}:
         command += ["--record", str(bundle / "session.h5")]
@@ -654,6 +733,8 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
         "TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID": manifest["publisher_instance_ids"]["validation_supervisor"],
         "TIANJI_ROUTER_ZID": manifest["router_zid"],
         "TIANJI_IK_BACKEND": str(manifest.get("ik_backend") or ""),
+        "TIANJI_VALIDATION_PRODUCER": str(manifest.get("producer") or ""),
+        "MARVIN_ROBOT_IP": str(manifest.get("robot_ip") or ""),
     })
     log_path = bundle / "logs" / "session.log"
     with log_path.open("w", encoding="utf-8") as log:
@@ -764,6 +845,15 @@ def run_case(args: argparse.Namespace) -> int:
             event, details = _parse_event(raw)
             _write_operator_event(bundle / "operator_events.jsonl", supervisor, run_id, event, details)
     requested_outcome = "aborted" if args.fake else (args.operator_outcome or "aborted")
+    operator_event_names = [_parse_event(raw)[0] for raw in (args.operator_event or [])]
+    if args.danger_stop:
+        operator_event_names.append(args.danger_stop)
+    try:
+        requested_outcome = validate_operator_finalization(requested_outcome, operator_event_names, rc=rc)
+    except ValueError as exc:
+        requested_outcome = "fail"
+        args.operator_notes = (args.operator_notes or "") + f" {exc}"
+        rc = max(rc, 1)
     if requested_outcome in {"pass", "fail"} and not (args.operator_event or []):
         requested_outcome = "fail"
         args.operator_notes = (args.operator_notes or "") + " operator outcome requires at least one explicit operator event"
