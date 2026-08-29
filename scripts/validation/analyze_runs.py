@@ -31,6 +31,7 @@ SRC_ROOT = ROOT / "src" / "pico_body_tianji"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 from pico_body_tianji.config_loader import canonical_config_root
+from pico_body_tianji.sources.common.real_admission import RealCapabilityInput
 from scripts.validation.run_case import (
     BUNDLE_SCHEMA,
     BUNDLE_VERSION,
@@ -171,7 +172,10 @@ def _verify_manifest(bundle: Path, matrix: Mapping[str, Any]) -> dict[str, Any]:
     if manifest.get("required_capability") == "real" and not manifest.get("real_preflight_file"):
         raise AnalysisError("real manifest must include bound preflight attestation")
     if manifest.get("required_capability") == "real":
-        attestation = Path(str(manifest["real_preflight_file"]))
+        relative = Path(str(manifest["real_preflight_file"]))
+        if relative.is_absolute() or relative.as_posix() != "real-preflight.json":
+            raise AnalysisError("real preflight path must be bundle-relative")
+        attestation = bundle / relative
         try:
             value = json.loads(attestation.read_text(encoding="utf-8"))
             if set(value) != {"run_id", "router_zid", "validation_supervisor_instance_id", "launcher_nonce", "capability"}:

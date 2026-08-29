@@ -63,9 +63,9 @@
 - Frame0 diagnostics topic 纳入 source authority contract；source intent、coordinator latch、SafetyStop control topics 均保持严格身份校验。
 - managed SafetyStop 在 session executor 未 ready 时不发布且不成功；进入 stop 后等待所有 arm/hand matching ack，并按 request/ack/status monotonic 时间窗计算 same-tick evidence。
 - real validation 增加 `--real-preflight-file`，要求 regular-file、run/router/supervisor-bound typed attestation；普通环境变量不能自报通过，默认 denied。
-- Round3 command：定向 35 tests（validation 26、PICO entry 1、Marvin 8）全部通过；Wuji 3 canonical unit tests已通过，managed process因endpoint缺失skip；py_compile、bash -n、git diff-check通过。C++构建受zenohd/SDK环境阻塞，未虚报通过。
-- C++ smoke command: `cmake --build build/task8-cmake --target wuji_hand2_bridge -j2`
-  - Result: blocked before execution because `cmake: command not found`.
+- Round3 command：定向 35 tests（validation 26、PICO entry 1、Marvin 8）全部通过；Wuji 3 canonical unit tests已通过，managed process因endpoint缺失skip；py_compile、bash -n、git diff-check通过。
+- Bare-shell `cmake --build ...` command: blocked (`cmake: command not found`).
+- `pixi run -e ik-build cmake --build build/task8-cmake --target wuji_hand2_bridge -j2`: success; `wuji_hand2` and `wuji_hand2_bridge` compiled and linked 100%.
 
 - Additional round2 focused command: `py_compile` (Python sources), `PYTHONPATH=src/pico_body_tianji:vendor/python pixi run python -m unittest tests.test_task5_executor_contract tests.test_validation_tools -v`, `bash -n ...`, `git diff --check`.
   - Result: 52 tests passed; all syntax/shell/diff checks passed.
@@ -80,10 +80,16 @@
 
 - 修复 `SessionH5Writer`/validator checksum 清单回归，确保 fake bundle 的日志文件继续纳入校验。
 - round3 focused rerun：`tests.test_validation_tools` 与 `tests.test_task5_executor_contract` 共 52 tests 全部通过；`py_compile`、`bash -n`、`git diff --check`通过。
+## Task10 round6 follow-up
+
+- 修复预检 nonce lifecycle、bundle-relative attestation/checksum、danger-stop bounded ready wait、Wuji Python/C++/MuJoCo command counters，以及按 executor rate 的 same-tick evidence。
+- `pixi run -e ik-build cmake --build build/task8-cmake --target wuji_hand2_bridge -j2` 成功编译链接 Wuji bridge；裸 shell `cmake` 不可用，已分开记录。
+- focused `tests.test_validation_tools` + `tests.test_task5_executor_contract`：52 tests 全部通过；py_compile、bash-n、git diff-check通过。
+
 ## 未能执行与外部阻塞
 
 - acquisition `pixi run test` 未在本次修改中触碰；历史 ledger 记录其 151 tests 中仅有用户 dirty baseline 导致的 2 个 `tests/test_object_offset.py` offset 失败，采集仓库用户修改未覆盖。
-- `pixi install --locked -e ik-build`、`build-ik`、`deploy-ik`、CMake build 未执行：本轮环境缺少受管 `zenohd`，且官方 IK SDK/设备依赖未作危险绕过。
+- `pixi install --locked -e ik-build`, full `build-ik`/`deploy-ik` 未执行；裸 shell 缺 cmake，但 `pixi -e ik-build` 的 Wuji bridge target build 已成功。受管 `zenohd` 与其余官方 SDK/设备依赖仍未绕过。
 - managed ACL router/doctor、live/IK/replay/policy/Wuji/diagnostic 进程级 E2E 未执行：缺少 `zenohd`、Motive/Marvin/Wuji 物理设备及官方 SDK 运行前提。没有物理硬件通过声明。
 - validation `run_case`/`validation-analyze`真实 managed bundle 未执行；fake bundle analyzer 已在定向测试中通过，fake/headless 结果仍按设计不可声明 physical pass。
 

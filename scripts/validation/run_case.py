@@ -8,6 +8,7 @@ is ``aborted`` until an operator records a real observation.
 from __future__ import annotations
 
 import argparse
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -427,6 +428,7 @@ def _bind_real_preflight(
     if not isinstance(value, Mapping) or set(value) != {"scanner_id", "capability"} or not str(value["scanner_id"]).strip():
         raise PermissionError("real preflight source is not a scanner attestation")
     capability = RealCapabilityInput.from_mapping(value["capability"])
+    nonce = uuid.uuid4().hex
     bound_path.write_text(json.dumps({
         "run_id": run_id,
         "router_zid": router_zid,
@@ -802,7 +804,7 @@ def _build_manifest(case_id: str, case: Mapping[str, Any], profile: str, run_id:
         "hostname": socket.gethostname(),
         "os": platform.platform(),
         "source_config": source,
-        "real_preflight_file": str(getattr(args, "real_preflight_file", "") or ""),
+        "real_preflight_file": "real-preflight.json" if contract["source_capability"] == "real" else "",
         "headless": bool(args.headless),
         "started_at": started,
         "ended_at": None,
@@ -860,16 +862,22 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
             ]
         except (OSError, json.JSONDecodeError, TypeError):
             return []
-    before_status_rows = _records("status.jsonl")
     # A danger stop is meaningful only after every enabled executor has
-    # published a fresh ready/healthy status.  Never emit a stop (or report a
-    # successful one) for a session that has not reached this gate.
-    executor_ready = all(any(
-        str(row.get("publisher_instance_id", "")) == executor_id
-        and row.get("component_role") in {"executor_arm", "executor_hand"}
-        and row.get("ready") is True and row.get("healthy") is True
-        for row in before_status_rows
-    ) for executor_id in ids)
+    # published a fresh ready/healthy status.  Wait for the bounded startup
+    # window; never emit a stop for an unready session.
+    ready_deadline = time.monotonic() + min(5.0, float(manifest.get("max_duration_s", 5.0)))
+    executor_ready = False
+    while time.monotonic() < ready_deadline:
+        before_status_rows = _records("status.jsonl")
+        executor_ready = all(any(
+            str(row.get("publisher_instance_id", "")) == executor_id
+            and row.get("component_role") in {"executor_arm", "executor_hand"}
+            and row.get("ready") is True and row.get("healthy") is True
+            for row in before_status_rows
+        ) for executor_id in ids)
+        if executor_ready:
+            break
+        time.sleep(0.05)
     if not executor_ready:
         request = SafetyStopRequest(
             ProtocolEnvelope(1, supervisor_id, str(manifest["router_zid"]), 1, monotonic_ns()),
