@@ -878,7 +878,7 @@ def _managed_stop(bundle: Path, manifest: Mapping[str, Any], status: Any, args: 
             status, event="safety_stop", component="validation", supervisor=supervisor_id,
             run_id=str(manifest["run_id"]), reason=args.danger_stop,
             expected_executor_ids=ids, acked_executor_ids=[], ack_complete=False,
-            new_motion_commands_after_stop=None, lockout=True,
+            new_motion_commands_after_stop=None, lockout=False,
             executor_safety_evidence={"same_tick_ack": False, "unhealthy": False, "no_motion_commands": False},
         )
         return result
