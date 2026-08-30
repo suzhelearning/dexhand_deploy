@@ -341,8 +341,18 @@ acquire_teleop_guard "${profile}"
 install_teleop_cleanup_traps
 launch() {
   local label="$1"; shift
-  setsid env "$@" >"${TELEOP_RUNTIME_DIR}/${run_id}-${label}.log" 2>&1 &
-  local pid=$!
+  local log_path="${TELEOP_RUNTIME_DIR}/${run_id}-${label}.log"
+  local source_tty_fd=""
+  if [[ "${label}" == source && -t 0 ]] &&
+     { exec {source_tty_fd}<>/dev/tty; } 2>/dev/null; then
+    setsid env PYTHONUNBUFFERED=1 "$@" <&"${source_tty_fd}" \
+      > >(tee -- "${log_path}" >&"${source_tty_fd}") 2>&1 &
+    local pid=$!
+    exec {source_tty_fd}>&-
+  else
+    setsid env "$@" </dev/null >"${log_path}" 2>&1 &
+    local pid=$!
+  fi
   if ! register_teleop_process_group "${pid}" "${label}" 5; then
     kill -TERM -- "-${pid}" 2>/dev/null || true
     wait "${pid}" 2>/dev/null || true

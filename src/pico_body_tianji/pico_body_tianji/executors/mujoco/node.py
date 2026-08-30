@@ -26,6 +26,7 @@ from ...protocol.messages import (
     ArmJointCommand,
     ArmJointState,
     ComponentStatus,
+    Frame0HandSkeleton,
     HandJointCommand,
     HandExecutorStatus,
     HandJointState,
@@ -43,6 +44,13 @@ from ...zenoh_util import key, open_session, require_single_router, declare_comp
 
 _LOG = logging.getLogger(__name__)
 SIDES = ("left", "right")
+_FRAME0_POINT_SIZE = np.asarray([0.012, 0.0, 0.0], dtype=np.float64)
+_FRAME0_EMPTY_SIZE = np.zeros(3, dtype=np.float64)
+_FRAME0_IDENTITY = np.eye(3, dtype=np.float64).reshape(-1)
+_FRAME0_POINT_RGBA = np.asarray([1.0, 0.35, 0.08, 0.96], dtype=np.float32)
+_FRAME0_WRIST_RGBA = np.asarray([0.2, 1.0, 0.35, 1.0], dtype=np.float32)
+_FRAME0_EDGE_RGBA = np.asarray([0.1, 0.75, 1.0, 0.82], dtype=np.float32)
+_WRIST_AXIS_HALF_LENGTH_M = 0.045
 
 
 def _put(publisher: Any, payload: Mapping[str, Any]) -> None:
@@ -136,6 +144,110 @@ def _validate_model_joints(
     return resolved
 
 
+def _geom_id(model: Any, name: str) -> int:
+    names = getattr(model, "geom_names", None)
+    if isinstance(names, Mapping):
+        try:
+            return int(names[name])
+        except KeyError:
+            return -1
+    try:
+        import mujoco
+        return int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name))
+    except (ImportError, AttributeError, TypeError):
+        return -1
+
+
+def _unit_vector(value: np.ndarray, label: str) -> np.ndarray:
+    norm = float(np.linalg.norm(value))
+    if not np.isfinite(norm) or norm < 1.0e-9:
+        raise ValueError(f"{label} is not a finite non-zero axis")
+    return value / norm
+
+
+def _frame_from_wrist_axis_geoms(
+    model: Any,
+    data: Any,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Recover the fixed simulated r_wrist frame at executor Home."""
+    geom_ids = [
+        _geom_id(model, f"r_wrist_axis_{index}") for index in range(3)
+    ]
+    if any(geom_id < 0 for geom_id in geom_ids):
+        raise ValueError("MuJoCo model lacks r_wrist_axis_{0,1,2} geoms")
+    matrices = np.asarray(getattr(data, "geom_xmat"), dtype=np.float64)
+    positions = np.asarray(getattr(data, "geom_xpos"), dtype=np.float64)
+    if matrices.ndim != 2 or matrices.shape[1] != 9:
+        raise ValueError("MuJoCo data.geom_xmat must have shape [ngeom,9]")
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError("MuJoCo data.geom_xpos must have shape [ngeom,3]")
+    raw_axes = [
+        _unit_vector(
+            matrices[geom_id].reshape(3, 3)[:, 2].copy(),
+            f"r_wrist_axis_{index}",
+        )
+        for index, geom_id in enumerate(geom_ids)
+    ]
+    axis_x = raw_axes[0]
+    axis_z = raw_axes[2]
+    if abs(float(np.dot(axis_x, axis_z))) > 1.0e-4:
+        raise ValueError("r_wrist X/Z axis geoms are not orthogonal")
+    axis_y = _unit_vector(np.cross(axis_z, axis_x), "r_wrist Y axis")
+    axis_z = _unit_vector(np.cross(axis_x, axis_y), "r_wrist Z axis")
+    if abs(float(np.dot(raw_axes[1], axis_y))) < 0.999:
+        raise ValueError("r_wrist_axis_1 is inconsistent with X/Z geoms")
+    rotation = np.column_stack((axis_x, axis_y, axis_z))
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1.0e-6):
+        raise ValueError("simulated r_wrist frame is not orthonormal")
+    if not np.isclose(np.linalg.det(rotation), 1.0, atol=1.0e-6):
+        raise ValueError("simulated r_wrist frame is not right-handed")
+    origins = np.asarray(
+        [
+            positions[geom_ids[0]] - _WRIST_AXIS_HALF_LENGTH_M * axis_x,
+            positions[geom_ids[1]] - _WRIST_AXIS_HALF_LENGTH_M * axis_y,
+            positions[geom_ids[2]] - _WRIST_AXIS_HALF_LENGTH_M * axis_z,
+        ],
+        dtype=np.float64,
+    )
+    origin = origins.mean(axis=0)
+    if not np.isfinite(origin).all() or np.max(
+        np.linalg.norm(origins - origin, axis=1)
+    ) > 1.0e-4:
+        raise ValueError("r_wrist axis geoms do not share one origin")
+    return origin, rotation
+
+
+def _rotation_matrix_xyzw(quaternion: np.ndarray) -> np.ndarray:
+    x, y, z, w = (float(component) for component in quaternion)
+    return np.asarray(
+        [
+            [
+                1.0 - 2.0 * (y * y + z * z),
+                2.0 * (x * y - z * w),
+                2.0 * (x * z + y * w),
+            ],
+            [
+                2.0 * (x * y + z * w),
+                1.0 - 2.0 * (x * x + z * z),
+                2.0 * (y * z - x * w),
+            ],
+            [
+                2.0 * (x * z - y * w),
+                2.0 * (y * z + x * w),
+                1.0 - 2.0 * (x * x + y * y),
+            ],
+        ],
+        dtype=np.float64,
+    )
+
+
+@dataclass(frozen=True)
+class Frame0Overlay:
+    points_mujoco: np.ndarray
+    edges: np.ndarray
+    sequence: int
+
+
 @dataclass(frozen=True)
 class _Pending:
     command: ArmJointCommand | HandJointCommand
@@ -154,6 +266,7 @@ class MujocoExecutor:
         publisher_instance_id: str,
         router_zid: str,
         coordinator_instance_id: str,
+        source_instance_id: str | None = None,
         hand_config: WujiHandConfig | Mapping[str, Any] | str | os.PathLike[str] | None = None,
         hand_sides: tuple[str, ...] = SIDES,
         hand_overlay: bool = False,
@@ -172,6 +285,7 @@ class MujocoExecutor:
         self.publisher_instance_id = publisher_instance_id
         self.router_zid = router_zid
         self.coordinator_instance_id = coordinator_instance_id
+        self.source_instance_id = source_instance_id or None
         self.run_id = run_id
         self.safety_supervisor_instance_id = safety_supervisor_instance_id
         self.command_timeout_ns = int(float(command_timeout_s) * 1e9)
@@ -235,6 +349,10 @@ class MujocoExecutor:
         self._safety_ack: SafetyStopAck | None = None
         self._healthy = True
         self._last_error: str | None = None
+        self._frame0_overlay: Frame0Overlay | None = None
+        self._frame0_sequence = -1
+        self._home_wrist_frame: tuple[np.ndarray, np.ndarray] | None = None
+        self._frame0_geometry_error: str | None = None
         self._subscriptions: list[Any] = []
         self._publishers: dict[str, Any] = {}
         self._liveliness_token = declare_component_liveliness(
@@ -247,8 +365,16 @@ class MujocoExecutor:
         self._snapshot_values: dict[str, Any] = {}
         self._snapshot_failed = False
         self._snapshot_ready = session is None or not hasattr(session, "get")
-        self._setup_transport()
         self._initialize_home()
+        if self.source_instance_id is not None:
+            try:
+                self._home_wrist_frame = _frame_from_wrist_axis_geoms(
+                    self.model, self.data
+                )
+            except ValueError as exc:
+                self._frame0_geometry_error = str(exc)
+                _LOG.warning("Frame0 overlay disabled: %s", exc)
+        self._setup_transport()
         self._status = self._make_status(
             ready=self._snapshot_ready, healthy=self._snapshot_ready, phase="ready"
         )
@@ -261,6 +387,10 @@ class MujocoExecutor:
     @property
     def safety_ack(self) -> SafetyStopAck | None:
         return self._safety_ack
+
+    @property
+    def frame0_overlay(self) -> Frame0Overlay | None:
+        return self._frame0_overlay
 
     @property
     def arm_state(self) -> ArmJointState:
@@ -294,6 +424,11 @@ class MujocoExecutor:
             _declare_subscriber(self.session, topics.AT_HOME, self.on_at_home),
             _declare_subscriber(self.session, topics.RETURN_COMPLETE, self.on_return_complete),
             _declare_subscriber(self.session, topics.SAFETY_STOP, self.on_safety_stop),
+            _declare_subscriber(
+                self.session,
+                topics.FRAME0_HAND_SKELETON,
+                self.on_frame0_hand_skeleton,
+            ),
         ])
         self._subscriptions.extend([
             _declare_subscriber(self.session, topics.arm_command("left"), self.on_arm_command),
@@ -466,6 +601,76 @@ class MujocoExecutor:
             self._healthy = False
             self._last_error = f"invalid return_complete latch: {exc}"
 
+    def on_frame0_hand_skeleton(
+        self,
+        value: Frame0HandSkeleton | Mapping[str, Any] | Any,
+    ) -> bool:
+        """Accept a fixed, typed H5 diagnostic without changing authority state."""
+        try:
+            payload = (
+                value.to_dict()
+                if isinstance(value, Frame0HandSkeleton)
+                else _sample_payload(value)
+            )
+            skeleton = Frame0HandSkeleton.from_dict(payload)
+            if self.source_instance_id is None:
+                raise ProtocolError("Frame0 source authority is not configured")
+            if skeleton.publisher_instance_id != self.source_instance_id:
+                raise ProtocolError("Frame0 source instance mismatch")
+            if skeleton.router_zid != self.router_zid:
+                raise ProtocolError("Frame0 router_zid mismatch")
+            if skeleton.side != "right":
+                raise ProtocolError("Frame0 overlay supports only right hand")
+            if skeleton.sequence <= self._frame0_sequence:
+                raise ProtocolError("Frame0 sequence rollback")
+            if self._home_wrist_frame is None:
+                raise ProtocolError(
+                    self._frame0_geometry_error
+                    or "simulated Home wrist frame is unavailable"
+                )
+            home_position_mujoco, home_rotation_mujoco = (
+                self._home_wrist_frame
+            )
+            wrist_home_motive = np.asarray(
+                skeleton.robot_wrist_home_pose, dtype=np.float64
+            )
+            rotation_motive_from_wrist = _rotation_matrix_xyzw(
+                wrist_home_motive[3:7]
+            )
+            rotation_mujoco_from_motive = (
+                home_rotation_mujoco @ rotation_motive_from_wrist.T
+            )
+            translation_mujoco_from_motive = (
+                home_position_mujoco
+                - rotation_mujoco_from_motive @ wrist_home_motive[:3]
+            )
+            points_motive = np.asarray(
+                skeleton.keypoints_world_m, dtype=np.float64
+            )
+            points_mujoco = (
+                points_motive @ rotation_mujoco_from_motive.T
+                + translation_mujoco_from_motive
+            )
+            if points_mujoco.shape != (21, 3) or not np.isfinite(
+                points_mujoco
+            ).all():
+                raise ProtocolError("transformed Frame0 points are invalid")
+            edges = np.asarray(skeleton.edges, dtype=np.int32)
+            points_mujoco.setflags(write=False)
+            edges.setflags(write=False)
+            self._frame0_overlay = Frame0Overlay(
+                points_mujoco=points_mujoco,
+                edges=edges,
+                sequence=skeleton.sequence,
+            )
+            self._frame0_sequence = skeleton.sequence
+            self._frame0_geometry_error = None
+            return True
+        except (ProtocolError, TypeError, ValueError) as exc:
+            self._frame0_geometry_error = str(exc)
+            return False
+
+
     def _accept_sequence(self, kind: str, side: str, instance: str, sequence: int) -> None:
         baseline = self._arm_baseline if kind == "arm" else self._hand_baseline
         previous = baseline.get(side)
@@ -629,6 +834,66 @@ class MujocoExecutor:
         self._publish_states()
         return applied
 
+    def update_frame0_viewer_overlay(
+        self,
+        viewer: Any,
+        *,
+        mujoco_module: Any = None,
+    ) -> None:
+        """Render the latest fixed diagnostic into viewer.user_scn."""
+        overlay = self._frame0_overlay
+        if overlay is None:
+            return
+        if mujoco_module is None:
+            import mujoco as mujoco_module
+        scene = viewer.user_scn
+        with viewer.lock():
+            scene.ngeom = 0
+            capacity = min(int(scene.maxgeom), len(scene.geoms))
+            for index, point in enumerate(overlay.points_mujoco):
+                if scene.ngeom >= capacity:
+                    break
+                geom = scene.geoms[scene.ngeom]
+                rgba = (
+                    _FRAME0_WRIST_RGBA
+                    if index == 0
+                    else _FRAME0_POINT_RGBA
+                )
+                mujoco_module.mjv_initGeom(
+                    geom,
+                    mujoco_module.mjtGeom.mjGEOM_SPHERE,
+                    _FRAME0_POINT_SIZE,
+                    point,
+                    _FRAME0_IDENTITY,
+                    rgba,
+                )
+                scene.ngeom += 1
+            for parent, child in overlay.edges:
+                if scene.ngeom >= capacity:
+                    break
+                start = overlay.points_mujoco[int(parent)]
+                end = overlay.points_mujoco[int(child)]
+                if float(np.linalg.norm(end - start)) < 1.0e-8:
+                    continue
+                geom = scene.geoms[scene.ngeom]
+                mujoco_module.mjv_initGeom(
+                    geom,
+                    mujoco_module.mjtGeom.mjGEOM_CAPSULE,
+                    _FRAME0_EMPTY_SIZE,
+                    _FRAME0_EMPTY_SIZE,
+                    _FRAME0_IDENTITY,
+                    _FRAME0_EDGE_RGBA,
+                )
+                mujoco_module.mjv_connector(
+                    geom,
+                    mujoco_module.mjtGeom.mjGEOM_CAPSULE,
+                    0.004,
+                    start,
+                    end,
+                )
+                scene.ngeom += 1
+
+
     def run(self, *, headless: bool = True, rate_hz: float = 60.0) -> None:
         if rate_hz <= 0.0:
             raise ValueError("rate_hz must be positive")
@@ -648,8 +913,12 @@ class MujocoExecutor:
             while viewer.is_running():
                 started = time.monotonic()
                 self.tick()
+                self.update_frame0_viewer_overlay(
+                    viewer, mujoco_module=mujoco
+                )
                 viewer.sync()
                 time.sleep(max(0.0, period - (time.monotonic() - started)))
+
     def close(self) -> None:
         if self._liveliness_token is not None:
             try:
@@ -726,6 +995,7 @@ def main(argv: list[str] | None = None) -> int:
             publisher_instance_id=args.publisher_instance_id,
             router_zid=router,
             coordinator_instance_id=args.coordinator_instance_id,
+            source_instance_id=os.environ.get("TIANJI_SOURCE_INSTANCE_ID"),
             hand_sides=hand_sides,
             hand_overlay=args.hand_overlay,
             run_id=args.run_id or None,
@@ -741,7 +1011,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["MujocoExecutor", "_validate_model_joints", "main"]
+__all__ = [
+    "Frame0Overlay",
+    "MujocoExecutor",
+    "_frame_from_wrist_axis_geoms",
+    "_validate_model_joints",
+    "main",
+]
 
 if __name__ == "__main__":
     raise SystemExit(main())
