@@ -67,6 +67,7 @@ class SessionClient:
             "at_home": 0,
             "return_complete": 0,
         }
+        self._query_sequences: dict[str, int] = {}
         self._started = False
         self._snapshot_started_at = 0.0
         self._snapshot_timed_out = False
@@ -74,9 +75,11 @@ class SessionClient:
         self._at_home: LatchedBool | None = None
         self._return_complete: LatchedBool | None = None
         self._coordinator_identity: str | None = None
-        # Authority ordering is global across state and both latch keys.
-        self._coordinator_sequence_baseline: tuple[str, int] | None = None
-        self._accepted_coordinator_messages: set[tuple[str, str, int]] = set()
+        # Zenoh does not order callbacks across independent keys.  Sequence
+        # rollback is therefore checked per authority key, while query
+        # snapshots are checked together when all three replies arrive.
+        self._coordinator_channel_sequences: dict[str, int] = {}
+        self._coordinator_origin_sequences: dict[tuple[str, str], int] = {}
         self._pending_action: str | None = None
         self._pending_intent_sequence: int | None = None
         self._pending_deadline = 0.0
@@ -193,8 +196,8 @@ class SessionClient:
             self._at_home = None
             self._return_complete = None
             self._coordinator_identity = None
-            self._coordinator_sequence_baseline = None
-            self._accepted_coordinator_messages.clear()
+            self._coordinator_channel_sequences.clear()
+            self._coordinator_origin_sequences.clear()
             self._query_complete = {
                 "state": False,
                 "at_home": False,
@@ -205,6 +208,7 @@ class SessionClient:
                 "at_home": 0,
                 "return_complete": 0,
             }
+            self._query_sequences.clear()
             self._snapshot_event.clear()
             self._snapshot_timed_out = False
             self._pending_action = None
@@ -231,6 +235,7 @@ class SessionClient:
                 "at_home": 0,
                 "return_complete": 0,
             }
+            self._query_sequences.clear()
         # Subscriber declaration intentionally precedes every query.
         self._resources.extend(
             [
@@ -265,17 +270,26 @@ class SessionClient:
         payload = getattr(result, "payload", None)
         return None if payload is None else bytes(payload)
 
-    def _mark_query(self, channel: str, *, success: bool) -> None:
+    def _mark_query(
+        self, channel: str, *, success: bool, sequence: int | None = None
+    ) -> None:
         with self._lock:
             count = self._query_reply_count[channel] + 1
             self._query_reply_count[channel] = count
-            if count != 1 or not success:
+            if count != 1 or not success or sequence is None:
                 self._invalid_coordinator = True
                 self._query_complete[channel] = False
             else:
                 self._query_complete[channel] = True
+                self._query_sequences[channel] = sequence
             if all(self._query_complete.values()) and not self._invalid_coordinator:
-                self._snapshot_event.set()
+                state_sequence = self._query_sequences["state"]
+                home_sequence = self._query_sequences["at_home"]
+                complete_sequence = self._query_sequences["return_complete"]
+                if state_sequence <= home_sequence <= complete_sequence:
+                    self._snapshot_event.set()
+                else:
+                    self._invalid_coordinator = True
 
     def _on_state_sample(self, sample: Any) -> None:
         payload = self._payload(sample)
@@ -334,16 +348,15 @@ class SessionClient:
         elif self._coordinator_identity != instance:
             self._invalid_coordinator = True
             return False
-        baseline = self._coordinator_sequence_baseline
-        if baseline is not None and sequence < baseline[1]:
+        origin_key = (origin, channel)
+        origin_sequence = self._coordinator_origin_sequences.get(origin_key)
+        if origin_sequence is not None and sequence <= origin_sequence:
             return False
-        if baseline is None or sequence > baseline[1]:
-            self._coordinator_sequence_baseline = (instance, sequence)
-            self._accepted_coordinator_messages.clear()
-        token = (origin, channel, sequence)
-        if token in self._accepted_coordinator_messages:
+        self._coordinator_origin_sequences[origin_key] = sequence
+        channel_sequence = self._coordinator_channel_sequences.get(channel)
+        if channel_sequence is not None and sequence < channel_sequence:
             return False
-        self._accepted_coordinator_messages.add(token)
+        self._coordinator_channel_sequences[channel] = sequence
         return True
 
     def _on_state_payload(
@@ -373,17 +386,18 @@ class SessionClient:
                     self._pending_action = None
                     self._pending_intent_sequence = None
                 self._state_event.set()
-            # A query reply may be older than an event accepted after the
-            # subscriber declaration.  Such a reply is valid only when this
-            # channel already has a cached value; an old cross-channel reply
-            # must not satisfy a channel whose value is still missing.
+            # Query replies may be older than subscriber traffic on the same
+            # key; keep the newer cached value while still validating the
+            # independently received query snapshot below.
             cached_channel = self._state is not None
             query_valid = (
                 (accepted or cached_channel)
                 and not self._invalid_coordinator
             )
         if query_channel is not None:
-            self._mark_query(query_channel, success=query_valid)
+            self._mark_query(
+                query_channel, success=query_valid, sequence=state.sequence
+            )
         return accepted
 
     def _on_latched_payload(
@@ -418,7 +432,9 @@ class SessionClient:
                 and not self._invalid_coordinator
             )
         if query_channel is not None:
-            self._mark_query(query_channel, success=query_valid)
+            self._mark_query(
+                query_channel, success=query_valid, sequence=latch.sequence
+            )
         return accepted
 
     def _authorized_state(self, state: str, action: str) -> bool:

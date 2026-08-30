@@ -158,6 +158,7 @@ class ArmCommandCoordinator:
         self._hand_state: dict[str, _Timed] = {}
         self._hand_state_baseline: dict[str, tuple[str, int]] = {}
         self._return_started_ns: int | None = None
+        self._teleop_started_ns: int | None = None
         self._return_start_command: dict[str, list[float]] | None = None
         self._safe_command = {"left": list(self.robot.left_home_rad), "right": list(self.robot.right_home_rad)}
         self._publishers: dict[str, Any] = {}
@@ -638,12 +639,14 @@ class ArmCommandCoordinator:
                 self._state = rejected
                 self._publish_session_snapshot()
                 return IntentResult(False, rejected, why)
+            self._teleop_started_ns = now_ns
             self._state = self._next_state("teleop", "accepted", sequence)
             self._at_home = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
             self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
             self._publish_session_snapshot()
             return IntentResult(True, self._state, "accepted")
         if action in ("return", "shutdown"):
+            self._teleop_started_ns = None
             self._return_started_ns = now_ns
             self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
             self._state = self._next_state("returning", reason or action, sequence)
@@ -655,6 +658,7 @@ class ArmCommandCoordinator:
     def _enter_returning(self, reason: str, now_ns: int) -> None:
         if self._state.state in {"returning", "fault"}:
             return
+        self._teleop_started_ns = None
         self._return_started_ns = now_ns
         self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
         self._state = self._next_state("returning", reason, self._state.intent_sequence)
@@ -663,6 +667,11 @@ class ArmCommandCoordinator:
     def _check_teleop_health(self, now_ns: int) -> None:
         if self._state.state != "teleop":
             return
+        transitioning = (
+            self._teleop_started_ns is not None
+            and now_ns - self._teleop_started_ns
+            <= int(self.config["state_timeout_s"] * 1e9)
+        )
         for role in ("source", "producer_arm"):
             if not self._domain_ready(role, now_ns):
                 self._enter_returning(f"{role} stale or unhealthy", now_ns)
@@ -674,15 +683,18 @@ class ArmCommandCoordinator:
             if not self._domain_ready("producer_hand", now_ns):
                 self._enter_returning("producer_hand stale or unhealthy", now_ns)
                 return
-            if not self._hand_tracking_fresh(now_ns):
+            if not self._hand_tracking_fresh(now_ns) and not transitioning:
                 self._enter_fault("hand executor/status state stale, unhealthy, or identity mismatch")
                 return
         for side in self.profile.get("active_sides", ("left", "right")):
             if not self._fresh(self._proposals.get(side), now_ns):
+                if transitioning:
+                    continue
                 self._enter_returning("arm proposal timeout", now_ns)
                 return
 
     def _enter_fault(self, reason: str) -> None:
+        self._teleop_started_ns = None
         self._fault_reason = reason
         if self._state.state != "fault":
             self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
