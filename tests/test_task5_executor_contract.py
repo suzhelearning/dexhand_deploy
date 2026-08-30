@@ -1,10 +1,13 @@
 from __future__ import annotations
-
 import json
 import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
+
+import pico_body_tianji.executors.mujoco.node as mujoco_node
 
 from pico_body_tianji.executors.marvin.bridge import MarvinExecutor
 from pico_body_tianji.executors.marvin.readiness import MarvinReadiness
@@ -143,6 +146,32 @@ class _DeferredSnapshotSession(_SnapshotSession):
         self.pending[key](_Reply(reply))
 
 class Task5ExecutorContractTest(unittest.TestCase):
+    def test_mujoco_configured_urdf_resolves_from_package_root(self):
+        config_path = (
+            Path(__file__).parents[1]
+            / "src"
+            / "pico_body_tianji"
+            / "config"
+            / "executors"
+            / "mujoco.yaml"
+        )
+        captured = {}
+
+        def capture_urdf(path):
+            captured["path"] = Path(path)
+            raise RuntimeError("captured URDF path")
+
+        with patch.object(mujoco_node, "portable_mujoco_urdf", side_effect=capture_urdf):
+            with self.assertRaisesRegex(RuntimeError, "captured URDF path"):
+                mujoco_node.main(["--config", str(config_path), "--headless"])
+
+        self.assertEqual(
+            captured["path"],
+            config_path.parents[2]
+            / "assets"
+            / "tianji_wuji2"
+            / "tianji_wuji2.urdf",
+        )
     def test_mujoco_snapshot_barrier_requires_typed_replies(self):
         clock = _Clock(time.monotonic_ns())
         now = clock()
