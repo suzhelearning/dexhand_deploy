@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import json
 import math
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -124,6 +125,7 @@ class ArmCommandCoordinator:
         self.publisher_instance_id = publisher_instance_id
         self.router_zid = router_zid
         self.clock = clock
+        self._lock = threading.RLock()
         self.profile = dict(profile or {})
         if "authorities" in self.profile:
             self.authorities = self._validate_authorities(self.profile["authorities"])
@@ -283,22 +285,25 @@ class ArmCommandCoordinator:
 
     @property
     def state(self) -> SessionState:
-        return self._state
+        with self._lock:
+            return self._state
 
     @property
     def at_home(self) -> LatchedBool:
-        return self._at_home
+        with self._lock:
+            return self._at_home
 
     @property
     def return_complete(self) -> LatchedBool:
-        return self._return_complete
+        with self._lock:
+            return self._return_complete
 
     def _setup_transport(self, session: Any) -> None:
         # Deliberately use only canonical topic functions. Queryables reply with
         # the same typed payloads that subscribers receive.
         for key, getter in ((topics.SESSION_STATE, lambda: self._state), (topics.AT_HOME, lambda: self._at_home), (topics.RETURN_COMPLETE, lambda: self._return_complete)):
             if hasattr(session, "declare_queryable"):
-                self._queryables.append(session.declare_queryable(key, lambda query, get=getter, key=key: query.reply(key, json.dumps(get().to_dict(), separators=(",", ":")).encode())))
+                self._queryables.append(session.declare_queryable(key, lambda query, get=getter, key=key: query.reply(key, self._snapshot_payload(get))))
         for side in ("left", "right"):
             if hasattr(session, "declare_publisher"):
                 self._publishers[side] = session.declare_publisher(topics.arm_command(side))
@@ -313,8 +318,17 @@ class ArmCommandCoordinator:
         if publisher is not None:
             publisher.put(json.dumps(payload, separators=(",", ":")).encode("utf-8"), encoding="application/json")
 
+    def _snapshot_payload(self, getter: Callable[[], Any]) -> bytes:
+        with self._lock:
+            return json.dumps(getter().to_dict(), separators=(",", ":")).encode("utf-8")
+
+
     def _make_state(self, state: str, reason: str, intent_sequence: int | None) -> SessionState:
         return SessionState(1, self._sequence, self.clock(), state, reason, "coordinator", intent_sequence, self.publisher_instance_id, self.router_zid)
+
+    def _next_state(self, state: str, reason: str, intent_sequence: int | None) -> SessionState:
+        self._sequence += 1
+        return self._make_state(state, reason, intent_sequence)
 
     def _fresh(self, timed: _Timed | None, now_ns: int) -> bool:
         return timed is not None and 0 <= now_ns - timed.received_ns <= int(self.config["state_timeout_s"] * 1e9)
@@ -581,25 +595,28 @@ class ArmCommandCoordinator:
         if self.authorities is not None and not self._matches_authority(
             "source", source, intent_instance, intent_router
         ):
-            rejected = self._make_state(self._state.state, "intent source authority mismatch", sequence)
+            rejected = self._next_state(self._state.state, "intent source authority mismatch", sequence)
+            self._state = rejected
             self._publish("state", rejected.to_dict())
             return IntentResult(False, rejected, "intent source authority mismatch")
         if self._state.state == "fault":
-            rejected = self._make_state("fault", self._fault_reason or "fault latched", sequence)
+            rejected = self._next_state("fault", self._fault_reason or "fault latched", sequence)
+            self._state = rejected
             self._publish("state", rejected.to_dict())
             return IntentResult(False, rejected, "fault latched; restart required")
         if action == "start" and self._state.state != "idle":
-            rejected = self._make_state(self._state.state, "start requires idle", sequence)
+            rejected = self._next_state(self._state.state, "start requires idle", sequence)
+            self._state = rejected
             self._publish("state", rejected.to_dict())
             return IntentResult(False, rejected, "start requires idle")
         if action == "start":
             ready, why = self._start_ready(now_ns)
             if not ready:
-                rejected = self._make_state(self._state.state, why, sequence)
+                rejected = self._next_state(self._state.state, why, sequence)
+                self._state = rejected
                 self._publish("state", rejected.to_dict())
                 return IntentResult(False, rejected, why)
-            self._sequence += 1
-            self._state = self._make_state("teleop", "accepted", sequence)
+            self._state = self._next_state("teleop", "accepted", sequence)
             self._at_home = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
             self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
             self._publish("state", self._state.to_dict())
@@ -607,10 +624,9 @@ class ArmCommandCoordinator:
             self._publish("complete", self._return_complete.to_dict())
             return IntentResult(True, self._state, "accepted")
         if action in ("return", "shutdown"):
-            self._sequence += 1
             self._return_started_ns = now_ns
             self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
-            self._state = self._make_state("returning", reason or action, sequence)
+            self._state = self._next_state("returning", reason or action, sequence)
             self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
             self._publish("state", self._state.to_dict())
             self._publish("complete", self._return_complete.to_dict())
@@ -620,10 +636,9 @@ class ArmCommandCoordinator:
     def _enter_returning(self, reason: str, now_ns: int) -> None:
         if self._state.state in {"returning", "fault"}:
             return
-        self._sequence += 1
         self._return_started_ns = now_ns
         self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
-        self._state = self._make_state("returning", reason, self._state.intent_sequence)
+        self._state = self._next_state("returning", reason, self._state.intent_sequence)
         self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
 
     def _check_teleop_health(self, now_ns: int) -> None:
@@ -653,8 +668,7 @@ class ArmCommandCoordinator:
         if self._state.state != "fault":
             self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
             self._return_started_ns = self.clock()
-            self._sequence += 1
-            self._state = self._make_state("fault", reason, self._state.intent_sequence)
+            self._state = self._next_state("fault", reason, self._state.intent_sequence)
             self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
     def _command(self, side: str, sequence: int, timestamp_ns: int) -> ArmJointCommand:
         mode = "teleop" if self._state.state == "teleop" else ("idle" if self._state.state == "idle" else "returning")
@@ -693,51 +707,52 @@ class ArmCommandCoordinator:
                 self._enter_fault("proposal exceeds maximum command step")
 
     def tick(self, *, now_ns: int | None = None) -> dict[str, ArmJointCommand]:
-        now_ns = self.clock() if now_ns is None else int(now_ns)
-        self._validate_proposals(now_ns)
-        self._check_teleop_health(now_ns)
-        if (
-            self._state.state == "returning"
-            and self._hand_enabled()
-            and self._return_started_ns is not None
-            and now_ns - self._return_started_ns > int(self.config["hand_return_timeout_s"] * 1e9)
-            and not self._hand_at_zero_ready(now_ns)
-        ):
-            self._enter_fault("hand return timeout")
-        self._sequence += 1
-        timestamp_ns = now_ns
-        commands = {side: self._command(side, self._sequence, timestamp_ns) for side in ("left", "right")}
-        if self._state.state == "returning" and self._return_ready(now_ns) and all(command.position_rad == list(getattr(self.robot, f"{side}_home_rad")) for side, command in commands.items()):
-            self._state = self._make_state("idle", "return complete", self._state.intent_sequence)
-            self._at_home = LatchedBool(1, self._sequence, timestamp_ns, True, self.publisher_instance_id, self.router_zid)
-            self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, True, self.publisher_instance_id, self.router_zid)
-        else:
-            at_home = all(command.position_rad == list(getattr(self.robot, f"{side}_home_rad")) for side, command in commands.items())
-            self._at_home = LatchedBool(1, self._sequence, timestamp_ns, at_home, self.publisher_instance_id, self.router_zid)
-            self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, self._return_complete.value, self.publisher_instance_id, self.router_zid)
-        self._state = SessionState(1, self._sequence, timestamp_ns, self._state.state, self._state.reason, "coordinator", self._state.intent_sequence, self.publisher_instance_id, self.router_zid)
-        for side, command in commands.items():
-            self._publish(side, command.to_dict())
-        self._publish("state", self._state.to_dict())
-        status = ComponentStatus(
-            1,
-            self._sequence,
-            timestamp_ns,
-            "coordinator_arm",
-            "arm",
-            self._state.state,
-            self._state.state != "fault",
-            self._state.state != "fault",
-            [str(self.profile.get("required_capability", "simulation"))],
-            self._fault_reason if self._state.state == "fault" else None,
-            {"authority": "final_command_and_session_state"},
-            self.publisher_instance_id,
-            self.router_zid,
-        )
-        self._publish("status", status.to_dict())
-        self._publish("home", self._at_home.to_dict())
-        self._publish("complete", self._return_complete.to_dict())
-        return commands
+        with self._lock:
+            now_ns = self.clock() if now_ns is None else int(now_ns)
+            self._validate_proposals(now_ns)
+            self._check_teleop_health(now_ns)
+            if (
+                self._state.state == "returning"
+                and self._hand_enabled()
+                and self._return_started_ns is not None
+                and now_ns - self._return_started_ns > int(self.config["hand_return_timeout_s"] * 1e9)
+                and not self._hand_at_zero_ready(now_ns)
+            ):
+                self._enter_fault("hand return timeout")
+            self._sequence += 1
+            timestamp_ns = now_ns
+            commands = {side: self._command(side, self._sequence, timestamp_ns) for side in ("left", "right")}
+            if self._state.state == "returning" and self._return_ready(now_ns) and all(command.position_rad == list(getattr(self.robot, f"{side}_home_rad")) for side, command in commands.items()):
+                self._state = self._make_state("idle", "return complete", self._state.intent_sequence)
+                self._at_home = LatchedBool(1, self._sequence, timestamp_ns, True, self.publisher_instance_id, self.router_zid)
+                self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, True, self.publisher_instance_id, self.router_zid)
+            else:
+                at_home = all(command.position_rad == list(getattr(self.robot, f"{side}_home_rad")) for side, command in commands.items())
+                self._at_home = LatchedBool(1, self._sequence, timestamp_ns, at_home, self.publisher_instance_id, self.router_zid)
+                self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, self._return_complete.value, self.publisher_instance_id, self.router_zid)
+            self._state = SessionState(1, self._sequence, timestamp_ns, self._state.state, self._state.reason, "coordinator", self._state.intent_sequence, self.publisher_instance_id, self.router_zid)
+            for side, command in commands.items():
+                self._publish(side, command.to_dict())
+            self._publish("state", self._state.to_dict())
+            status = ComponentStatus(
+                1,
+                self._sequence,
+                timestamp_ns,
+                "coordinator_arm",
+                "arm",
+                self._state.state,
+                self._state.state != "fault",
+                self._state.state != "fault",
+                [str(self.profile.get("required_capability", "simulation"))],
+                self._fault_reason if self._state.state == "fault" else None,
+                {"authority": "final_command_and_session_state"},
+                self.publisher_instance_id,
+                self.router_zid,
+            )
+            self._publish("status", status.to_dict())
+            self._publish("home", self._at_home.to_dict())
+            self._publish("complete", self._return_complete.to_dict())
+            return commands
 
     def start(self) -> None:
         """订阅所有 authority 输入后，以 coordinator control rate 刷新输出。"""
@@ -782,42 +797,48 @@ class ArmCommandCoordinator:
             raise ProtocolError("empty Zenoh sample payload")
         return strict_loads(raw)
     def _on_intent_payload(self, sample: Any) -> None:
-        try:
-            payload = self._payload(sample)
-            from ..protocol.messages import SessionIntent
-            self.handle_intent(SessionIntent.from_dict(payload))
-        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
-            self._enter_fault("malformed session intent")
+        with self._lock:
+            try:
+                payload = self._payload(sample)
+                from ..protocol.messages import SessionIntent
+                self.handle_intent(SessionIntent.from_dict(payload))
+            except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+                self._enter_fault("malformed session intent")
 
 
     def _on_hand_executor_status_payload(self, sample: Any) -> None:
-        try:
-            self.update_hand_executor_status(self._payload(sample))
-        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
-            self._enter_fault("malformed hand executor status")
+        with self._lock:
+            try:
+                self.update_hand_executor_status(self._payload(sample))
+            except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+                self._enter_fault("malformed hand executor status")
 
     def _on_hand_state_payload(self, sample: Any) -> None:
-        try:
-            self.update_hand_state(self._payload(sample))
-        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
-            self._enter_fault("malformed hand state")
+        with self._lock:
+            try:
+                self.update_hand_state(self._payload(sample))
+            except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+                self._enter_fault("malformed hand state")
     def _on_component_payload(self, sample: Any) -> None:
-        try:
-            self.update_component(self._payload(sample))
-        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
-            self._enter_fault("malformed component status")
+        with self._lock:
+            try:
+                self.update_component(self._payload(sample))
+            except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+                self._enter_fault("malformed component status")
 
     def _on_arm_state_payload(self, sample: Any) -> None:
-        try:
-            self.update_arm_state(self._payload(sample))
-        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
-            self._enter_fault("malformed arm state")
+        with self._lock:
+            try:
+                self.update_arm_state(self._payload(sample))
+            except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+                self._enter_fault("malformed arm state")
 
     def _on_proposal_payload(self, sample: Any) -> None:
-        try:
-            self.update_proposal(self._payload(sample))
-        except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
-            self._enter_fault("malformed arm proposal")
+        with self._lock:
+            try:
+                self.update_proposal(self._payload(sample))
+            except (ProtocolError, TypeError, ValueError, json.JSONDecodeError):
+                self._enter_fault("malformed arm proposal")
 
     def close(self) -> None:
         if self._liveliness_token is not None:

@@ -159,3 +159,18 @@ $$
 修复将 arm 参数明确命名为 `arm_executor_config`、`arm_executor_instance` 和 `arm_executor_logical_id`，每行 hand UUID 只写入 `hand_executor_instance`。`executor_arm` 现在直接且始终引用 shell 传入的 `arm_executor_instance`；hand rows 只更新对应 side 的 `executor_hand`。logical id、router、disabled mapping 和 JSON schema 均保持不变，也不再依赖循环结束后的局部变量。
 
 按用户要求，本轮未运行任何测试、formatter、linter 或运行场景；仅人工审查 embedded Python 参数解包、hand rows 循环和最终 JSON 构造的数据流。
+
+## 评审修复轮 4：协调器状态序列与并发串行化
+
+线上 `h5_sim` 的 Wuji `invalid session state: session state sequence rollback` 根因位于 coordinator：control `tick()` 与 Zenoh callback 可并发读写 `_sequence`、`_state` 及输入缓存。旧实现允许 tick 先分配 sequence，intent callback 再递增并发布 SessionState，随后 tick 使用 callback 改过的当前 sequence 发布另一批消息；start readiness rejection 还会直接复用已发布 sequence。
+
+本轮只修改 arm coordinator：
+
+- 增加唯一 `threading.RLock`；完整 `tick()` 与全部 Zenoh input callback 在该锁内处理，status、proposal、arm/hand state 及 coordinator state/sequence 不再交错更新。control loop 的 `sleep` 仍在 `tick()` 返回后执行，不持锁等待。
+- queryable 在同一锁内取得并序列化 SessionState、`at_home`、`return_complete` 快照，再执行 reply，避免读取 tick 中途的混合状态。
+- 用单一 `_next_state()` 分配 standalone SessionState sequence。authority mismatch、fault-latched response、start non-idle、start readiness rejection，以及 accepted start/return 和内部 returning/fault transition 都先递增 sequence；拒绝快照同时保存为当前 `_state`，因此 subscriber 与后续 query snapshot 对该 intent 的拒绝结果一致可见。
+- 周期 tick 仍只分配一次 sequence；左右 final command、SessionState、coordinator status、`at_home` 与 `return_complete` 继续共享该 tick 的 sequence。accepted start 的 state/home/complete 和 accepted return 的 state/complete 也保持原有共享 sequence；未放宽任何 Wuji duplicate/rollback、authority、fault latch 或 readiness 检查。
+
+人工交错推演：假设上一批已发布 sequence 为 `N-1`。tick 先获得锁，分配 `N`，在锁内完整构造并发布左右 command、state、status 和 latch 后释放；期间 intent callback 只能等待。callback 随后获得锁，start 接受或拒绝均通过 `_next_state()` 分配并发布 `N+1`，再释放；下一次 tick 才能获得锁并分配、发布整批 `N+2`。反向调度时 callback 先发布 `N`，当前 tick 再发布 `N+1`，下个 tick 发布 `N+2`。两种调度均无 duplicate、rollback 或半更新快照。
+
+按用户要求未运行测试、formatter、linter或运行场景。未验证风险：尚未在真实 Zenoh callback 线程调度及 Wuji executor 上复测；publisher `put()` 现在位于原子发布临界区，若底层同步阻塞会延后输入 callback，但不会改变 sequence 顺序，且 control loop 不在锁内 sleep。
