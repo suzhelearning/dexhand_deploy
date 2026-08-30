@@ -338,13 +338,41 @@ fi
 mode="simulation"
 [[ "${required_capability}" == real ]] && mode=real
 acquire_teleop_guard "${profile}"
-install_teleop_cleanup_traps
+source_terminal_state=""
+restore_source_terminal() {
+  [[ -n "${source_terminal_state}" ]] || return 0
+  local saved_state="${source_terminal_state}"
+  source_terminal_state=""
+  if ! stty "${saved_state}" </dev/tty 2>/dev/null; then
+    printf '%s\n' '错误：受管 source 退出后无法恢复启动终端状态。' >&2
+    return 1
+  fi
+}
+run_session_cleanup_and_release() {
+  local cleanup_status=0
+  trap - EXIT INT TERM
+  teleop_cleanup_and_release || cleanup_status=$?
+  restore_source_terminal || cleanup_status=1
+  return "${cleanup_status}"
+}
+run_session_stop_on_signal() {
+  run_session_cleanup_and_release || true
+  exit 130
+}
+trap run_session_cleanup_and_release EXIT
+trap run_session_stop_on_signal INT TERM
 launch() {
   local label="$1"; shift
   local log_path="${TELEOP_RUNTIME_DIR}/${run_id}-${label}.log"
   local source_tty_fd=""
   if [[ "${label}" == source && -t 0 ]] &&
      { exec {source_tty_fd}<>/dev/tty; } 2>/dev/null; then
+    if ! source_terminal_state="$(stty -g <&"${source_tty_fd}" 2>/dev/null)" ||
+       [[ -z "${source_terminal_state}" ]]; then
+      exec {source_tty_fd}>&-
+      printf '%s\n' '错误：无法保存交互式 source 的启动终端状态。' >&2
+      return 1
+    fi
     setsid env PYTHONUNBUFFERED=1 "$@" <&"${source_tty_fd}" \
       > >(tee -- "${log_path}" >&"${source_tty_fd}") 2>&1 &
     local pid=$!

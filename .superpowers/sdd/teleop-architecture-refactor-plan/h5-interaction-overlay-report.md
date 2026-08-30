@@ -126,3 +126,16 @@ $$
 4. Frame0 是固定 diagnostics target，不设 freshness timeout；最后一个合法高 sequence skeleton 会一直显示到 viewer 关闭或进程重启。这避免固定 frame0 因 replay 阶段推进而消失，但也意味着 source 异常退出不会自动清除图形。
 5. 交互式日志镜像依赖系统 `tee`。`tee` 是短生命周期的 process-substitution companion，source 退出或受管进程组终止后随 pipe EOF 退出；实际被登记和反序停止的 authority process group 仍是 source 本身。
 6. 无 controlling TTY 或 launcher stdin 非 TTY 时有意回退到 `/dev/null`，不会阻塞；这类自动化必须通过协议注入或测试 fixture 驱动状态，不能期待键盘 `s`。
+
+## 评审修复轮 1：终端模式恢复
+
+评审指出：source 将继承的 `/dev/tty` 切换为 raw/no-echo 后，若 launcher 因其他组件异常而以 SIGTERM 反序清理，source 的 Python `finally` 不保证执行，可能把启动 shell 永久留在 raw 模式。
+
+修复采用 exact-state 恢复，而不是会覆盖用户自定义的 `stty sane`：
+
+1. 仅在交互式 source 已成功打开 `/dev/tty` 后、启动 source 前，通过该同一 FD 执行 `stty -g`，保存完整编码状态；无法保存时拒绝启动交互 source。
+2. `run_session_cleanup_and_release` 继续调用既有 `teleop_cleanup_and_release`，保持 common guard、受管进程组反序 TERM/KILL、记录保留和 guard release 语义。
+3. 只有既有 cleanup 已停止所有受管进程后，才执行 `stty \"${saved_state}\" </dev/tty`；EXIT、INT、TERM、source 登记失败和启动阶段退出都经过同一路径。
+4. 无 TTY 时状态为空，不调用 `stty`，仍显式给组件 `/dev/null`，不引入自动化阻塞。
+
+按用户最新指示，本修复轮未继续运行测试、formatter 或 linter；代码和报告直接提交。剩余实际风险是 launcher 自身遭遇不可捕获的 SIGKILL 或宿主崩溃时无法执行任何 EXIT trap，此时只能由用户在 shell 中人工恢复终端；可捕获的正常退出、INT 和 TERM 已覆盖。
