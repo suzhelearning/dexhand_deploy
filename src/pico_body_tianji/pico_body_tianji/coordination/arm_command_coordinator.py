@@ -303,7 +303,7 @@ class ArmCommandCoordinator:
         # the same typed payloads that subscribers receive.
         for key, getter in ((topics.SESSION_STATE, lambda: self._state), (topics.AT_HOME, lambda: self._at_home), (topics.RETURN_COMPLETE, lambda: self._return_complete)):
             if hasattr(session, "declare_queryable"):
-                self._queryables.append(session.declare_queryable(key, lambda query, get=getter, key=key: query.reply(key, self._snapshot_payload(get))))
+                self._queryables.append(session.declare_queryable(key, lambda query, get=getter, key=key: self._reply_snapshot(query, key, get)))
         for side in ("left", "right"):
             if hasattr(session, "declare_publisher"):
                 self._publishers[side] = session.declare_publisher(topics.arm_command(side))
@@ -318,17 +318,39 @@ class ArmCommandCoordinator:
         if publisher is not None:
             publisher.put(json.dumps(payload, separators=(",", ":")).encode("utf-8"), encoding="application/json")
 
-    def _snapshot_payload(self, getter: Callable[[], Any]) -> bytes:
-        with self._lock:
-            return json.dumps(getter().to_dict(), separators=(",", ":")).encode("utf-8")
+    def _publish_session_snapshot(self) -> None:
+        self._publish("state", self._state.to_dict())
+        self._publish("home", self._at_home.to_dict())
+        self._publish("complete", self._return_complete.to_dict())
 
+    def _reply_snapshot(self, query: Any, key: str, getter: Callable[[], Any]) -> None:
+        with self._lock:
+            payload = json.dumps(getter().to_dict(), separators=(",", ":")).encode("utf-8")
+            query.reply(key, payload)
 
     def _make_state(self, state: str, reason: str, intent_sequence: int | None) -> SessionState:
         return SessionState(1, self._sequence, self.clock(), state, reason, "coordinator", intent_sequence, self.publisher_instance_id, self.router_zid)
 
     def _next_state(self, state: str, reason: str, intent_sequence: int | None) -> SessionState:
         self._sequence += 1
-        return self._make_state(state, reason, intent_sequence)
+        next_state = self._make_state(state, reason, intent_sequence)
+        self._at_home = LatchedBool(
+            1,
+            self._sequence,
+            next_state.timestamp_ns,
+            self._at_home.value,
+            self.publisher_instance_id,
+            self.router_zid,
+        )
+        self._return_complete = LatchedBool(
+            1,
+            self._sequence,
+            next_state.timestamp_ns,
+            self._return_complete.value,
+            self.publisher_instance_id,
+            self.router_zid,
+        )
+        return next_state
 
     def _fresh(self, timed: _Timed | None, now_ns: int) -> bool:
         return timed is not None and 0 <= now_ns - timed.received_ns <= int(self.config["state_timeout_s"] * 1e9)
@@ -597,39 +619,36 @@ class ArmCommandCoordinator:
         ):
             rejected = self._next_state(self._state.state, "intent source authority mismatch", sequence)
             self._state = rejected
-            self._publish("state", rejected.to_dict())
+            self._publish_session_snapshot()
             return IntentResult(False, rejected, "intent source authority mismatch")
         if self._state.state == "fault":
             rejected = self._next_state("fault", self._fault_reason or "fault latched", sequence)
             self._state = rejected
-            self._publish("state", rejected.to_dict())
+            self._publish_session_snapshot()
             return IntentResult(False, rejected, "fault latched; restart required")
         if action == "start" and self._state.state != "idle":
             rejected = self._next_state(self._state.state, "start requires idle", sequence)
             self._state = rejected
-            self._publish("state", rejected.to_dict())
+            self._publish_session_snapshot()
             return IntentResult(False, rejected, "start requires idle")
         if action == "start":
             ready, why = self._start_ready(now_ns)
             if not ready:
                 rejected = self._next_state(self._state.state, why, sequence)
                 self._state = rejected
-                self._publish("state", rejected.to_dict())
+                self._publish_session_snapshot()
                 return IntentResult(False, rejected, why)
             self._state = self._next_state("teleop", "accepted", sequence)
             self._at_home = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
             self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
-            self._publish("state", self._state.to_dict())
-            self._publish("home", self._at_home.to_dict())
-            self._publish("complete", self._return_complete.to_dict())
+            self._publish_session_snapshot()
             return IntentResult(True, self._state, "accepted")
         if action in ("return", "shutdown"):
             self._return_started_ns = now_ns
             self._return_start_command = {side: list(values) for side, values in self._safe_command.items()}
             self._state = self._next_state("returning", reason or action, sequence)
             self._return_complete = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
-            self._publish("state", self._state.to_dict())
-            self._publish("complete", self._return_complete.to_dict())
+            self._publish_session_snapshot()
             return IntentResult(True, self._state, "accepted")
         return IntentResult(False, self._state, "unsupported intent")
 

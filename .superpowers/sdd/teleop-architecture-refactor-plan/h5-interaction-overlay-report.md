@@ -174,3 +174,17 @@ $$
 人工交错推演：假设上一批已发布 sequence 为 `N-1`。tick 先获得锁，分配 `N`，在锁内完整构造并发布左右 command、state、status 和 latch 后释放；期间 intent callback 只能等待。callback 随后获得锁，start 接受或拒绝均通过 `_next_state()` 分配并发布 `N+1`，再释放；下一次 tick 才能获得锁并分配、发布整批 `N+2`。反向调度时 callback 先发布 `N`，当前 tick 再发布 `N+1`，下个 tick 发布 `N+2`。两种调度均无 duplicate、rollback 或半更新快照。
 
 按用户要求未运行测试、formatter、linter或运行场景。未验证风险：尚未在真实 Zenoh callback 线程调度及 Wuji executor 上复测；publisher `put()` 现在位于原子发布临界区，若底层同步阻塞会延后输入 callback，但不会改变 sequence 顺序，且 control loop 不在锁内 sleep。
+
+## 评审修复轮 5：跨通道一致 sequence 快照
+
+复审进一步指出，只有 state 递增仍不足以满足 SessionClient 的 coordinator 全局 sequence baseline：若 state 已发布 `N+1`，但 `at_home`/`return_complete` 仍停留在 `N`，后到的 latch subscriber 或 query reply 会作为跨通道 rollback 被拒绝。另一个窗口是 queryable 只在锁内构造 payload、释放锁后才调用 `query.reply()`，因此旧 latch reply 的提交可能落在新 state publication 之后。
+
+最小修复如下：
+
+- `_reply_snapshot()` 现在从读取对象、JSON 序列化直到 `query.reply()` 返回都持有同一个 coordinator `RLock`；tick 或 intent publication 无法插入 query payload 与 reply 之间。
+- `_next_state()` 每次递增 state sequence 时，立即以同一 sequence 和 `SessionState.timestamp_ns` 刷新 `at_home` 与 `return_complete`，布尔值默认原样保留；accepted start 显式把两者置 false，return/returning/fault 显式把 completion 置 false，原有 latch 语义不变。
+- authority mismatch、fault-latched、start non-idle、readiness rejection、accepted start/return 的直接 response 都统一发布 state/home/complete 三件套；内部 returning/fault 即使在下一 tick 前被 query，也只会暴露同 sequence/timestamp 的一致快照。
+
+人工交错推演：上一组为 `N-1` 时，若 query 先持锁，它会完整 reply `N-1` 后才允许 intent/tick；intent 随后一次生成并发布 state/home/complete `N`，tick 再发布 command/state/home/complete `N+1`。若 intent 先持锁，则三件套 `N` 完整发布后 query 才能 reply 同一 `N` 快照，tick 最后发布 `N+1`；若 tick 先执行，则整批 `N`、intent 三件套 `N+1`、下一 tick 整批 `N+2`。不存在 state `N+1` 搭配 latch `N`，也不存在旧 latch reply 在本地新 state publication 中途插入。
+
+按用户要求仍未运行测试、formatter、linter或运行场景。剩余风险是 Zenoh 传输层在 `query.reply()` 返回后的网络投递仍可能受网络调度影响；本地 coordinator 已保证调用顺序和每个跨通道快照的 sequence/timestamp 一致，消费者现有 `(instance, sequence)` 合并规则仍负责丢弃真实网络旧包，未削弱 duplicate/rollback fault。
