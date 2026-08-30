@@ -1343,6 +1343,8 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
         return _run_acquisition(bundle, manifest, status, args)
     contract = CASE_CONTRACTS[manifest["case_id"]]
     command = ["bash", str(ROOT / "scripts" / "run_session.sh"), "--profile", profile]
+    if args.headless:
+        command.append("--headless")
     if contract["recordable"]:
         command += ["--record", str(bundle / "session.h5")]
     if args.input:

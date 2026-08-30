@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -126,6 +127,50 @@ class ValidationToolsTest(unittest.TestCase):
         self.assertEqual(env["TIANJI_ARM_PRODUCER_INSTANCE_ID"], manifest["publisher_instance_ids"]["producer_arm"])
         self.assertEqual(env["TIANJI_ARM_EXECUTOR_INSTANCE_ID"], manifest["publisher_instance_ids"]["executor_arm"])
         self.assertEqual(env["TIANJI_COORDINATOR_INSTANCE_ID"], manifest["publisher_instance_ids"]["coordinator_arm"])
+
+    def test_managed_h5_session_forwards_headless_only_when_requested(self):
+        from scripts.validation import run_case
+
+        for requested in (False, True):
+            with self.subTest(headless=requested), tempfile.TemporaryDirectory() as directory:
+                bundle = Path(directory)
+                (bundle / "logs").mkdir()
+                (bundle / "session.h5").touch()
+                cli = ["--case", "h5_sim", "--output", directory]
+                if requested:
+                    cli.append("--headless")
+                args = run_case.build_parser().parse_args(cli)
+                manifest = {
+                    "profile": "h5_sim",
+                    "case_id": "h5_sim",
+                    "run_id": "run-id",
+                    "router_zid": "router-id",
+                    "router": {"endpoint": "tcp/127.0.0.1:7447"},
+                    "publisher_instance_ids": {
+                        "validation_supervisor": "supervisor-id",
+                    },
+                    "resolved_hand_mode": "retarget",
+                    "ik_backend": "pinocchio_cpp",
+                    "producer": "ik",
+                    "max_duration_s": 1.0,
+                }
+                process = mock.Mock(returncode=0)
+                process.poll.return_value = 0
+                with (
+                    mock.patch.object(run_case, "_write_status"),
+                    mock.patch.object(run_case, "_managed_stop", return_value=None),
+                    mock.patch.object(run_case, "ManagedEvidenceCapture"),
+                    mock.patch.object(
+                        run_case.subprocess, "Popen", return_value=process
+                    ) as popen,
+                ):
+                    self.assertEqual(
+                        run_case._run_session(bundle, manifest, mock.Mock(), args),
+                        0,
+                    )
+                command = popen.call_args.args[0]
+                self.assertEqual(command.count("--headless"), int(requested))
+
     def test_session_launcher_consumes_handoff_ids(self):
         launcher = (ROOT / "scripts" / "run_session.sh").read_text(encoding="utf-8")
         for expression in (

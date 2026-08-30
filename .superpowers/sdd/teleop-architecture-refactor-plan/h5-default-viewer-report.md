@@ -105,3 +105,40 @@ $ scripts/run_session.sh --profile h5_real --viewer --confirm-real
 
 - 自动测试覆盖 wrapper 的真实参数解析和 session 的真实启动参数组装，但为隔离 router/设备依赖，在 `setsid` 进程启动边界使用受控替身；本轮未启动真实 Zenoh session 或实际 MuJoCo 图形窗口。
 - Viewer 需要可用的图形显示/OpenGL 环境；headless 自动化必须继续显式追加 `--headless`。实际 GUI 渲染能力仍取决于运行主机。
+
+## 修复轮 1：validation `--headless` 透传
+
+评审发现 `scripts/validation/run_case.py:_run_session()` 已把
+`args.headless` 写入 manifest，但未把对应 flag 传给 `run_session.sh`。因此
+`validation-run --case h5_sim --headless` 仍会触发 H5 的默认 viewer。
+
+新增最小行为测试，在受控 `subprocess.Popen` 边界读取 validation 实际组装的
+session 命令，并同时覆盖 headless 与非 headless 两种调用。实现前红灯：
+
+```text
+PYTHONPATH="$PWD/src/pico_body_tianji:$PWD/vendor/python" pixi run python -m unittest tests.test_validation_tools.ValidationToolsTest.test_managed_h5_session_forwards_headless_only_when_requested
+```
+
+```text
+FAIL (headless=True)
+AssertionError: 0 != 1
+----------------------------------------------------------------------
+Ran 1 test in 0.015s
+
+FAILED (failures=1)
+```
+
+修复后 `_run_session()` 仅在 `args.headless` 为真时向 `run_session.sh` 命令追加
+一次 `--headless`；非 headless 命令保持不变。最终实际输出：
+
+```text
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.015s
+
+OK
+
+Wall time: 0.18 seconds
+```
+
+本轮仍未运行 formatter、linter 或项目级测试。
