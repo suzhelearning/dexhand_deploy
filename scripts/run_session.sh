@@ -348,11 +348,30 @@ restore_source_terminal() {
     return 1
   fi
 }
+source_process_group_remains() {
+  local process_group=""
+  local start_ticks=""
+  local term_timeout_s=""
+  local label=""
+  [[ -r "${TELEOP_CHILDREN_FILE}" ]] || return 1
+  while IFS=$'\t' read -r process_group start_ticks term_timeout_s label; do
+    [[ "${label}" == source ]] && return 0
+  done < "${TELEOP_CHILDREN_FILE}"
+  return 1
+}
 run_session_cleanup_and_release() {
   local cleanup_status=0
   trap - EXIT INT TERM
   teleop_cleanup_and_release || cleanup_status=$?
-  restore_source_terminal || cleanup_status=1
+  if [[ -n "${source_terminal_state}" ]] &&
+     source_process_group_remains; then
+    printf '%s\n' \
+      '错误：受管 source 进程组仍存活；保留 guard/children 记录且拒绝恢复终端状态。' \
+      >&2
+    cleanup_status=1
+  else
+    restore_source_terminal || cleanup_status=1
+  fi
   return "${cleanup_status}"
 }
 run_session_stop_on_signal() {

@@ -139,3 +139,15 @@ $$
 4. 无 TTY 时状态为空，不调用 `stty`，仍显式给组件 `/dev/null`，不引入自动化阻塞。
 
 按用户最新指示，本修复轮未继续运行测试、formatter 或 linter；代码和报告直接提交。剩余实际风险是 launcher 自身遭遇不可捕获的 SIGKILL 或宿主崩溃时无法执行任何 EXIT trap，此时只能由用户在 shell 中人工恢复终端；可捕获的正常退出、INT 和 TERM 已覆盖。
+
+## 评审修复轮 2：仅在 source 已停止后恢复终端
+
+正式复审指出：`teleop_cleanup_and_release` 返回非零时，`TELEOP_CHILDREN_FILE` 会保留未能停止的受管进程记录；上一轮无条件恢复终端，可能与仍存活、仍在设置 raw mode 的 source 竞争。
+
+本轮在不重新解释 PID/start-ticks、也不改变 common 身份验证和释放规则的前提下，只读取 common cleanup 留下的失败记录：
+
+- 若失败记录仍含精确 label `source` 且存在 saved tty state，则明确报错，保留 saved state、guard 和 children 失败记录，并拒绝执行 `stty`。
+- 若 cleanup 失败仅涉及其他 label，而 `source` 已不在失败记录中，则安全恢复 exact tty state。
+- cleanup 成功时 children file 已由既有 guard release 删除，正常恢复 exact state。
+
+按用户指示，本轮未运行任何测试、formatter、linter 或其他验证命令。
