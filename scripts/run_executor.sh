@@ -9,7 +9,7 @@ executor_id=""
 mode=""
 side="right"
 config_override=""
-headless=false
+display_mode="config"
 confirm_real=false
 real_capability_provider=""
 required_capability="${TIANJI_REQUIRED_CAPABILITY:-simulation}"
@@ -19,10 +19,28 @@ while (($#)); do
     --mode) mode="${2:-}"; shift 2 ;;
     --side) side="${2:-}"; shift 2 ;;
     --config) config_override="${2:-}"; shift 2 ;;
+    --viewer)
+      [[ "${display_mode}" != headless ]] || {
+        printf '%s\n' '错误：--viewer 与 --headless 互斥。' >&2
+        exit 2
+      }
+      display_mode=viewer
+      shift
+      ;;
+    --headless)
+      [[ "${display_mode}" != viewer ]] || {
+        printf '%s\n' '错误：--viewer 与 --headless 互斥。' >&2
+        exit 2
+      }
+      display_mode=headless
+      shift
+      ;;
     --confirm-real) confirm_real=true; shift ;;
     --real-capability-provider) real_capability_provider="${2:-}"; shift 2 ;;
     --help|-h)
-      printf '%s\n' '用法: run_executor.sh --executor {mujoco|marvin|wuji_hand2} [--side left|right] [--headless|--confirm-real]'
+      printf '%s\n' \
+        '用法: run_executor.sh --executor {mujoco|marvin|wuji_hand2} [--side left|right] [--viewer|--headless] [--confirm-real]' \
+        'MuJoCo: --viewer 覆盖 config 的 headless: true；--headless 显式启用无窗口模式。'
       exit 0 ;;
     --) shift; break ;;
     *) break ;;
@@ -48,13 +66,20 @@ case "${executor_id}" in
     ;;
   *) printf '错误：未知 executor: %s\n' "${executor_id}" >&2; exit 2 ;;
 esac
+if [[ "${executor_id}" != mujoco && "${display_mode}" != config ]]; then
+  printf '%s\n' '错误：--viewer/--headless 仅适用于 MuJoCo executor。' >&2
+  exit 2
+fi
 if [[ ! -x "${entry}" ]]; then
   printf '错误：executor entry 不存在或不可执行: %s\n' "${entry}" >&2
   exit 1
 fi
 config="${config_override}"
 if [[ -z "${config}" ]]; then config="$(canonical_config "${default_config}")"; fi
-if [[ "${executor_id}" == mujoco && "${headless}" == false ]]; then
+headless=false
+if [[ "${executor_id}" == mujoco && "${display_mode}" == headless ]]; then
+  headless=true
+elif [[ "${executor_id}" == mujoco && "${display_mode}" == config ]]; then
   # Headless is a component-configured execution mode.  The wrapper must
   # forward it explicitly so no-DISPLAY launches never fall through to the
   # passive viewer by accident.

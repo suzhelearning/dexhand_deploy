@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 import unittest
 
@@ -112,6 +114,203 @@ class Task8LauncherTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("replay profile cannot be recorded", result.stderr)
+
+    def _run_mujoco_executor(
+        self, *display_args: str
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            capture = root / "python-args.txt"
+            python = bin_dir / "python"
+            python.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            pixi = bin_dir / "pixi"
+            pixi.write_text(
+                "#!/bin/sh\n"
+                "[ \"${1:-}\" = run ] && [ \"${2:-}\" = python ] || exit 2\n"
+                "shift 2\n"
+                "exec \"$REAL_PYTHON\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            pixi.chmod(0o755)
+            config = CONFIG / "executors" / "mujoco.yaml"
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": f"{bin_dir}:{env['PATH']}",
+                    "CAPTURE": str(capture),
+                    "REAL_PYTHON": sys.executable,
+                    "TIANJI_ROUTER_ZID": "router",
+                    "TIANJI_COORDINATOR_INSTANCE_ID": "coordinator",
+                    "TIANJI_COMPONENT_INSTANCE_ID": "executor",
+                }
+            )
+            result = subprocess.run(
+                [
+                    str(SCRIPTS / "run_executor.sh"),
+                    "--executor",
+                    "mujoco",
+                    *display_args,
+                    "--config",
+                    str(config),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            arguments = (
+                capture.read_text(encoding="utf-8").splitlines()
+                if capture.exists()
+                else []
+            )
+            return result, arguments
+
+    def test_mujoco_viewer_consumes_override_without_forwarding_headless(
+        self,
+    ) -> None:
+        result, arguments = self._run_mujoco_executor("--viewer")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("--viewer", arguments)
+        self.assertNotIn("--headless", arguments)
+        self.assertEqual(arguments.count("--config"), 1)
+        config = CONFIG / "executors" / "mujoco.yaml"
+        self.assertEqual(arguments[arguments.index("--config") + 1], str(config))
+
+    def test_mujoco_headless_is_forwarded_and_display_flags_are_exclusive(
+        self,
+    ) -> None:
+        result, arguments = self._run_mujoco_executor()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(arguments.count("--headless"), 1)
+
+        result, arguments = self._run_mujoco_executor("--headless")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(arguments.count("--headless"), 1)
+
+        result, _ = self._run_mujoco_executor("--viewer", "--headless")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("互斥", result.stderr)
+
+    def _run_h5_session_until_components_are_wired(
+        self, *display_args: str
+    ) -> list[list[str]]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            capture = root / "launches.tsv"
+
+            python = bin_dir / "python"
+            python.write_text(
+                "#!/bin/sh\n"
+                "case \"${1:-}\" in\n"
+                "  -) printf '%s\\n' router-zid ;;\n"
+                "  -c) exit 0 ;;\n"
+                "  *) exit 1 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+
+            pixi = bin_dir / "pixi"
+            pixi.write_text(
+                "#!/bin/sh\n"
+                "[ \"${1:-}\" = run ] && [ \"${2:-}\" = python ] || exit 2\n"
+                "shift 2\n"
+                "exec \"$REAL_PYTHON\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            pixi.chmod(0o755)
+
+            setsid = bin_dir / "setsid"
+            setsid.write_text(
+                "#!/bin/sh\n"
+                "{ printf 'CALL'; for arg in \"$@\"; do "
+                "printf '\\t%s' \"$arg\"; done; "
+                "printf '\\n'; } >> \"$CAPTURE\"\n"
+                "case \" $* \" in\n"
+                "  *'/run_source.sh '*) "
+                "exec /usr/bin/setsid /bin/sleep 0.05 ;;\n"
+                "  *) exec /usr/bin/setsid /bin/sleep 2 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            setsid.chmod(0o755)
+
+            sleep = bin_dir / "sleep"
+            sleep.write_text(
+                "#!/bin/sh\nexec /bin/sleep 0.01\n",
+                encoding="utf-8",
+            )
+            sleep.chmod(0o755)
+
+            h5_path = root / "take.h5"
+            h5_path.touch()
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": f"{bin_dir}:{env['PATH']}",
+                    "CAPTURE": str(capture),
+                    "REAL_PYTHON": sys.executable,
+                    "PICO_TIANJI_NODE_LIST_OVERRIDE": "",
+                    "PICO_TIANJI_RUNTIME_DIR": str(root / "runtime"),
+                    "TIANJI_VALIDATION_HAND_MODE": "retarget",
+                }
+            )
+            result = subprocess.run(
+                [
+                    str(SCRIPTS / "run_session.sh"),
+                    "--profile",
+                    "h5_sim",
+                    "--h5",
+                    str(h5_path),
+                    *display_args,
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                env=env,
+                timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            return [
+                line.split("\t")[1:]
+                for line in capture.read_text(encoding="utf-8").splitlines()
+            ]
+
+    def test_h5_session_selects_default_viewer_and_explicit_headless(
+        self,
+    ) -> None:
+        cases = (((), "--viewer"), (("--headless",), "--headless"))
+        for display_args, expected in cases:
+            with self.subTest(display_args=display_args):
+                launches = self._run_h5_session_until_components_are_wired(
+                    *display_args
+                )
+                arm_executor = next(
+                    args
+                    for args in launches
+                    if any(arg.endswith("/run_executor.sh") for arg in args)
+                    and args[args.index("--executor") + 1] == "mujoco"
+                )
+                source = next(
+                    args
+                    for args in launches
+                    if any(arg.endswith("/run_source.sh") for arg in args)
+                )
+                self.assertIn(expected, arm_executor)
+                self.assertNotIn(
+                    "--headless" if expected == "--viewer" else "--viewer",
+                    arm_executor,
+                )
+                self.assertNotIn("--viewer", source)
+                self.assertNotIn("--headless", source)
 
 
 if __name__ == "__main__":

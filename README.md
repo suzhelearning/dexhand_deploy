@@ -18,6 +18,13 @@ pixi run target_replay_sim -- session.h5
 pixi run joint_replay_sim -- session.h5
 ```
 
+`h5_sim` 默认打开 MuJoCo viewer；自动化或无显示环境必须显式追加
+`--headless`：
+
+```bash
+pixi run h5_sim -- --h5 TAKE.h5 --headless
+```
+
 真实设备必须明确确认，且由 profile 的 real capability、HostReadiness 和设备
 preflight 共同放行：
 

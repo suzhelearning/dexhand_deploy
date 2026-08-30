@@ -9,6 +9,7 @@ profile=""
 record_path=""
 input_path=""
 confirm_real=false
+display_mode=""
 extra_args=()
 while (($#)); do
   case "$1" in
@@ -16,8 +17,27 @@ while (($#)); do
     --record) record_path="${2:-}"; shift 2 ;;
     --h5|--input) input_path="${2:-}"; shift 2 ;;
     --confirm-real) confirm_real=true; shift ;;
+    --viewer)
+      [[ "${display_mode}" != headless ]] || {
+        printf '%s\n' '错误：--viewer 与 --headless 互斥。' >&2
+        exit 2
+      }
+      display_mode=viewer
+      shift
+      ;;
+    --headless)
+      [[ "${display_mode}" != viewer ]] || {
+        printf '%s\n' '错误：--viewer 与 --headless 互斥。' >&2
+        exit 2
+      }
+      display_mode=headless
+      shift
+      ;;
     --help|-h)
-      printf '%s\n' '用法: run_session.sh --profile PROFILE [--record PATH] [--confirm-real] [--h5 PATH]'
+      printf '%s\n' \
+        '用法: run_session.sh --profile PROFILE [--record PATH] [--confirm-real] [--h5 PATH] [--viewer|--headless]' \
+        '显示模式：h5_sim 默认打开 MuJoCo viewer；追加 --headless 可显式启用无窗口模式。' \
+        '其他 profile 保持 executor config 默认；--viewer 只允许 simulation + MuJoCo executor。'
       exit 0 ;;
     --) shift; extra_args+=("$@"); break ;;
     *)
@@ -88,6 +108,27 @@ if [[ -n "${forced_hand_mode}" ]]; then hand_mode="${forced_hand_mode}"; fi
   printf '%s\n' '错误：session profile 缺少 source/executor/coordinator config。' >&2
   exit 2
 }
+if [[ -z "${display_mode}" ]]; then
+  if [[ "${profile}" == h5_sim ]]; then
+    display_mode=viewer
+  else
+    display_mode=config
+  fi
+fi
+if [[ "${display_mode}" != config && "${arm_executor_config}" != executors/mujoco.yaml ]]; then
+  printf '%s\n' '错误：--viewer/--headless 仅适用于 MuJoCo executor。' >&2
+  exit 2
+fi
+if [[ "${display_mode}" == viewer && "${required_capability}" != simulation ]]; then
+  printf '%s\n' '错误：--viewer 只允许 simulation + MuJoCo executor。' >&2
+  exit 2
+fi
+arm_display_args=()
+if [[ "${display_mode}" == viewer ]]; then
+  arm_display_args+=(--viewer)
+elif [[ "${display_mode}" == headless ]]; then
+  arm_display_args+=(--headless)
+fi
 if [[ "${hand_mode}" == disabled ]]; then
   hand_executor=none
   active_hand_sides=""
@@ -386,7 +427,7 @@ launch_arm_executor() {
     hand_args+=(--hand-sides "")
   fi
   if [[ "${arm_executor_config}" == executors/mujoco.yaml ]]; then
-    launch arm_executor "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_executor_instance}" bash "${SCRIPT_DIR}/run_executor.sh" --executor mujoco --config "$(canonical_config "${arm_executor_config}")" "${hand_args[@]}"
+    launch arm_executor "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_executor_instance}" bash "${SCRIPT_DIR}/run_executor.sh" --executor mujoco --config "$(canonical_config "${arm_executor_config}")" "${arm_display_args[@]}" "${hand_args[@]}"
   else
     launch arm_executor "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_executor_instance}" bash "${SCRIPT_DIR}/run_executor.sh" --executor marvin --config "$(canonical_config "${arm_executor_config}")" --confirm-real
   fi
