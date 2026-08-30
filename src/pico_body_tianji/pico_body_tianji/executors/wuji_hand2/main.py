@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from pathlib import Path
 
@@ -20,11 +21,19 @@ def _native_bridge() -> Path | None:
     return next((path for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
 
 
+def _positive_finite_rate(value: str) -> float:
+    rate = float(value)
+    if not math.isfinite(rate) or rate <= 0.0:
+        raise argparse.ArgumentTypeError("--rate must be a positive finite float")
+    return rate
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="canonical Wuji Hand 2 executor")
     parser.add_argument("--mode", choices=("direct", "retarget"), required=True)
     parser.add_argument("--side", choices=("left", "right"), required=True)
     parser.add_argument("--config", default=None)
+    parser.add_argument("--rate", type=_positive_finite_rate, default=100.0)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     if not args.dry_run:
@@ -67,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=os.environ.get("TIANJI_RUN_ID"),
             safety_supervisor_instance_id=os.environ.get("TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID"),
         )
-        executor.run()
+        executor.run(rate_hz=args.rate)
     except KeyboardInterrupt:
         return 0
     finally:

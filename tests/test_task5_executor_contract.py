@@ -8,6 +8,7 @@ from unittest.mock import patch
 import numpy as np
 
 import pico_body_tianji.executors.mujoco.node as mujoco_node
+import pico_body_tianji.executors.wuji_hand2.main as wuji_main_module
 
 from pico_body_tianji.executors.marvin.bridge import MarvinExecutor
 from pico_body_tianji.executors.marvin.readiness import MarvinReadiness
@@ -172,6 +173,49 @@ class Task5ExecutorContractTest(unittest.TestCase):
             / "tianji_wuji2"
             / "tianji_wuji2.urdf",
         )
+
+    def test_wuji_dry_run_accepts_configured_rate(self):
+        captured = {}
+
+        class FakeSession:
+            def close(self):
+                captured["session_closed"] = True
+
+        class FakeExecutor:
+            def __init__(self, **kwargs):
+                captured["executor_kwargs"] = kwargs
+
+            def run(self, *, rate_hz):
+                captured["rate_hz"] = rate_hz
+
+            def close(self):
+                captured["executor_closed"] = True
+
+        with (
+            patch.object(wuji_main_module, "open_session", return_value=FakeSession()),
+            patch.object(wuji_main_module, "require_single_router", return_value="router"),
+            patch.object(wuji_main_module, "WujiHandExecutor", FakeExecutor),
+        ):
+            try:
+                result = wuji_main_module.main(
+                    [
+                        "--mode",
+                        "retarget",
+                        "--side",
+                        "right",
+                        "--dry-run",
+                        "--rate",
+                        "60",
+                    ]
+                )
+            except SystemExit as exc:
+                result = exc.code
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured["rate_hz"], 60.0)
+        self.assertTrue(captured["executor_closed"])
+        self.assertTrue(captured["session_closed"])
+
     def test_mujoco_snapshot_barrier_requires_typed_replies(self):
         clock = _Clock(time.monotonic_ns())
         now = clock()
