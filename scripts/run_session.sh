@@ -328,16 +328,19 @@ PY
 [[ -n "${authorities_json}" ]] || { printf '%s\n' '错误：无法构造完整 authority mapping。' >&2; exit 1; }
 export TIANJI_AUTHORITIES="${authorities_json}"
 activate_bundle_runtime
-if ! existing_tokens="$(read_teleop_node_list)"; then
-  printf '%s\n' '错误：无法完成启动前 live domain preflight。' >&2
-  exit 1
-fi
-if [[ -n "${existing_tokens}" ]]; then
-  assert_profile_domains_free "${existing_tokens}"
-fi
 mode="simulation"
 [[ "${required_capability}" == real ]] && mode=real
 acquire_teleop_guard "${profile}"
+if ! existing_tokens="$(read_teleop_node_list)"; then
+  release_teleop_guard
+  printf '%s\n' '错误：无法完成启动前 live domain preflight。' >&2
+  exit 1
+fi
+if [[ -n "${existing_tokens}" ]] &&
+   ! assert_profile_domains_free "${existing_tokens}"; then
+  release_teleop_guard
+  exit 1
+fi
 source_terminal_state=""
 restore_source_terminal() {
   [[ -n "${source_terminal_state}" ]] || return 0
