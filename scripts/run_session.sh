@@ -304,23 +304,23 @@ authorities_json="$(
 import json
 import sys
 
-source, source_instance, arm_producer, arm_producer_instance, executor_config, executor_instance, coordinator, router, rows = sys.argv[1:]
-executor = "marvin" if executor_config == "marvin.yaml" else "mujoco"
+source, source_instance, arm_producer, arm_producer_instance, arm_executor_config, arm_executor_instance, coordinator, router, rows = sys.argv[1:]
+arm_executor_logical_id = "marvin" if arm_executor_config == "marvin.yaml" else "mujoco"
 disabled = {"logical_id": "disabled", "publisher_instance_id": "disabled", "router_zid": router, "enabled": False}
 hand_producers = {"left": dict(disabled), "right": dict(disabled)}
 hand_executors = {"left": dict(disabled), "right": dict(disabled)}
 for row in rows.split(","):
     if not row:
         continue
-    side, producer, producer_instance, executor_instance = row.split("|")
+    side, producer, producer_instance, hand_executor_instance = row.split("|")
     hand_producers[side] = {"logical_id": producer, "publisher_instance_id": producer_instance, "router_zid": router}
-    hand_executors[side] = {"logical_id": f"wuji_{side}", "publisher_instance_id": executor_instance, "router_zid": router}
+    hand_executors[side] = {"logical_id": f"wuji_{side}", "publisher_instance_id": hand_executor_instance, "router_zid": router}
 print(json.dumps({
     "source": {"logical_id": source, "publisher_instance_id": source_instance, "router_zid": router},
     "producer_arm": {"logical_id": arm_producer, "publisher_instance_id": arm_producer_instance or "disabled", "router_zid": router, "enabled": bool(arm_producer_instance)},
     "producer_hand": hand_producers,
     "coordinator_arm": {"logical_id": "arm", "publisher_instance_id": coordinator, "router_zid": router},
-    "executor_arm": {"logical_id": executor, "publisher_instance_id": executor_instance, "router_zid": router},
+    "executor_arm": {"logical_id": arm_executor_logical_id, "publisher_instance_id": arm_executor_instance, "router_zid": router},
     "executor_hand": hand_executors,
 }, separators=(",", ":")))
 PY

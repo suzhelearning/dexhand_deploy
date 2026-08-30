@@ -151,3 +151,11 @@ $$
 - cleanup 成功时 children file 已由既有 guard release 删除，正常恢复 exact state。
 
 按用户指示，本轮未运行任何测试、formatter、linter 或其他验证命令。
+
+## 评审修复轮 3：隔离 arm 与 hand executor authority 变量
+
+根因是 `run_session.sh` 的 embedded Python 先把 shell 传入的 arm executor UUID 解包到 `executor_instance`，随后 hand authority rows 循环又把每行 hand executor UUID 解包到同名变量。Python 循环变量在循环结束后仍保留，因此启用 hand 时 `authorities["executor_arm"].publisher_instance_id` 被最后一侧 hand executor UUID 覆盖，coordinator 从启动起报告 `component authority mismatch for executor_arm/mujoco`。
+
+修复将 arm 参数明确命名为 `arm_executor_config`、`arm_executor_instance` 和 `arm_executor_logical_id`，每行 hand UUID 只写入 `hand_executor_instance`。`executor_arm` 现在直接且始终引用 shell 传入的 `arm_executor_instance`；hand rows 只更新对应 side 的 `executor_hand`。logical id、router、disabled mapping 和 JSON schema 均保持不变，也不再依赖循环结束后的局部变量。
+
+按用户要求，本轮未运行任何测试、formatter、linter 或运行场景；仅人工审查 embedded Python 参数解包、hand rows 循环和最终 JSON 构造的数据流。
