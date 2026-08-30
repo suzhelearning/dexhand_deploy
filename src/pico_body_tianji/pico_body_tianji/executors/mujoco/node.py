@@ -665,6 +665,14 @@ class MujocoExecutor:
                     pass
         self._subscriptions.clear()
         self._publishers.clear()
+def _resolve_configured_urdf(config_path: Path, value: str | os.PathLike[str]) -> Path:
+    urdf = Path(value)
+    if urdf.is_absolute():
+        return urdf
+    package_root = config_path.expanduser().resolve().parents[2]
+    return package_root / urdf
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="canonical MuJoCo executor")
     parser.add_argument("--headless", action="store_true", help="run without mujoco.viewer")
@@ -687,7 +695,7 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(configured, Mapping):
             raise SystemExit("MuJoCo config must be a mapping")
         if args.urdf is None and configured.get("urdf"):
-            args.urdf = Path(configured["urdf"])
+            args.urdf = _resolve_configured_urdf(args.config, configured["urdf"])
         if args.rate == 60.0 and configured.get("rate_hz"):
             args.rate = float(configured["rate_hz"])
     if args.hand_sides is None:
