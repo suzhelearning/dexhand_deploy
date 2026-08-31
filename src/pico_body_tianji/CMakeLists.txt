@@ -35,6 +35,21 @@ endif()
 
 find_package(Eigen3 REQUIRED)
 
+# 与 TJ_arm_control 保持同一版本；静态链接，部署时无需额外共享库。
+include(FetchContent)
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_PYTHON_MODULE OFF CACHE BOOL "" FORCE)
+set(BUILD_CLOUD_CLIENT OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  ruckig
+  GIT_REPOSITORY https://github.com/pantor/ruckig.git
+  GIT_TAG v0.19.4
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(ruckig)
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 execute_process(
   COMMAND
@@ -61,6 +76,7 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 add_library(
   arm_ik
+  src/control/joint_trajectory_limiter.cpp
   src/ik/arm_ik_factory.cpp
   src/ik/pinocchio_cpp/pinocchio_arm_ik.cpp
   src/ik/pinocchio_qp/pinocchio_qp_arm_ik.cpp
@@ -77,7 +93,7 @@ target_include_directories(
     $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(
-  arm_ik PUBLIC Eigen3::Eigen pinocchio::pinocchio ${CMAKE_DL_LIBS}
+  arm_ik PUBLIC Eigen3::Eigen pinocchio::pinocchio ruckig::ruckig ${CMAKE_DL_LIBS}
 )
 
 # 厂商 libKine 与 Pinocchio 的依赖闭包不能安全共存。native 库只链接
@@ -125,10 +141,15 @@ add_executable(
   pinocchio_qp_ik_probe
   src/pinocchio_qp/pinocchio_qp_ik_probe.cpp
 )
+add_executable(
+  joint_trajectory_limiter_probe
+  src/control/joint_trajectory_limiter_probe.cpp
+)
 target_compile_features(arm_ik_producer PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_probe PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_worker PUBLIC cxx_std_17)
 target_compile_features(pinocchio_qp_ik_probe PUBLIC cxx_std_17)
+target_compile_features(joint_trajectory_limiter_probe PUBLIC cxx_std_17)
 target_compile_options(
   arm_ik_producer PRIVATE -Wall -Wextra -Wpedantic
 )
@@ -141,6 +162,9 @@ target_compile_options(
 target_compile_options(
   pinocchio_qp_ik_probe PRIVATE -Wall -Wextra -Wpedantic
 )
+target_compile_options(
+  joint_trajectory_limiter_probe PRIVATE -Wall -Wextra -Wpedantic
+)
 target_include_directories(
   arm_ik_producer PRIVATE
     "${ZENOH_CPP_ROOT}/include"
@@ -151,6 +175,7 @@ target_link_libraries(arm_ik_producer arm_ik "${ZENOH_ROOT}/lib/libzenohc.so")
 target_link_libraries(tianji_official_ik_probe tianji_official_native)
 target_link_libraries(tianji_official_ik_worker tianji_official_native)
 target_link_libraries(pinocchio_qp_ik_probe arm_ik)
+target_link_libraries(joint_trajectory_limiter_probe arm_ik)
 # 便携 runtime 层为 glibc 2.35：把 glibc 2.38 的 __isoc23_strtol
 # 引用改接到 shim（见 glibc_isoc23_strtol_shim.cpp）。
 target_sources(arm_ik_producer PRIVATE src/tianji_official/glibc_isoc23_strtol_shim.cpp)
@@ -217,6 +242,7 @@ install(
     tianji_official_ik_probe
     tianji_official_ik_worker
     pinocchio_qp_ik_probe
+    joint_trajectory_limiter_probe
     wuji_hand2
     wuji_hand2_bridge
   ARCHIVE DESTINATION lib

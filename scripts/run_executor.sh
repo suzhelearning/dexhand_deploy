@@ -103,6 +103,20 @@ export TIANJI_COMPONENT_INSTANCE_ID="${TIANJI_COMPONENT_INSTANCE_ID:-$(new_insta
 export TIANJI_COORDINATOR_INSTANCE_ID="${TIANJI_COORDINATOR_INSTANCE_ID:?必须由run_session注入 TIANJI_COORDINATOR_INSTANCE_ID}"
 export TIANJI_ARM_CONFIG="${TIANJI_ARM_CONFIG:-$(canonical_config robot/arm.yaml)}"
 export TIANJI_HAND_CONFIG="${TIANJI_HAND_CONFIG:-$(canonical_config robot/wuji_hand2.yaml)}"
+export TIANJI_DEVICE_CONFIG="${TIANJI_DEVICE_CONFIG:-$(canonical_config robot/devices.yaml)}"
+device_config_value() {
+  pixi run python - "${TIANJI_DEVICE_CONFIG}" "$@" <<'PY'
+import sys
+import yaml
+
+value = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+for key in sys.argv[2:]:
+    value = value[key]
+if not isinstance(value, str) or not value.strip():
+    raise SystemExit("device config value must be a non-empty string")
+print(value.strip())
+PY
+}
 case "${executor_id}" in
   mujoco)
     args=(--coordinator-instance-id "${TIANJI_COORDINATOR_INSTANCE_ID}" --publisher-instance-id "${TIANJI_COMPONENT_INSTANCE_ID}" --config "${config}")
@@ -112,13 +126,14 @@ case "${executor_id}" in
     ;;
   marvin)
     args=(--confirm-real --config "${config}")
-    [[ -n "${MARVIN_ROBOT_IP:-}" ]] && args+=(--robot-ip "${MARVIN_ROBOT_IP}")
+    marvin_robot_ip="${MARVIN_ROBOT_IP:-$(device_config_value marvin ip)}"
+    args+=(--robot-ip "${marvin_robot_ip}")
     export TIANJI_REAL_CAPABILITY_PROVIDER="${real_capability_provider:-pico_body_tianji.executors.marvin.preflight:trusted_real_capability}"
     exec python "${entry}" "${args[@]}" "$@"
     ;;
   wuji_hand2)
     [[ "${mode}" == direct || "${mode}" == retarget ]] || { printf '%s\n' 'Wuji executor requires --mode direct|retarget' >&2; exit 2; }
-    export TIANJI_WUJI_CONFIG="${config}"
+    export TIANJI_WUJI_CONFIG="${TIANJI_HAND_CONFIG}"
     rate="$(
       pixi run python - "${config}" <<'PY'
 import sys
@@ -128,8 +143,9 @@ print(value.get("rate_hz", 100))
 PY
     )"
     args=(--mode "${mode}" --side "${side}" --rate "${rate}")
-    if [[ "${required_capability}" == simulation ]]; then
-      exec python "${entry}" "${args[@]}" --dry-run "$@"
+    if [[ "${required_capability}" == real && "${side}" == right ]]; then
+      wuji_serial="${TIANJI_WUJI_SERIAL:-$(device_config_value wuji_hand2 right serial)}"
+      args+=(--serial "${wuji_serial}")
     fi
     native=""
     for candidate in \
@@ -138,6 +154,12 @@ PY
       "${PROJECT_PREFIX}/lib/pico_body_tianji/wuji_hand2_bridge"; do
       if [[ -x "${candidate}" ]]; then native="${candidate}"; break; fi
     done
+    if [[ "${required_capability}" == simulation ]]; then
+      if [[ -n "${native}" ]]; then
+        exec "${native}" "${args[@]}" --dry-run "$@"
+      fi
+      exec python "${entry}" "${args[@]}" --dry-run "$@"
+    fi
     if [[ -z "${native}" ]]; then
       printf '%s\n' '错误：real Wuji executor requires the native wuji_hand2_bridge with SDK support; refusing Python no-op fallback.' >&2
       exit 1

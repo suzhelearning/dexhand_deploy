@@ -393,12 +393,12 @@ class MocapLiveNode:
             capability = parse_real_capability(self._real_capability)
         except Exception as exc:
             return False, str(exc)
+        if not capability.admitted:
+            return False, "real capability predicates are not admitted"
         if float(capability.speed) != self._speed:
             return False, "real capability speed does not match configured speed"
         if float(capability.yaw_deg) != self._yaw_deg:
             return False, "real capability yaw does not match configured yaw"
-        if not capability.admitted:
-            return False, "real capability predicates are not admitted"
         return True, None
 
     def _tick(self, now: float | None = None) -> None:

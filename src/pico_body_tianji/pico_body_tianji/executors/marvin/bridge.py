@@ -96,7 +96,7 @@ class MarvinExecutor:
             "maximum_output_step_deg": 0.5,
             "return_max_speed_deg_s": 10.0,
             "return_minimum_duration_s": 2.0,
-            "rate": 30.0,
+            "rate_hz": 30.0,
             "velocity_ratio": 10,
             "acceleration_ratio": 10,
             "feedback_hard_limit_padding_deg": 5.0,
@@ -107,7 +107,7 @@ class MarvinExecutor:
         if params:
             options.update(params)
         self.params = options
-        self._rate_hz = float(options["rate"])
+        self._rate_hz = float(options["rate_hz"])
         if self._rate_hz <= 0.0:
             raise ValueError("rate must be positive")
         self._session_factory = options["hardware_factory"]
@@ -554,7 +554,7 @@ class MarvinExecutor:
         if self._hardware is None:
             return
         try:
-            feedback = self._hardware.read_feedback(include_servo_errors=True)
+            feedback = self._hardware.read_feedback()
             unsafe = self._check_feedback(feedback, now_ns)
             self._feedback = feedback
             if unsafe is None:
@@ -565,7 +565,7 @@ class MarvinExecutor:
                 return
             if self._phase == "fault_return":
                 self._bounded_fault_return(now_ns)
-            elif self._session_state is None or self._session_state.state != "teleop" or self._phase == "returning":
+            elif self._session_state is None or self._session_state.state != "teleop":
                 if self._session_state is not None and self._session_state.state == "returning":
                     self._phase = "returning"
                 self._controlled_return(now_ns)
@@ -573,6 +573,7 @@ class MarvinExecutor:
                 self._phase = "returning"
                 self._controlled_return(now_ns)
             else:
+                self._phase = "teleop"
                 self._send_commands(self._commands["left"], self._commands["right"])
             self._publish_state()
         except BaseException as exc:
@@ -647,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
     coordinator = os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID", "")
     if not instance or not coordinator:
         raise RuntimeError("TIANJI_COMPONENT_INSTANCE_ID and TIANJI_COORDINATOR_INSTANCE_ID are required")
-    params = {"robot_ip": args.robot_ip}
+    params = {"robot_ip": args.robot_ip} if args.robot_ip else {}
     authorities_raw = os.environ.get("TIANJI_AUTHORITIES", "")
     if authorities_raw:
         try:
@@ -666,7 +667,8 @@ def main(argv: list[str] | None = None) -> int:
         configured = yaml.safe_load(open(args.config, encoding="utf-8")) or {}
         if not isinstance(configured, Mapping):
             raise RuntimeError("Marvin executor config must be a mapping")
-        params.update(configured)
+        configured.update(params)
+        params = configured
     session = open_session()
     node = None
     try:

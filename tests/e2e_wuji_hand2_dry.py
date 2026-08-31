@@ -71,6 +71,7 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
             raise unittest.SkipTest("canonical Wuji bridge is not built")
         cls.router = router
         cls.source_instance = "validation-wuji-source"
+        cls.producer_instance = "validation-wuji-producer"
         cls.process = None
         try:
             cls.session = open_session(endpoint)
@@ -91,8 +92,9 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
             "TIANJI_COMPONENT_INSTANCE_ID": "validation-wuji-executor",
             "TIANJI_ROUTER_ZID": router,
             "TIANJI_COORDINATOR_INSTANCE_ID": "validation-coordinator",
-            "TIANJI_HAND_PRODUCER_ID": cls.source_instance,
-            "TIANJI_HAND_PRODUCER_INSTANCE_ID": cls.source_instance,
+            "TIANJI_HAND_PRODUCER_ID": "validation-wuji-retarget",
+            "TIANJI_HAND_PRODUCER_INSTANCE_ID": cls.producer_instance,
+            "TIANJI_HAND_INPUT_INSTANCE_ID": cls.source_instance,
             "TIANJI_HAND_LOGICAL_PRODUCER_ID": "validation-wuji-retarget",
             "TIANJI_WUJI_CONFIG": str(root / "src/pico_body_tianji/config/robot/wuji_hand2.yaml"),
             "TIANJI_RUN_ID": "validation-wuji-run",
@@ -109,6 +111,7 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
             cls.tearDownClass()
             raise AssertionError(f"Wuji bridge exited during setup: {stderr[-300:]}")
         cls._put_state("teleop", 1)
+        time.sleep(0.05)
         cls._put_target(1)
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and not cls.commands:
@@ -134,9 +137,10 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
 
     @classmethod
     def _put_target(cls, sequence: int) -> None:
+        points = WujiHand2DryRunTest._open_hand_pose()
         cls._put("tianji/target/hand/right", HandTargetCommand(
             1, sequence, time.monotonic_ns(), None, cls.source_instance,
-            "right", "wrist_relative_mediapipe", np.zeros((21, 3)).tolist(),
+            "right", "wrist_relative_mediapipe", points.tolist(),
             cls.source_instance, cls.router,
         ).to_dict())
 
@@ -165,6 +169,7 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
         self.assertTrue(self.statuses)
         self.assertTrue(all(row.get("schema_version") == 1 for row in self.statuses))
         self.assertTrue(all(len(row.get("position_rad", [])) == 20 for row in self.commands))
+        self.assertTrue(all(row.get("publisher_instance_id") == self.producer_instance for row in self.commands))
 
     def test_invalid_target_does_not_refresh_command(self) -> None:
         before = len(self.commands)

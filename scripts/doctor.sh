@@ -13,7 +13,7 @@ activate_bundle_runtime
 
 CONFIG_ROOT="${BUNDLE_ROOT}/src/pico_body_tianji/config"
 required_configs=(
-  robot/arm.yaml robot/wuji_hand2.yaml
+  robot/arm.yaml robot/wuji_hand2.yaml robot/devices.yaml
   sources/pico_controller.yaml sources/mocap_live.yaml sources/h5_replay.yaml
   producers/ik.yaml producers/policy_hold.yaml
   coordinator/arm.yaml

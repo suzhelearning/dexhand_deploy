@@ -572,7 +572,8 @@ class ArmCommandCoordinator:
         return True
 
     def _hand_tracking_fresh(self, now_ns: int) -> bool:
-        """Require matching, fresh hand status and state while teleoperating."""
+        """Allow a healthy zeroed hand to wait for its first deadman input."""
+        tolerance = float(self.profile.get("zero_tolerance_rad", 0.05))
         for side in self._profile_hand_sides():
             status = self._hand_status.get(side)
             state = self._hand_state.get(side)
@@ -580,7 +581,14 @@ class ArmCommandCoordinator:
                 return False
             if status.value.publisher_instance_id != state.value.publisher_instance_id:
                 return False
-            if not (status.value.ready and status.value.healthy and status.value.tracking_allowed):
+            waiting_at_zero = status.value.at_zero and all(
+                abs(value) <= tolerance for value in state.value.position_rad
+            )
+            if not (
+                status.value.ready
+                and status.value.healthy
+                and (status.value.tracking_allowed or waiting_at_zero)
+            ):
                 return False
         return True
 
@@ -639,6 +647,7 @@ class ArmCommandCoordinator:
                 self._state = rejected
                 self._publish_session_snapshot()
                 return IntentResult(False, rejected, why)
+            self._proposals.clear()
             self._teleop_started_ns = now_ns
             self._state = self._next_state("teleop", "accepted", sequence)
             self._at_home = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
@@ -687,7 +696,10 @@ class ArmCommandCoordinator:
                 self._enter_fault("hand executor/status state stale, unhealthy, or identity mismatch")
                 return
         for side in self.profile.get("active_sides", ("left", "right")):
-            if not self._fresh(self._proposals.get(side), now_ns):
+            proposal = self._proposals.get(side)
+            if proposal is None:
+                continue
+            if not self._fresh(proposal, now_ns):
                 if transitioning:
                     continue
                 self._enter_returning("arm proposal timeout", now_ns)
@@ -710,7 +722,11 @@ class ArmCommandCoordinator:
         if mode == "teleop" and side in set(self.profile.get("active_sides", ("left", "right"))):
             if proposal is not None and self._fresh(proposal, timestamp_ns):
                 candidate = proposal.value
-                position = list(candidate.position_rad)
+                maximum_step = self.config["maximum_command_step_rad"]
+                position = [
+                    old + max(-maximum_step, min(maximum_step, new - old))
+                    for new, old in zip(candidate.position_rad, self._safe_command[side])
+                ]
                 proposal_seq, target_seq = candidate.sequence, candidate.target_sequence
         elif mode == "returning":
             start = (self._return_start_command or self._safe_command)[side]
@@ -734,7 +750,9 @@ class ArmCommandCoordinator:
             if not all(math.isfinite(x) and lo <= x <= hi for x, lo, hi in zip(candidate.position_rad, self.robot.lower_limits_rad, self.robot.upper_limits_rad)):
                 self._enter_fault("proposal exceeds hard joint limits or is nonfinite")
                 return
-            if any(abs(x - old) > self.config["maximum_command_step_rad"] for x, old in zip(candidate.position_rad, self._safe_command[side])):
+            # ponytail: one control-tick transport lag; add timestamped state
+            # reconciliation if producer feedback can lag by more than one tick.
+            if any(abs(x - old) > 2.0 * self.config["maximum_command_step_rad"] for x, old in zip(candidate.position_rad, self._safe_command[side])):
                 self._enter_fault("proposal exceeds maximum command step")
 
     def tick(self, *, now_ns: int | None = None) -> dict[str, ArmJointCommand]:

@@ -1,7 +1,12 @@
-ik_backend: pinocchio_cpp
+ik_backend: pinocchio_qp
 arm_config: robot/arm.yaml
-rate_hz: 90.0
+rate_hz: 200.0
 freshness_timeout_s: 0.5
+solver_reject_grace_s: 0.15
+ruckig_max_velocity_rad_s: [0.8, 0.8, 1.0, 1.0, 1.2, 1.2, 1.2]
+ruckig_max_acceleration_rad_s2: [7.854, 7.854, 15.708, 15.708, 15.708, 15.708, 15.708]
+ruckig_max_jerk_rad_s3: [600.0, 600.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0]
+ruckig_validation_tolerance: 0.00000001
 max_iterations: 24
 position_tolerance_m: 0.001
 orientation_tolerance_rad: 0.0104719755
@@ -9,7 +14,7 @@ minimum_damping: 0.001
 maximum_damping: 0.15
 singular_value_threshold: 0.05
 maximum_iteration_step_rad: 0.08
-maximum_joint_step_rad: 0.0132645022
+maximum_joint_step_rad: 0.00596902599
 joint_limit_margin_rad: 0.0872664626
 arm_angle_gain: 0.0
 arm_angle_tolerance_rad: 0.0349065850
@@ -22,7 +27,7 @@ joint_center_merit_weight: 0.001
 singularity_avoidance_gain: 0.0
 singularity_finite_difference_rad: 0.0001
 singularity_merit_weight: 0.01
-control_period_s: 0.0111111111
+control_period_s: 0.005
 qp_position_time_constant_s: 0.30
 qp_orientation_time_constant_s: 0.40
 qp_max_linear_speed_m_s: 0.25

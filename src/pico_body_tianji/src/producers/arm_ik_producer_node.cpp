@@ -1,4 +1,5 @@
 #include "pico_body_tianji/ik/arm_ik_factory.hpp"
+#include "pico_body_tianji/control/joint_trajectory_limiter.hpp"
 #include "pico_body_tianji/protocol/json_parser.hpp"
 
 #include <zenoh.hxx>
@@ -48,12 +49,48 @@ std::int64_t now_ns() {
 
 using ArmJointNames = std::array<std::array<std::string, 7>, 2>;
 
-ArmJointNames load_arm_joint_names(const std::string &path) {
+ArmJointVector parse_vector(const std::string &text, const std::string &field) {
+  const auto start = text.find(field);
+  const auto open = start == std::string::npos ? std::string::npos : text.find('[', start);
+  const auto close = open == std::string::npos ? std::string::npos : text.find(']', open);
+  if (open == std::string::npos || close == std::string::npos) {
+    throw std::invalid_argument("vector missing " + field);
+  }
+  ArmJointVector result;
+  std::size_t count = 0;
+  std::size_t cursor = open + 1;
+  while (cursor < close) {
+    while (cursor < close && (std::isspace(static_cast<unsigned char>(text[cursor])) || text[cursor] == ',')) ++cursor;
+    if (cursor >= close) break;
+    std::size_t used = 0;
+    const auto value = std::stod(text.substr(cursor, close - cursor), &used);
+    if (!std::isfinite(value) || count >= 7) {
+      throw std::invalid_argument("vector contains invalid values: " + field);
+    }
+    result[static_cast<Eigen::Index>(count++)] = value;
+    cursor += used;
+  }
+  if (count != 7) throw std::invalid_argument("vector must contain seven values: " + field);
+  return result;
+}
+
+ArmJointVector env_vector(const char *name, const ArmJointVector &fallback) {
+  const auto value = env_or(name);
+  return value.empty() ? fallback : parse_vector(value, "");
+}
+
+struct ArmConfig {
+  ArmJointNames names;
+  ArmJointVector lower_limits{ArmJointVector::Zero()};
+  ArmJointVector upper_limits{ArmJointVector::Zero()};
+};
+
+ArmConfig load_arm_config(const std::string &path) {
   if (path.empty()) throw std::invalid_argument("TIANJI_ARM_CONFIG is required");
   std::ifstream file(path);
   if (!file) throw std::invalid_argument("unable to read TIANJI_ARM_CONFIG: " + path);
   const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-  ArmJointNames result;
+  ArmConfig result;
   for (std::size_t side = 0; side < 2; ++side) {
     const std::string field = side == 0 ? "left_joint_names:" : "right_joint_names:";
     const auto start = text.find(field);
@@ -69,30 +106,19 @@ ArmJointNames load_arm_joint_names(const std::string &path) {
       while (begin < line.size() && std::isspace(static_cast<unsigned char>(line[begin]))) ++begin;
       auto finish = begin;
       while (finish < line.size() && !std::isspace(static_cast<unsigned char>(line[finish])) && line[finish] != '#') ++finish;
-      result[side][index] = line.substr(begin, finish - begin);
-      if (result[side][index] != "Joint" + std::to_string(index + 1) + (side == 0 ? "_L" : "_R")) {
+      result.names[side][index] = line.substr(begin, finish - begin);
+      if (result.names[side][index] != "Joint" + std::to_string(index + 1) + (side == 0 ? "_L" : "_R")) {
         throw std::invalid_argument("arm config joint order mismatch");
       }
       cursor = end;
     }
   }
-  for (const std::string field : {"left_home_rad:", "right_home_rad:", "lower_limits_rad:", "upper_limits_rad:"}) {
-    const auto start = text.find(field);
-    const auto open = start == std::string::npos ? std::string::npos : text.find('[', start);
-    const auto close = open == std::string::npos ? std::string::npos : text.find(']', open);
-    if (open == std::string::npos || close == std::string::npos) throw std::invalid_argument("arm config vector missing " + field);
-    std::size_t count = 0;
-    std::size_t cursor = open + 1;
-    while (cursor < close) {
-      while (cursor < close && (std::isspace(static_cast<unsigned char>(text[cursor])) || text[cursor] == ',')) ++cursor;
-      if (cursor >= close) break;
-      std::size_t used = 0;
-      const auto value = std::stod(text.substr(cursor, close - cursor), &used);
-      if (!std::isfinite(value)) throw std::invalid_argument("arm config vector contains non-finite value");
-      cursor += used;
-      ++count;
-    }
-    if (count != 7) throw std::invalid_argument("arm config vector must contain seven values");
+  (void)parse_vector(text, "left_home_rad:");
+  (void)parse_vector(text, "right_home_rad:");
+  result.lower_limits = parse_vector(text, "lower_limits_rad:");
+  result.upper_limits = parse_vector(text, "upper_limits_rad:");
+  if ((result.lower_limits.array() >= result.upper_limits.array()).any()) {
+    throw std::invalid_argument("arm config limits are invalid");
   }
   return result;
 }
@@ -201,6 +227,7 @@ struct CurrentCommand {
   std::string side;
   std::uint64_t sequence{0};
   std::int64_t timestamp_ns{0};
+  std::string mode;
   ArmJointVector joints{ArmJointVector::Zero()};
 };
 
@@ -227,8 +254,8 @@ public:
     (void)protocol::field(root, "producer").as_string("producer");
     command.side = protocol::field(root, "side").as_string("side");
     if (command.side != expected_side) throw std::invalid_argument("final command side does not match topic");
-    const auto mode = protocol::field(root, "mode").as_string("mode");
-    if (mode != "idle" && mode != "teleop" && mode != "returning") {
+    command.mode = protocol::field(root, "mode").as_string("mode");
+    if (command.mode != "idle" && command.mode != "teleop" && command.mode != "returning") {
       throw std::invalid_argument("invalid arm command mode");
     }
     command.sequence = protocol::field(root, "sequence").as_uint("sequence");
@@ -257,14 +284,15 @@ private:
   const std::string &text_;
 };
 
-std::string proposal_json(const Target &target, const IkResult &result, const ArmJointVector &joints, const std::array<std::string, 7> &names, const std::string &instance, const std::string &router, std::uint64_t sequence) {
+std::string proposal_json(const Target &target, const IkResult &result, const ArmJointVector &joints, const std::array<std::string, 7> &names, const std::string &instance, const std::string &router, std::uint64_t sequence, bool hold = false) {
   std::ostringstream out;
   out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(instance)
       << ",\"router_zid\":" << quote(router) << ",\"sequence\":" << sequence
       << ",\"timestamp_ns\":" << now_ns() << ",\"producer\":\"arm_ik_producer\",\"side\":" << quote(target.side)
       << ",\"target_sequence\":" << target.sequence << ",\"names\":[";
   for (std::size_t i = 0; i < names.size(); ++i) { if (i) out << ','; out << quote(names[i]); }
-  out << "],\"position_rad\":" << array_json(joints) << ",\"diagnostics\":{\"accepted\":true,\"converged\":" << (result.converged ? "true" : "false") << "}}";
+  out << "],\"position_rad\":" << array_json(joints) << ",\"diagnostics\":{\"accepted\":true,\"converged\":" << (result.converged ? "true" : "false")
+      << ",\"hold\":" << (hold ? "true" : "false") << "}}";
   return out.str();
 }
 
@@ -291,21 +319,30 @@ public:
     std::string source_instance,
     ArmJointNames names,
     IkSettings settings,
+    JointTrajectoryLimits trajectory_limits,
     double rate_hz,
-    double freshness_timeout_s)
+    double freshness_timeout_s,
+    double reject_grace_s)
   : session_(session), backend_(std::move(backend)), instance_(std::move(instance)),
     router_(std::move(router)), coordinator_(std::move(coordinator)),
     source_(std::move(source)), source_instance_(std::move(source_instance)),
-    settings_(std::move(settings)), rate_hz_(rate_hz),
+    settings_(std::move(settings)), joint_names_(std::move(names)),
+    joint_limits_(trajectory_limits),
+    trajectory_limiters_{
+      JointTrajectoryLimiter7(trajectory_limits, 1.0 / rate_hz),
+      JointTrajectoryLimiter7(trajectory_limits, 1.0 / rate_hz)},
+    failure_windows_{
+      ConsecutiveFailureWindow(static_cast<std::int64_t>(reject_grace_s * 1.0e9)),
+      ConsecutiveFailureWindow(static_cast<std::int64_t>(reject_grace_s * 1.0e9))},
+    rate_hz_(rate_hz),
     freshness_timeout_ns_(static_cast<std::int64_t>(freshness_timeout_s * 1.0e9)),
     real_capability_(env_or("TIANJI_REQUIRED_CAPABILITY", "simulation") == "real") {
     if (source_.empty() || source_instance_.empty()) {
       throw std::invalid_argument("source logical and publisher identities are required");
     }
-    if (!(rate_hz_ > 0.0) || !(freshness_timeout_ns_ > 0)) {
-      throw std::invalid_argument("IK rate and freshness timeout must be positive");
+    if (!(rate_hz_ > 0.0) || !(freshness_timeout_ns_ > 0) || !(reject_grace_s > 0.0)) {
+      throw std::invalid_argument("IK rate, freshness timeout and reject grace must be positive");
     }
-    joint_names_ = std::move(names);
     ArmIkBackendOptions options;
     options.urdf_path = env_or("TIANJI_ARM_URDF");
     options.official_library_path = env_or("TIANJI_OFFICIAL_IK_LIBRARY");
@@ -360,8 +397,14 @@ private:
       }
       last_target_baseline_[index] = std::make_pair(parsed.instance, parsed.sequence);
       targets_[index] = std::move(parsed);
+      target_input_errors_[index].reset();
     } catch (const std::exception &error) {
-      publish_status(std::string("target rejected: ") + error.what());
+      const std::string message = std::string("target rejected: ") + error.what();
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        target_input_errors_[index] = message;
+      }
+      publish_status(message, false, false);
     }
   }
 
@@ -369,55 +412,192 @@ private:
     try {
       const std::string expected_side = index == 0 ? "left" : "right";
       const auto command = JsonCommandParser(payload).parse(coordinator_, router_, expected_side, joint_names_[index]);
+      if (
+        (command.joints.array() < joint_limits_.lower_position.array()).any() ||
+        (command.joints.array() > joint_limits_.upper_position.array()).any())
+      {
+        throw std::invalid_argument("final command is outside hard joint limits");
+      }
       std::lock_guard<std::mutex> lock(mutex_);
       if (last_command_sequence_[index].has_value() && command.sequence <= *last_command_sequence_[index]) {
         throw std::invalid_argument("final command sequence rollback");
       }
       last_command_sequence_[index] = command.sequence;
       current_[index] = command.joints;
+      const bool resynchronize =
+        command.mode != "teleop" || !trajectory_limiters_[index].initialized() ||
+        (trajectory_limiters_[index].state().position - command.joints)
+        .cwiseAbs().maxCoeff() > 2.0 * settings_.maximum_joint_step_rad;
+      if (resynchronize) {
+        ArmMotionState state;
+        state.position = command.joints;
+        if (!trajectory_limiters_[index].reset(state)) {
+          throw std::invalid_argument("unable to reset Ruckig from final command");
+        }
+        failure_windows_[index].recovered();
+      }
+      command_input_errors_[index].reset();
     } catch (const std::exception &error) {
-      publish_status(std::string("current command rejected: ") + error.what());
+      const std::string message = std::string("current command rejected: ") + error.what();
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        command_input_errors_[index] = message;
+      }
+      publish_status(message, false, false);
     }
   }
 
   void tick() {
-    publish_status("");
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (std::size_t index = 0; index < 2; ++index) {
-      if (!targets_[index].has_value()) continue;
-      const auto &target = *targets_[index];
-      if (now_ns() - target.timestamp_ns > kFreshnessNs) continue;
-      const auto side = index == 0 ? ArmSide::kLeft : ArmSide::kRight;
-      const auto result = solver_->solve(side, target.pose, current_[index], target.elbow);
-      if (!result.accepted || !result.joints_rad.allFinite()) {
-        publish_status("solver rejected target");
-        continue;
+    const auto tick_ns = now_ns();
+    std::string status_error;
+    bool healthy = true;
+    bool degraded = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      for (std::size_t index = 0; index < 2; ++index) {
+        const auto & input_error = target_input_errors_[index].has_value() ?
+          target_input_errors_[index] : command_input_errors_[index];
+        if (input_error.has_value()) {
+          healthy = false;
+          if (status_error.empty()) status_error = *input_error;
+        }
       }
-      const double step = (result.joints_rad - current_[index]).cwiseAbs().maxCoeff();
-      if (!std::isfinite(step) || step > settings_.maximum_joint_step_rad) {
-        publish_status("solver result exceeds maximum_joint_step_rad");
-        continue;
-      }
-      {
-        std::lock_guard<std::mutex> publish_lock(publish_mutex_);
-        const auto wire_sequence = sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
-        const auto proposal = proposal_json(target, result, result.joints_rad, joint_names_[index], instance_, router_, wire_sequence);
-        const auto solved = solved_json(target, result.achieved_pose, instance_, router_, wire_sequence);
-        proposal_publishers_[index]->put(zenoh::Bytes(proposal));
-        solved_publishers_[index]->put(zenoh::Bytes(solved));
+      for (std::size_t index = 0; index < 2; ++index) {
+        if (!targets_[index].has_value()) continue;
+        const auto &target = *targets_[index];
+        if (tick_ns - target.timestamp_ns > kFreshnessNs) continue;
+        const auto side = index == 0 ? ArmSide::kLeft : ArmSide::kRight;
+        const auto reject = [&](const std::string & detail, bool hard_failure) {
+          const bool continuous = hard_failure || failure_windows_[index].failed(tick_ns);
+          healthy = healthy && !continuous;
+          degraded = true;
+          if (status_error.empty()) {
+            std::ostringstream message;
+            message << (hard_failure ? "hard IK safety reject" :
+              (continuous ? "continuous IK reject" : "transient IK reject; holding final command"))
+                    << ": side=" << target.side << " detail=" << detail
+                    << " failures=" << failure_windows_[index].count()
+                    << " age_ms=" << failure_windows_[index].age_ns(tick_ns) / 1000000.0;
+            status_error = message.str();
+          }
+          ArmMotionState hold_state;
+          hold_state.position = current_[index];
+          (void)trajectory_limiters_[index].reset(hold_state);
+          IkResult hold_result;
+          try {
+            hold_result.achieved_pose = solver_->forward(side, current_[index]);
+            publish_proposal(index, target, hold_result, current_[index], hold_result.achieved_pose, true);
+          } catch (const std::exception &) {
+            healthy = false;
+          }
+        };
+
+        IkResult result;
+        try {
+          result = solver_->solve(side, target.pose, current_[index], target.elbow);
+        } catch (const std::exception & error) {
+          reject(std::string("solver exception: ") + error.what(), false);
+          continue;
+        }
+        if (!result.joints_rad.allFinite() || !result.achieved_pose.matrix().allFinite()) {
+          reject("solver returned non-finite output", true);
+          continue;
+        }
+        if (!result.accepted) {
+          reject("solver status=" + (result.status.empty() ? std::string("rejected") : result.status),
+            result.status == "qp_contract_violation");
+          continue;
+        }
+        if (
+          (result.joints_rad.array() < joint_limits_.lower_position.array()).any() ||
+          (result.joints_rad.array() > joint_limits_.upper_position.array()).any())
+        {
+          reject("QP output is outside hard joint limits", true);
+          continue;
+        }
+
+        const ArmJointVector target_velocity =
+          (result.joints_rad - current_[index]) / settings_.control_period_s;
+        const auto limited = trajectory_limiters_[index].update(target_velocity);
+        if (!limited.accepted) {
+          reject(std::string(limited.detail), limited.hard_failure);
+          continue;
+        }
+        const double step =
+          (limited.state.position - current_[index]).cwiseAbs().maxCoeff();
+        if (!std::isfinite(step)) {
+          reject("Ruckig output step is non-finite", true);
+          continue;
+        }
+        if (step > settings_.maximum_joint_step_rad + 1.0e-10) {
+          reject("Ruckig output exceeds distributed command step", false);
+          continue;
+        }
+
+        Eigen::Isometry3d achieved;
+        try {
+          achieved = solver_->forward(side, limited.state.position);
+        } catch (const std::exception & error) {
+          reject(std::string("FK exception: ") + error.what(), true);
+          continue;
+        }
+        if (!achieved.matrix().allFinite()) {
+          reject("FK returned non-finite output", true);
+          continue;
+        }
+        failure_windows_[index].recovered();
+        result.joints_rad = limited.state.position;
+        result.achieved_pose = achieved;
+        result.converged = result.converged &&
+          (limited.state.position - current_[index]).cwiseAbs().maxCoeff() < 1.0e-8;
+        publish_proposal(index, target, result, limited.state.position, achieved, false);
       }
     }
+    publish_status(status_error, healthy, degraded);
   }
 
-  void publish_status(const std::string &error) {
+  void publish_proposal(
+    std::size_t index,
+    const Target & target,
+    const IkResult & result,
+    const ArmJointVector & joints,
+    const Eigen::Isometry3d & achieved,
+    bool hold)
+  {
+    std::lock_guard<std::mutex> publish_lock(publish_mutex_);
+    const auto wire_sequence = sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
+    proposal_publishers_[index]->put(zenoh::Bytes(proposal_json(
+      target, result, joints, joint_names_[index], instance_, router_, wire_sequence, hold)));
+    solved_publishers_[index]->put(zenoh::Bytes(solved_json(
+      target, achieved, instance_, router_, wire_sequence)));
+  }
+
+  void publish_status(
+    const std::string &error,
+    bool healthy = true,
+    bool degraded = false)
+  {
     std::lock_guard<std::mutex> publish_lock(publish_mutex_);
     if (!status_publisher_) return;
+    const std::string signature = error.empty() ? "healthy" :
+      (healthy ? "degraded" : "unhealthy");
+    if (signature != last_status_signature_) {
+      if (!error.empty()) {
+        std::cerr << "arm_ik_producer " << (healthy ? "degraded" : "unhealthy")
+                  << ": " << error << std::endl;
+      } else if (!last_status_signature_.empty() && last_status_signature_ != "healthy") {
+        std::cerr << "arm_ik_producer recovered" << std::endl;
+      }
+      last_status_signature_ = signature;
+    }
     const auto wire_sequence = sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
     const auto capabilities = real_capability_ ? "[\"simulation\",\"real\"]" : "[\"simulation\"]";
     status_publisher_->put(zenoh::Bytes("{\"schema_version\":1,\"publisher_instance_id\":" + quote(instance_) + ",\"router_zid\":" + quote(router_) +
       ",\"sequence\":" + std::to_string(wire_sequence) + ",\"timestamp_ns\":" + std::to_string(now_ns()) +
       ",\"component_role\":\"producer_arm\",\"component_id\":\"arm_ik_producer\",\"phase\":\"ready\",\"ready\":true,\"healthy\":" +
-      (error.empty() ? "true" : "false") + ",\"capabilities\":" + capabilities + ",\"error\":" + (error.empty() ? "null" : quote(error)) + ",\"diagnostics\":{}}"));
+      (healthy ? "true" : "false") + ",\"capabilities\":" + capabilities + ",\"error\":" + (error.empty() ? "null" : quote(error)) +
+      ",\"diagnostics\":{\"backend\":" + quote(backend_) + ",\"degraded\":" + (degraded ? "true" : "false") +
+      ",\"rate_hz\":" + number(rate_hz_) + "}}"));
   }
 
   zenoh::Session &session_;
@@ -425,20 +605,26 @@ private:
   IkSettings settings_{};
   std::unique_ptr<ArmIkSolver> solver_;
   ArmJointNames joint_names_{};
+  JointTrajectoryLimits joint_limits_;
+  std::array<JointTrajectoryLimiter7, 2> trajectory_limiters_;
+  std::array<ConsecutiveFailureWindow, 2> failure_windows_;
   std::array<std::optional<zenoh::Publisher>, 2> proposal_publishers_;
   std::array<std::optional<std::pair<std::string, std::uint64_t>>, 2> last_target_baseline_;
   std::array<std::optional<zenoh::Publisher>, 2> solved_publishers_;
   std::array<std::optional<zenoh::Subscriber<void>>, 2> target_subscribers_;
   std::array<std::optional<zenoh::Subscriber<void>>, 2> command_subscribers_;
   std::array<std::optional<std::uint64_t>, 2> last_command_sequence_;
+  std::array<std::optional<std::string>, 2> target_input_errors_;
+  std::array<std::optional<std::string>, 2> command_input_errors_;
   std::optional<zenoh::LivelinessToken> liveliness_token_;
   std::optional<zenoh::Publisher> status_publisher_;
   std::mutex publish_mutex_;
+  std::string last_status_signature_;
   std::array<std::optional<Target>, 2> targets_;
   std::array<ArmJointVector, 2> current_{ArmJointVector::Zero(), ArmJointVector::Zero()};
   std::mutex mutex_;
   std::atomic<std::uint64_t> sequence_{0};
-  double rate_hz_{90.0};
+  double rate_hz_{200.0};
   std::int64_t freshness_timeout_ns_{500000000};
   bool real_capability_{false};
 };
@@ -462,21 +648,41 @@ int main() {
     }
     const auto endpoint = read_env("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447");
     const auto arm_config_path = read_env("TIANJI_ARM_CONFIG");
-    const auto joint_names = pico_body_tianji::load_arm_joint_names(arm_config_path);
-    const double rate_hz = pico_body_tianji::env_double("TIANJI_IK_RATE_HZ", 90.0);
+    const auto arm_config = pico_body_tianji::load_arm_config(arm_config_path);
+    const double rate_hz = pico_body_tianji::env_double("TIANJI_IK_RATE_HZ", 200.0);
     const double freshness_timeout_s = pico_body_tianji::env_double("TIANJI_IK_FRESHNESS_TIMEOUT_S", 0.5);
+    const double reject_grace_s = pico_body_tianji::env_double("TIANJI_IK_SOLVER_REJECT_GRACE_S", 0.15);
     pico_body_tianji::IkSettings settings;
     settings.maximum_joint_step_rad = pico_body_tianji::env_double("TIANJI_IK_MAXIMUM_JOINT_STEP_RAD", settings.maximum_joint_step_rad);
     settings.position_tolerance_m = pico_body_tianji::env_double("TIANJI_IK_POSITION_TOLERANCE_M", settings.position_tolerance_m);
     settings.orientation_tolerance_rad = pico_body_tianji::env_double("TIANJI_IK_ORIENTATION_TOLERANCE_RAD", settings.orientation_tolerance_rad);
     settings.control_period_s = 1.0 / rate_hz;
+    settings.qp_joint_velocity_limits_rad_s = pico_body_tianji::env_vector(
+      "TIANJI_IK_QP_JOINT_VELOCITY_LIMITS_RAD_S", settings.qp_joint_velocity_limits_rad_s);
     settings.official_worker_timeout_ms = static_cast<int>(pico_body_tianji::env_double("TIANJI_IK_WORKER_TIMEOUT_MS", settings.official_worker_timeout_ms));
     settings.official_worker_restart_attempts = static_cast<int>(pico_body_tianji::env_double("TIANJI_IK_WORKER_RESTART_ATTEMPTS", settings.official_worker_restart_attempts));
     if (settings.maximum_joint_step_rad <= 0.0 || settings.position_tolerance_m <= 0.0 ||
         settings.orientation_tolerance_rad <= 0.0 || settings.official_worker_timeout_ms <= 0 ||
-        settings.official_worker_restart_attempts < 0) {
+        settings.official_worker_restart_attempts < 0 || reject_grace_s <= 0.0) {
       throw std::invalid_argument("invalid canonical IK producer settings");
     }
+    pico_body_tianji::JointTrajectoryLimits trajectory_limits;
+    trajectory_limits.lower_position = arm_config.lower_limits;
+    trajectory_limits.upper_position = arm_config.upper_limits;
+    pico_body_tianji::ArmJointVector default_velocity;
+    default_velocity << 0.8, 0.8, 1.0, 1.0, 1.2, 1.2, 1.2;
+    pico_body_tianji::ArmJointVector default_acceleration;
+    default_acceleration << 7.854, 7.854, 15.708, 15.708, 15.708, 15.708, 15.708;
+    pico_body_tianji::ArmJointVector default_jerk;
+    default_jerk << 600.0, 600.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0;
+    trajectory_limits.maximum_velocity = pico_body_tianji::env_vector(
+      "TIANJI_IK_RUCKIG_MAX_VELOCITY_RAD_S", default_velocity);
+    trajectory_limits.maximum_acceleration = pico_body_tianji::env_vector(
+      "TIANJI_IK_RUCKIG_MAX_ACCELERATION_RAD_S2", default_acceleration);
+    trajectory_limits.maximum_jerk = pico_body_tianji::env_vector(
+      "TIANJI_IK_RUCKIG_MAX_JERK_RAD_S3", default_jerk);
+    trajectory_limits.validation_tolerance = pico_body_tianji::env_double(
+      "TIANJI_IK_RUCKIG_VALIDATION_TOLERANCE", 1.0e-8);
     if (endpoint.find('\"') != std::string::npos) throw std::invalid_argument("invalid router endpoint");
     auto config = zenoh::Config::create_default();
     config.insert_json5("mode", "\"client\"");
@@ -487,9 +693,9 @@ int main() {
       throw std::runtime_error("expected exactly one router with matching TIANJI_ROUTER_ZID");
     }
     pico_body_tianji::ArmIkProducer node(
-      session, read_env("TIANJI_IK_BACKEND", "pinocchio_cpp"), instance, router,
-      coordinator, source, source_instance, joint_names, settings, rate_hz,
-      freshness_timeout_s);
+      session, read_env("TIANJI_IK_BACKEND", "pinocchio_qp"), instance, router,
+      coordinator, source, source_instance, arm_config.names, settings,
+      trajectory_limits, rate_hz, freshness_timeout_s, reject_grace_s);
     node.run();
   } catch (const std::exception &error) {
     std::cerr << "arm_ik_producer failed: " << error.what() << std::endl;

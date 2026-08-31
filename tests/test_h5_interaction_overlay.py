@@ -13,10 +13,14 @@ import termios
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 import numpy as np
 
-from pico_body_tianji.executors.mujoco.node import MujocoExecutor
+from pico_body_tianji.executors.mujoco.node import (
+    MujocoExecutor,
+    _configure_viewer_platform,
+)
 from pico_body_tianji.protocol import topics
 from pico_body_tianji.protocol.messages import Frame0HandSkeleton
 
@@ -156,6 +160,15 @@ class _FakeMujoco:
         geom.width = float(width)
         geom.start = np.asarray(start, dtype=np.float64).copy()
         geom.end = np.asarray(end, dtype=np.float64).copy()
+
+
+class ViewerPlatformTest(unittest.TestCase):
+    def test_h5_viewer_uses_x11_for_deadman_key_state(self) -> None:
+        glfw = SimpleNamespace(PLATFORM=1, PLATFORM_X11=2, init_hint=Mock())
+        with patch.dict(os.environ, {"TIANJI_SOURCE_LOGICAL_ID": "h5_replay"}), \
+             patch.dict(sys.modules, {"glfw": glfw}):
+            _configure_viewer_platform()
+        glfw.init_hint.assert_called_once_with(glfw.PLATFORM, glfw.PLATFORM_X11)
 
 
 def _frame0_message(**updates: object) -> dict[str, object]:

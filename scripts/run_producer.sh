@@ -54,6 +54,9 @@ if not isinstance(value, dict):
     raise SystemExit("IK config must be a mapping")
 required = {
     "ik_backend", "arm_config", "rate_hz", "freshness_timeout_s",
+    "solver_reject_grace_s", "ruckig_max_velocity_rad_s",
+    "ruckig_max_acceleration_rad_s2", "ruckig_max_jerk_rad_s3",
+    "ruckig_validation_tolerance",
     "max_iterations", "position_tolerance_m", "orientation_tolerance_rad",
     "minimum_damping", "maximum_damping", "singular_value_threshold",
     "maximum_iteration_step_rad", "maximum_joint_step_rad",
@@ -97,7 +100,7 @@ if [[ "${producer_id}" == ik ]]; then
   urdf_path="${TIANJI_ARM_URDF:-${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf}"
   export TIANJI_ARM_CONFIG="${TIANJI_ARM_CONFIG:-${arm_config}}"
   export TIANJI_ARM_URDF="${urdf_path}"
-  export TIANJI_IK_BACKEND="${TIANJI_IK_BACKEND:-${backend:-pinocchio_cpp}}"
+  export TIANJI_IK_BACKEND="${TIANJI_IK_BACKEND:-${backend:-pinocchio_qp}}"
   exec "${entry}" "$@"
 fi
 exec python "${entry}" "$@"

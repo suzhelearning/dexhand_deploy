@@ -417,6 +417,12 @@ class WujiHandExecutor:
             return None
         if self._state == "teleop" and not self._teleop_state_fresh(now_ns):
             self._expire_to_return("coordinator teleop state expired")
+        if (
+            self._state == "teleop"
+            and self._input_received_ns is not None
+            and now_ns - self._input_received_ns > self.command_timeout_ns
+        ):
+            self._expire_to_return("hand input expired")
         if not self._real_admission_ok():
             self._mark_unhealthy(self._last_error or "real capability denied")
         if self._tracking_allowed(now_ns):
@@ -434,14 +440,11 @@ class WujiHandExecutor:
                 self._send(values)
                 command = self._latest_command
         else:
-            self._state = "returning" if self._state not in {"fault", "idle"} else self._state
             current = np.asarray(self._qpos, dtype=np.float64)
             zero = np.asarray(self.config.zero_position_rad, dtype=np.float64)
             step = np.asarray(self.config.zero_tolerance_rad, dtype=np.float64) * 0.2
             values = (current + np.clip(zero - current, -step, step)).tolist()
             self._send(values)
-            if self.config.at_zero(values):
-                self._state = "fault" if self._state == "fault" else "returning"
         self._publish_state(now_ns)
         self._publish_status()
         return command

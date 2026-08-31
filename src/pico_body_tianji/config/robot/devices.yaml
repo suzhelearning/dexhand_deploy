@@ -1,0 +1,7 @@
+marvin:
+  ip: 192.168.1.190
+
+wuji_hand2:
+  right:
+    ip: 192.168.1.111
+    serial: WH2KA01260814006

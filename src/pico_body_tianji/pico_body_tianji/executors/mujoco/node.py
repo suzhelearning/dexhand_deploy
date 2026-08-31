@@ -53,6 +53,12 @@ _FRAME0_EDGE_RGBA = np.asarray([0.1, 0.75, 1.0, 0.82], dtype=np.float32)
 _WRIST_AXIS_HALF_LENGTH_M = 0.045
 
 
+def _configure_viewer_platform() -> None:
+    if os.environ.get("TIANJI_SOURCE_LOGICAL_ID") == "h5_replay":
+        import glfw
+        glfw.init_hint(glfw.PLATFORM, glfw.PLATFORM_X11)
+
+
 def _put(publisher: Any, payload: Mapping[str, Any]) -> None:
     if publisher is None:
         return
@@ -906,6 +912,7 @@ class MujocoExecutor:
                 time.sleep(max(0.0, next_tick - time.monotonic()))
             return
         try:
+            _configure_viewer_platform()
             import mujoco.viewer
         except ImportError as exc:
             raise RuntimeError("mujoco.viewer is required for the non-headless overlay") from exc

@@ -140,6 +140,23 @@ if [[ "${required_capability}" == real && "${confirm_real}" != true ]]; then
   printf '%s\n' '错误：real profile 必须显式提供 --confirm-real。' >&2
   exit 2
 fi
+if [[ "${required_capability}" == real ]]; then
+  export TIANJI_REAL_SPEED="${TIANJI_REAL_SPEED:-0.25}"
+  export TIANJI_REAL_YAW_DEG="${TIANJI_REAL_YAW_DEG:-0}"
+  if [[ -z "${TIANJI_REAL_PREFLIGHT_FD:-}" &&
+        -z "${TIANJI_REAL_PREFLIGHT_SCANNER_FD:-}" &&
+        -z "${TIANJI_CONFIRMED_REAL_PREFLIGHT_FD:-}" ]]; then
+    relaunch=(bash "${SCRIPT_DIR}/run_session.sh" --profile "${profile}" --confirm-real)
+    [[ -n "${record_path}" ]] && relaunch+=(--record "${record_path}")
+    [[ -n "${input_path}" ]] && relaunch+=(--input "${input_path}")
+    [[ "${display_mode}" == viewer ]] && relaunch+=(--viewer)
+    [[ "${display_mode}" == headless ]] && relaunch+=(--headless)
+    ((${#extra_args[@]} == 0)) || relaunch+=(-- "${extra_args[@]}")
+    exec pixi run python "${SCRIPT_DIR}/run_confirmed_real_session.py" \
+      --profile "${profile}" --speed "${TIANJI_REAL_SPEED}" \
+      --yaw-deg "${TIANJI_REAL_YAW_DEG}" -- "${relaunch[@]}"
+  fi
+fi
 if [[ -n "${record_path}" ]]; then
   if [[ -e "${record_path}" ]]; then
     printf '错误：拒绝覆盖已有 recording: %s\n' "${record_path}" >&2
@@ -165,7 +182,7 @@ if [[ "${source_id}" == h5_replay ]]; then
     exit 2
   }
   if [[ "${hand_mode}" == auto ]]; then
-    if PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${PYTHONPATH:-}" pixi run python - "${input_path}" "${active_hand_sides}" <<'PY'
+    if PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${BUNDLE_ROOT}/vendor/python:${PYTHONPATH:-}" pixi run python - "${input_path}" "${active_hand_sides}" <<'PY'
 import sys
 import numpy as np
 from pico_body_tianji.sources.mocap.h5 import load_mocap_h5
@@ -263,10 +280,6 @@ if [[ -n "${active_hand_sides}" ]]; then
 fi
 export TIANJI_RUN_ID="${run_id}"
 export TIANJI_ROUTER_ENDPOINT="${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
-if [[ "${required_capability}" == real && ( "${source_id}" == h5_replay || "${source_id}" == mocap_live ) ]]; then
-  export TIANJI_REAL_SPEED="0.25"
-  export TIANJI_REAL_YAW_DEG="0"
-fi
 if ! router_zid="$(require_router)"; then
   exit 1
 fi
@@ -471,9 +484,11 @@ fi
 source_args=("${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${source_instance}" TIANJI_SOURCE_INSTANCE_ID="${source_instance}" TIANJI_PRODUCER_INSTANCE_ID="${arm_producer_instance:-${hand_producer_instance}}" bash "${SCRIPT_DIR}/run_source.sh" --source "${source_id}" --config "$(canonical_config "${source_config}")")
 if [[ "${source_id}" == h5_replay ]]; then
   source_args+=(-- "${input_path}")
-  if [[ "${required_capability}" == real ]]; then source_args+=(--speed 0.25 --yaw-deg 0); fi
+  if [[ "${required_capability}" == real ]]; then
+    source_args+=(--speed "${TIANJI_REAL_SPEED}" --yaw-deg "${TIANJI_REAL_YAW_DEG}")
+  fi
 elif [[ "${source_id}" == mocap_live && "${required_capability}" == real ]]; then
-  source_args+=(--param speed:=0.25 --param yaw_deg:=0)
+  source_args+=(--param "speed:=${TIANJI_REAL_SPEED}" --param "yaw_deg:=${TIANJI_REAL_YAW_DEG}")
 elif [[ "${source_id}" == target_replay || "${source_id}" == joint_replay ]]; then
   source_args+=(-- "${input_path}" --active-hand-sides "${active_hand_sides}" --inactive-hand-sides "${inactive_sides}")
 fi

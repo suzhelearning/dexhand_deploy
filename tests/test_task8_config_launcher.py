@@ -27,6 +27,7 @@ class Task8ConfigTreeTest(unittest.TestCase):
         required = (
             "robot/arm.yaml",
             "robot/wuji_hand2.yaml",
+            "robot/devices.yaml",
             "sources/pico_controller.yaml",
             "sources/mocap_live.yaml",
             "sources/h5_replay.yaml",
@@ -58,6 +59,17 @@ class Task8ConfigTreeTest(unittest.TestCase):
         self.assertNotIn("ik_backend", session)
         ik = yaml.safe_load((CONFIG / "producers/ik.yaml").read_text())
         self.assertIn("ik_backend", ik)
+
+    def test_real_device_defaults_are_canonical_and_used(self) -> None:
+        devices = yaml.safe_load((CONFIG / "robot/devices.yaml").read_text())
+        self.assertEqual(devices["marvin"]["ip"], "192.168.1.190")
+        self.assertEqual(devices["wuji_hand2"]["right"]["ip"], "192.168.1.111")
+        self.assertEqual(
+            devices["wuji_hand2"]["right"]["serial"], "WH2KA01260814006"
+        )
+        launcher = (SCRIPTS / "run_executor.sh").read_text(encoding="utf-8")
+        self.assertIn("TIANJI_DEVICE_CONFIG", launcher)
+        self.assertIn('args+=(--serial "${wuji_serial}")', launcher)
 
     def test_loader_and_endpoint_are_strict(self) -> None:
         with self.subTest("unknown key"):
@@ -104,6 +116,39 @@ class Task8LauncherTest(unittest.TestCase):
             path = SCRIPTS / name
             self.assertTrue(path.is_file(), name)
             self.assertTrue(os.access(path, os.X_OK), name)
+
+    def test_confirmed_real_launcher_issues_sealed_capability(self) -> None:
+        command = (
+            "from pico_body_tianji.executors.marvin.preflight import "
+            "trusted_real_capability; print(trusted_real_capability().admitted)"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "run_confirmed_real_session.py"),
+                "--profile", "h5_real", "--speed", "0.25", "--yaw-deg", "0",
+                "--", sys.executable, "-c", command,
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "PYTHONPATH": str(ROOT / "src/pico_body_tianji")},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "True")
+        rejected = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "run_confirmed_real_session.py"),
+                "--profile", "h5_real", "--speed", "1", "--yaw-deg", "0",
+                "--", sys.executable, "-c", "print('must not run')",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("speed must be in (0, 0.25]", rejected.stderr)
 
     def test_replay_record_is_rejected_before_router_access(self) -> None:
         result = subprocess.run(

@@ -1,5 +1,5 @@
 headless: true
-rate_hz: 60.0
+rate_hz: 200.0
 tracking_error_threshold_rad: 0.13962634015954636
 urdf: assets/tianji_wuji2/tianji_wuji2.urdf
 arm_config: robot/arm.yaml

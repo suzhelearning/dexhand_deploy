@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from pico_body_tianji.protocol.messages import (
     ALL_ARM_JOINT_NAMES,
     ARM_JOINT_NAMES,
+    ArmJointProposal,
     ArmJointState,
     ComponentStatus,
     LatchedBool,
@@ -84,11 +85,13 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
         self.coordinator.update_component(_status("producer_arm", "ik", now))
         self.coordinator.update_component(_status("executor_arm", "mujoco", now))
         self.coordinator.update_arm_state(_arm_state(now, self.coordinator.robot.home_all))
+        self.coordinator._proposals["right"] = SimpleNamespace(received_ns=0)
         intent = self.coordinator.handle_intent(SimpleNamespace(action="start", sequence=7, source="src", reason="run"))
         self.assertTrue(intent.accepted)
         self.assertEqual(self.coordinator.state.state, "teleop")
         self.assertEqual(self.coordinator.state.intent_sequence, 7)
         self.assertFalse(self.coordinator.at_home.value)
+        self.assertEqual(self.coordinator._proposals, {})
 
     def test_launcher_authority_mapping_rejects_foreign_component_identity(self):
         disabled = {
@@ -139,13 +142,53 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
     def test_stale_proposal_enters_bounded_returning(self):
         self.coordinator._state = self.coordinator._make_state("teleop", "active", 2)
         self.coordinator._safe_command["right"] = [x + 0.4 for x in self.coordinator.robot.right_home_rad]
-        self.coordinator.update_component(_status("source", "src", 1_000_000_000))
-        self.coordinator.update_component(_status("producer_arm", "ik", 1_000_000_000))
-        self.coordinator.update_component(_status("executor_arm", "mujoco", 1_000_000_000))
-        self.coordinator.update_arm_state(_arm_state(1_000_000_000, self.coordinator.robot.home_all))
-        commands = self.coordinator.tick(now_ns=2_000_000_000)
+        now = 2_000_000_001
+        self.coordinator._proposals["right"] = SimpleNamespace(received_ns=1_000_000_000)
+        self.coordinator.update_component(_status("source", "src", now), received_ns=now)
+        self.coordinator.update_component(_status("producer_arm", "ik", now), received_ns=now)
+        self.coordinator.update_component(_status("executor_arm", "mujoco", now), received_ns=now)
+        self.coordinator.update_arm_state(
+            _arm_state(now, self.coordinator.robot.home_all), received_ns=now
+        )
+        commands = self.coordinator.tick(now_ns=now)
         self.assertEqual(self.coordinator.state.state, "returning")
         self.assertTrue(all(command.mode == "returning" for command in commands.values()))
+
+    def test_teleop_waits_at_home_for_first_proposal(self):
+        now = 2_000_000_001
+        self.coordinator._state = self.coordinator._make_state("teleop", "active", 2)
+        self.coordinator.update_component(_status("source", "src", now), received_ns=now)
+        self.coordinator.update_component(_status("producer_arm", "ik", now), received_ns=now)
+        self.coordinator.update_component(_status("executor_arm", "mujoco", now), received_ns=now)
+        self.coordinator.update_arm_state(
+            _arm_state(now, self.coordinator.robot.home_all), received_ns=now
+        )
+        commands = self.coordinator.tick(now_ns=now)
+        self.assertEqual(self.coordinator.state.state, "teleop")
+        self.assertEqual(commands["right"].position_rad, list(self.coordinator.robot.right_home_rad))
+
+    def test_one_tick_proposal_lag_is_clipped_not_faulted(self):
+        now = 1_000_000_000
+        self.coordinator._state = self.coordinator._make_state("teleop", "active", 2)
+        for role, component in (("source", "src"), ("producer_arm", "ik"), ("executor_arm", "mujoco")):
+            self.coordinator.update_component(_status(role, component, now), received_ns=now)
+        self.coordinator.update_arm_state(
+            _arm_state(now, self.coordinator.robot.home_all), received_ns=now
+        )
+        old = list(self.coordinator.robot.right_home_rad)
+        maximum_step = self.coordinator.config["maximum_command_step_rad"]
+        candidate = old.copy()
+        candidate[0] += 1.5 * maximum_step
+        self.coordinator._proposals["right"] = SimpleNamespace(
+            value=ArmJointProposal(
+                1, 2, now, "ik", "right", 1, list(ARM_JOINT_NAMES["right"]),
+                candidate, {}, "ik-instance", "router-1"
+            ),
+            received_ns=now,
+        )
+        command = self.coordinator.tick(now_ns=now)["right"]
+        self.assertEqual(self.coordinator.state.state, "teleop")
+        self.assertAlmostEqual(command.position_rad[0] - old[0], maximum_step)
 
     def test_return_waits_for_fresh_arm_home_then_latches_once(self):
         self.coordinator._state = self.coordinator._make_state("returning", "return", 4)

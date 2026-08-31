@@ -47,19 +47,43 @@ def _scanner_capability(raw: bytes) -> tuple[str, RealCapabilityInput]:
     return scanner_id, RealCapabilityInput.from_mapping(value["capability"])
 
 
-def trusted_real_capability() -> RealCapabilityInput:
-    """Read one sealed run-bound payload and its protected scanner source.
+def _confirmed_session_capability() -> RealCapabilityInput | None:
+    raw_fd = os.environ.get("TIANJI_CONFIRMED_REAL_PREFLIGHT_FD", "")
+    nonce = os.environ.get("TIANJI_CONFIRMED_REAL_PREFLIGHT_NONCE", "")
+    if not raw_fd.isdigit() or not nonce:
+        return None
+    fd = int(raw_fd)
+    if fcntl.fcntl(fd, _SEAL_GET) & _SEAL_ALL != _SEAL_ALL:
+        return None
+    value = json.loads(_read_fd(fd).decode("utf-8"))
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version", "issuer", "run_id", "profile", "nonce", "capability",
+    }:
+        return None
+    if (
+        value["schema_version"] != 1
+        or value["issuer"] != "confirmed_real_session"
+        or value["run_id"] != os.environ.get("TIANJI_RUN_ID", "")
+        or value["profile"] != os.environ.get("TIANJI_REAL_PROFILE", "")
+        or value["nonce"] != nonce
+    ):
+        return None
+    return RealCapabilityInput.from_mapping(value["capability"])
 
-    The provider never opens a writable bundle path.  Hashing, integrity
-    validation, and JSON parsing all operate on the same ``pread`` bytes from
-    a sealed memfd.  The scanner descriptor is independently checked as a
-    root-owned protected regular file and its bytes/capability must match the
-    bound payload.
+
+def trusted_real_capability() -> RealCapabilityInput:
+    """Read a sealed capability issued by validation or a confirmed session.
+
+    Formal validation remains bound to its root-owned scanner.  The product
+    launcher may instead issue a sealed, run-bound capability after the
+    operator supplied ``--confirm-real``; neither path trusts YAML values.
     """
     denied = RealCapabilityInput(1.0, 0.0, False, False)
     raw_attestation_fd = os.environ.get("TIANJI_REAL_PREFLIGHT_FD", "")
     raw_scanner_fd = os.environ.get("TIANJI_REAL_PREFLIGHT_SCANNER_FD", "")
     try:
+        if not raw_attestation_fd and not raw_scanner_fd:
+            return _confirmed_session_capability() or denied
         if not raw_attestation_fd.isdigit() or not raw_scanner_fd.isdigit():
             return denied
         attestation_fd = int(raw_attestation_fd)

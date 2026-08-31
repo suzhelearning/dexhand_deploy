@@ -28,12 +28,14 @@ ik_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/arm_ik_producer"
 probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_probe"
 worker_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_worker"
 qp_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/pinocchio_qp_ik_probe"
+trajectory_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/joint_trajectory_limiter_probe"
 wuji_bridge_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/wuji_hand2_bridge"
 for binary in \
   "${ik_binary}" \
   "${probe_binary}" \
   "${worker_binary}" \
   "${qp_probe_binary}" \
+  "${trajectory_probe_binary}" \
   "${wuji_bridge_binary}"
 do
   if [[ ! -x "${binary}" ]]; then
@@ -45,6 +47,9 @@ do
     exit 1
   fi
 done
+
+"${trajectory_probe_binary}" \
+  "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
 
 # 便携层 ABI 检查：新二进制（系统 GCC/glibc 编译）必须能被
 # runtime/abi 的 glibc 2.35 + libstdc++ 加载。

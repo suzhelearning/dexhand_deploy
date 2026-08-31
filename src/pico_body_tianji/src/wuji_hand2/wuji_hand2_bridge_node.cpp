@@ -225,7 +225,8 @@ public:
     std::string instance;
     std::string router;
     std::string authorized_producer;
-    std::string authorized_instance;
+    std::string input_instance;
+    std::string producer_instance;
     std::string logical_producer{"wuji_retarget"};
     std::string run_id;
     std::string supervisor_instance;
@@ -296,7 +297,7 @@ private:
 };
 void WujiHand2Bridge::on_target(const zenoh::Sample &sample) {
   try {
-    const auto parsed = parse_target(sample.get_payload().as_string(), params_.side, params_.router, params_.authorized_instance);
+    const auto parsed = parse_target(sample.get_payload().as_string(), params_.side, params_.router, params_.input_instance);
     std::lock_guard<std::mutex> guard(mutex_);
     const auto received = now_ns();
     if (session_state_ != "teleop" || session_state_received_ns_ == 0 ||
@@ -309,6 +310,7 @@ void WujiHand2Bridge::on_target(const zenoh::Sample &sample) {
     input_sequence_ = parsed.sequence;
     last_input_sequence_ = parsed.sequence;
     have_target_ = true;
+    last_error_.clear();
   } catch (const std::exception &error) {
     std::lock_guard<std::mutex> guard(mutex_);
     last_error_ = std::string("target rejected: ") + error.what();
@@ -321,7 +323,7 @@ void WujiHand2Bridge::on_command(const zenoh::Sample &sample) {
   try {
     const auto root = StrictJsonParser::parse(sample.get_payload().as_string());
     std::uint64_t sequence = 0;
-    const auto command = parse_joint_array(root, params_.side, params_.authorized_producer, params_.authorized_instance, params_.router, params_.config_path, &sequence);
+    const auto command = parse_joint_array(root, params_.side, params_.authorized_producer, params_.input_instance, params_.router, params_.config_path, &sequence);
     std::lock_guard<std::mutex> guard(mutex_);
     const auto received = now_ns();
     if (session_state_ != "teleop" || session_state_received_ns_ == 0 ||
@@ -334,6 +336,7 @@ void WujiHand2Bridge::on_command(const zenoh::Sample &sample) {
     input_sequence_ = sequence;
     last_input_sequence_ = sequence;
     have_direct_ = true;
+    last_error_.clear();
   } catch (const std::exception &error) {
     std::lock_guard<std::mutex> guard(mutex_);
     last_error_ = std::string("command rejected: ") + error.what();
@@ -417,7 +420,7 @@ void WujiHand2Bridge::publish_command(const std::array<float, kJointCount> &valu
     "thumb_cmc_flex", "thumb_cmc_abd", "thumb_mcp", "thumb_ip", "index_mcp_flex", "index_mcp_abd", "index_pip", "index_dip", "middle_mcp_flex", "middle_mcp_abd", "middle_pip", "middle_dip", "ring_mcp_flex", "ring_mcp_abd", "ring_pip", "ring_dip", "pinky_mcp_flex", "pinky_mcp_abd", "pinky_pip", "pinky_dip"};
   const auto prefix = side_prefix(params_.side);
   std::ostringstream out;
-  out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(params_.instance) << ",\"router_zid\":" << quote(params_.router) << ",\"sequence\":" << sequence << ",\"timestamp_ns\":" << now_ns() << ",\"producer\":" << quote(params_.logical_producer) << ",\"side\":" << quote(params_.side) << ",\"names\":[";
+  out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(params_.producer_instance) << ",\"router_zid\":" << quote(params_.router) << ",\"sequence\":" << sequence << ",\"timestamp_ns\":" << now_ns() << ",\"producer\":" << quote(params_.logical_producer) << ",\"side\":" << quote(params_.side) << ",\"names\":[";
   for (std::size_t index = 0; index < kJointCount; ++index) { if (index) out << ','; out << quote(prefix + base_names[index]); }
   out << "],\"position_rad\":" << array_json(values) << '}';
   command_pub_->put(zenoh::Bytes(out.str()));
@@ -446,7 +449,7 @@ void WujiHand2Bridge::publish_status(const std::string &error) {
     at_zero = at_zero && std::isfinite(measured_[index]) &&
       std::abs(static_cast<double>(measured_[index]) - zero_position_[index]) <= zero_tolerance_[index];
   }
-  const bool healthy = !safety_locked_ && status_error.empty() && measured_fresh;
+  const bool healthy = !safety_locked_ && measured_fresh;
   const bool input_fresh = input_received_ns_ > 0 && current >= input_received_ns_ &&
     current - input_received_ns_ <= static_cast<std::int64_t>(params_.keypoint_timeout_s * 1.0e9);
   const bool state_fresh = session_state_received_ns_ > 0 && current >= session_state_received_ns_ &&
@@ -468,9 +471,11 @@ void WujiHand2Bridge::publish_status(const std::string &error) {
   }
   if (component_status_pub_) {
     const auto capability = params_.dry_run ? "simulation" : "real";
-    const auto component = [&](const std::string &role, const std::string &id) {
+    const auto component = [&](
+      const std::string &role, const std::string &id,
+      const std::string &publisher_instance) {
       std::ostringstream out;
-      out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(params_.instance)
+      out << "{\"schema_version\":1,\"publisher_instance_id\":" << quote(publisher_instance)
           << ",\"router_zid\":" << quote(params_.router) << ",\"sequence\":"
           << sequence << ",\"timestamp_ns\":" << current << ",\"component_role\":"
           << quote(role) << ",\"component_id\":" << quote(id)
@@ -487,13 +492,17 @@ void WujiHand2Bridge::publish_status(const std::string &error) {
       component_status_pub_->put(zenoh::Bytes(out.str()));
     };
     if (params_.mode == "retarget") {
-      component("producer_hand", params_.logical_producer);
+      component("producer_hand", params_.logical_producer, params_.producer_instance);
     }
-    component("executor_hand", "wuji_" + params_.side);
+    component("executor_hand", "wuji_" + params_.side, params_.instance);
   }
 }
 int WujiHand2Bridge::run() {
-  if (params_.instance.empty() || params_.router.empty() || params_.authorized_producer.empty() || params_.authorized_instance.empty()) throw std::invalid_argument("Wuji executor identities are required");
+  if (params_.instance.empty() || params_.router.empty() ||
+      params_.authorized_producer.empty() || params_.producer_instance.empty() ||
+      params_.input_instance.empty()) {
+    throw std::invalid_argument("Wuji executor identities are required");
+  }
   if (params_.mode != "direct" && params_.mode != "retarget") throw std::invalid_argument("mode must be direct or retarget");
   if (params_.rate_hz < 1 || params_.rate_hz > 500) throw std::invalid_argument("rate_hz out of range");
   const auto hand_key = "tianji/target/hand/" + params_.side;
@@ -514,7 +523,7 @@ int WujiHand2Bridge::run() {
   if (params_.mode == "retarget") {
     producer_live_token_ = std::make_unique<zenoh::LivelinessToken>(
       session_.liveliness_declare_token(zenoh::KeyExpr(
-        "tj/live/producer/hand/" + params_.logical_producer + "/" + params_.instance)));
+        "tj/live/producer/hand/" + params_.logical_producer + "/" + params_.producer_instance)));
   }
   executor_live_token_ = std::make_unique<zenoh::LivelinessToken>(
     session_.liveliness_declare_token(zenoh::KeyExpr(
@@ -544,6 +553,8 @@ int WujiHand2Bridge::run() {
   zero_position_ = load_yaml_vector(params_.config_path, "zero_position_rad");
   zero_tolerance_ = load_yaml_vector(params_.config_path, "zero_tolerance_rad");
   publish_status();
+  const auto initial_feedback_deadline_ns = now_ns() +
+    static_cast<std::int64_t>(params_.enable_timeout_s * 1.0e9);
   auto next_tick = std::chrono::steady_clock::now();
   while (!g_stop) {
     next_tick += std::chrono::nanoseconds(static_cast<std::int64_t>(1.0e9 / params_.rate_hz));
@@ -571,7 +582,7 @@ int WujiHand2Bridge::run() {
         have_direct_ = false;
         tracking = false;
         last_error_ = "coordinator teleop state expired";
-      } else if (state == "teleop" && !input_fresh) {
+      } else if (state == "teleop" && input_received_ns_ > 0 && !input_fresh) {
         have_target_ = false;
         have_direct_ = false;
         tracking = false;
@@ -628,10 +639,14 @@ int WujiHand2Bridge::run() {
           std::lock_guard<std::mutex> guard(mutex_);
           measured_valid_ = false;
           tracking_allowed_ = false;
-          safety_locked_ = true;
-          last_error_ = "measured hand state unavailable";
-          locked = true;
-          device->close();
+          if (now_ns() >= initial_feedback_deadline_ns) {
+            safety_locked_ = true;
+            last_error_ = "initial measured hand state timeout";
+            locked = true;
+            device->close();
+          } else {
+            last_error_ = "waiting for initial measured hand state";
+          }
         } else {
           // latest_states() returns a snapshot populated by an asynchronous
           // callback. Sample monotonic time after reading that cache so a
@@ -656,6 +671,9 @@ int WujiHand2Bridge::run() {
               safety_locked_ = true;
               last_error_ = "measured hand feedback stale";
               locked = true;
+            } else if (
+              last_error_ == "waiting for initial measured hand state") {
+              last_error_.clear();
             }
           }
           if (new_measurement && !locked) {
@@ -719,18 +737,23 @@ int main(int argc, char **argv) {
     params.config_path = pico_body_tianji::canonical_env_or("TIANJI_WUJI_CONFIG");
     params.coordinator_instance = pico_body_tianji::canonical_env_or("TIANJI_COORDINATOR_INSTANCE_ID");
     params.authorized_producer = pico_body_tianji::canonical_env_or("TIANJI_HAND_PRODUCER_ID");
-    params.authorized_instance = pico_body_tianji::canonical_env_or("TIANJI_HAND_PRODUCER_INSTANCE_ID");
-    params.logical_producer = pico_body_tianji::canonical_env_or("TIANJI_HAND_LOGICAL_PRODUCER_ID", params.mode == "retarget" ? "wuji_retarget" : "h5_direct");
+    params.producer_instance = pico_body_tianji::canonical_env_or("TIANJI_HAND_PRODUCER_INSTANCE_ID");
+    params.input_instance = pico_body_tianji::canonical_env_or("TIANJI_HAND_INPUT_INSTANCE_ID", params.producer_instance);
+    params.logical_producer = pico_body_tianji::canonical_env_or("TIANJI_HAND_LOGICAL_PRODUCER_ID", params.authorized_producer);
     params.run_id = pico_body_tianji::canonical_env_or("TIANJI_RUN_ID");
     params.supervisor_instance = pico_body_tianji::canonical_env_or("TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID");
-    if (params.instance.empty() || params.router.empty() || params.coordinator_instance.empty() || params.config_path.empty() || params.supervisor_instance.empty() || params.run_id.empty()) throw std::invalid_argument("executor, router, coordinator, run and safety identities are required");
+    if (params.instance.empty() || params.router.empty() ||
+        params.coordinator_instance.empty() || params.config_path.empty() ||
+        params.run_id.empty()) {
+      throw std::invalid_argument("executor, router, coordinator and run identities are required");
+    }
     auto config = zenoh::Config::create_default();
     config.insert_json5("mode", "\"client\"");
     config.insert_json5("connect/endpoints", "[\"" + pico_body_tianji::canonical_env_or("TIANJI_ROUTER_ENDPOINT", "tcp/127.0.0.1:7447") + "\"]");
     zenoh::Session session = zenoh::Session::open(std::move(config));
     const auto routers = session.get_routers_z_id();
     if (routers.size() != 1 || routers.front().to_string() != params.router) throw std::runtime_error("expected exactly one router ZID");
-    if (params.authorized_producer.empty() || params.authorized_instance.empty()) throw std::invalid_argument("hand producer identity is required");
+    if (params.authorized_producer.empty() || params.producer_instance.empty() || params.input_instance.empty()) throw std::invalid_argument("hand producer/input identity is required");
     pico_body_tianji::WujiHand2Bridge bridge(session, std::move(params));
     return bridge.run();
   } catch (const std::exception &error) {

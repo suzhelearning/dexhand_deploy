@@ -47,7 +47,7 @@ struct IkSettings
 
   // pinocchio_qp 后端参数。任务残差按最大笛卡尔速度归一化，关节相关
   // 代价按各关节速度上限归一化，因此下面权重均为无量纲相对权重。
-  double control_period_s{1.0 / 90.0};
+  double control_period_s{1.0 / 200.0};
   double qp_position_time_constant_s{0.30};
   double qp_orientation_time_constant_s{0.40};
   double qp_max_linear_speed_m_s{0.25};

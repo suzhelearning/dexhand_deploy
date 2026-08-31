@@ -227,7 +227,7 @@ def _rotate_points_yaw(points: np.ndarray, yaw_deg: float) -> np.ndarray:
     """绕 Motive 竖直轴（+Z）旋转世界系点，与手腕轨迹 yaw 标定一致。"""
     values = np.asarray(points, dtype=np.float64)
     if values.shape != (21, 3) or not np.isfinite(values).all():
-        raise ValueError("frame0 keypoints 必须是有限 (21,3) 数组")
+        raise ValueError("H5 keypoints 必须是有限 (21,3) 数组")
     rotation = Rotation.from_rotvec(
         np.array([0.0, 0.0, np.deg2rad(float(yaw_deg))])
     ).as_matrix()
@@ -494,6 +494,7 @@ class MocapH5ReplayNode:
         # Coordinator state/latches are subscribed and queried before any
         # keyboard event can enter a moving phase.
         self._session_client.start()
+        self._last_coordinator_transition: tuple[str, str] | None = None
 
         self._lock = threading.RLock()
         self._latest_motive_frame: MotiveFrame | None = None
@@ -513,11 +514,13 @@ class MocapH5ReplayNode:
         self._rigid_names_sub = ZenohJsonSub(
             session, RIGID_BODY_NAMES_KEY, self._on_rigid_body_names
         )
+        self._solved_pose: np.ndarray | None = None
+        self._solved_target_sequence: int | None = None
+        self._solved_received_at = 0.0
+        self._current_target_sequence: int | None = None
         self._solved_sub = ZenohJsonSub(
             session, topics.arm_solved_pose("right"), self._on_solved_pose
         )
-        self._solved_target_sequence: int | None = None
-        self._current_target_sequence: int | None = None
 
         self._deadman_error: str | None = None
         if deadman is _CREATE_DEADMAN:
@@ -599,12 +602,12 @@ class MocapH5ReplayNode:
             capability = parse_real_capability(self._real_capability)
         except Exception as exc:
             return False, str(exc)
+        if not capability.admitted:
+            return False, "real capability predicates are not admitted"
         if float(capability.speed) != self._speed:
             return False, "real capability speed does not match configured speed"
         if float(capability.yaw_deg) != self._yaw_deg:
             return False, "real capability yaw does not match configured yaw"
-        if not capability.admitted:
-            return False, "real capability predicates are not admitted"
         if not self._real_preflight_ok:
             return False, self._h5_joint_preflight_reason or "H5/hand preflight failed"
         if self._deadman is None:
@@ -709,15 +712,53 @@ class MocapH5ReplayNode:
         wrist_home_pose: np.ndarray,
         mount_home_pose: np.ndarray,
     ) -> bool:
+        return self._publish_skeleton(
+            source_frame_index=self._frame_zero_source_index,
+            manus_wrist_pose=self._frame_zero_pose,
+            wrist_home_pose=wrist_home_pose,
+        )
+
+    def _publish_skeleton(
+        self,
+        *,
+        source_frame_index: int,
+        manus_wrist_pose: np.ndarray,
+        wrist_home_pose: np.ndarray,
+    ) -> bool:
         try:
+            valid_indices = self._trajectory.valid_indices
+            valid_offset = max(
+                0,
+                int(np.searchsorted(
+                    valid_indices, source_frame_index, side="right"
+                )) - 1,
+            )
+            keypoints_frame = int(valid_indices[valid_offset])
+            source_wrist_pose = self._trajectory.pose_at_frame(keypoints_frame)
+            keypoints = _rotate_points_yaw(
+                self._recording.hands["right"].keypoints_world[keypoints_frame],
+                self._yaw_deg,
+            )
+            source_rotation = Rotation.from_quat(
+                source_wrist_pose[3:]
+            ).as_matrix()
+            target_rotation = Rotation.from_quat(
+                manus_wrist_pose[3:]
+            ).as_matrix()
+            keypoints = (
+                (keypoints - source_wrist_pose[:3])
+                @ source_rotation
+                @ target_rotation.T
+                + manus_wrist_pose[:3]
+            )
             target_wrist_motive = compose_pose(
-                self._frame_zero_pose,
+                manus_wrist_pose,
                 self._h5_wrist_to_wuji2_wrist_pose,
             )
             self._publisher.publish_frame0_skeleton_data(
                 side="right",
-                keypoints_world_m=self._frame_zero_keypoints,
-                manus_wrist_pose=self._frame_zero_pose,
+                keypoints_world_m=keypoints,
+                manus_wrist_pose=manus_wrist_pose,
                 robot_wrist_home_pose=wrist_home_pose,
                 target_wrist_pose=target_wrist_motive,
                 tcp_to_wrist_pose=self._tcp_to_wrist_pose,
@@ -726,7 +767,7 @@ class MocapH5ReplayNode:
         except Exception as exc:
             message = str(exc)
             if message != self._last_skeleton_error:
-                _LOG.warning("frame0 手部关键点预览失败：%s", exc)
+                _LOG.warning("H5 手部轨迹预览失败：%s", exc)
                 self._last_skeleton_error = message
             return False
         self._last_skeleton_error = None
@@ -906,8 +947,7 @@ class MocapH5ReplayNode:
         )
         _LOG.warning(
             "键盘 s：已读取 tianji_wrist marker 并推导 r_mount/r_wrist "
-            "Home；持续按住 Enter，使 r_wrist 接近 H5 wrist frame0，"
-            "松开保持。"
+            "Home；start 请求已提交，等待 coordinator 接受。"
         )
 
     def _request_quit(self) -> None:
@@ -1099,20 +1139,41 @@ class MocapH5ReplayNode:
         relative = rotated - rotated[:, 0:1, :]
         return relative.astype("<f4")
 
+    def _sample_hand_payload(
+        self, payload: np.ndarray
+    ) -> tuple[np.ndarray, int]:
+        times = np.asarray(self._recording.time_ns, dtype=np.int64)
+        start = int(self._trajectory.start_frame_index)
+        target_ns = int(
+            times[start] + round(self._current_source_elapsed_s * 1.0e9)
+        )
+        target_ns = int(np.clip(target_ns, times[start], times[-1]))
+        upper = int(np.searchsorted(times, target_ns, side="right"))
+        if upper <= start:
+            return payload[start], target_ns
+        if upper >= len(payload):
+            return payload[-1], target_ns
+        lower = upper - 1
+        span_ns = int(times[upper] - times[lower])
+        alpha = (
+            0.0
+            if span_ns <= 0
+            else (target_ns - int(times[lower])) / span_ns
+        )
+        return payload[lower] + (payload[upper] - payload[lower]) * alpha, target_ns
+
     def _publish_hand_joint_commands(self) -> None:
         """Direct mode emits the typed 20-joint command, never a raw byte topic."""
         payload = getattr(self, "_hand_joint_commands_payload", None)
         if payload is None:
             return
-        trajectory = getattr(self, "_trajectory", None)
-        start_frame = trajectory.start_frame_index if trajectory is not None else 0
-        frame_index = max(self._current_source_frame, start_frame)
+        sample, _timestamp_ns = self._sample_hand_payload(payload)
         from ...protocol.messages import HAND_JOINT_NAMES
 
         self._publisher.publish_hand_joint_command(
             side="right",
             names=HAND_JOINT_NAMES["right"],
-            position_rad=payload[frame_index],
+            position_rad=sample,
             producer="h5_direct",
         )
 
@@ -1120,13 +1181,11 @@ class MocapH5ReplayNode:
         payload = getattr(self, "_hand_keypoints_payload", None)
         if payload is None:
             return
-        trajectory = getattr(self, "_trajectory", None)
-        start_frame = trajectory.start_frame_index if trajectory is not None else 0
-        frame_index = max(self._current_source_frame, start_frame)
+        sample, timestamp_ns = self._sample_hand_payload(payload)
         self._publisher.publish_hand_target(
             side="right",
-            keypoints_m=payload[frame_index],
-            source_timestamp_ns=int(self._recording.time_ns[frame_index]),
+            keypoints_m=sample,
+            source_timestamp_ns=timestamp_ns,
         )
 
     def _publish_cached_targets(self) -> None:
@@ -1171,6 +1230,14 @@ class MocapH5ReplayNode:
             self._publish_hand_joint_commands()
         else:
             self._publish_hand_keypoints()
+        if self._right_wrist_home_pose is not None:
+            self._publish_skeleton(
+                source_frame_index=index,
+                manus_wrist_pose=self._trajectory.sample(
+                    self._current_source_elapsed_s
+                ).pose,
+                wrist_home_pose=self._right_wrist_home_pose,
+            )
 
     def _motive_tracking_status(self, now: float) -> dict[str, Any]:
         frame = self._latest_motive_frame
@@ -1339,9 +1406,34 @@ class MocapH5ReplayNode:
     def _publish_state(self, state: str) -> None:
         self._publish_status()
 
+    def _log_coordinator_transition(self) -> None:
+        state = self._session_client.state
+        if state is None:
+            return
+        transition = (state.state, state.reason)
+        if transition == self._last_coordinator_transition:
+            return
+        self._last_coordinator_transition = transition
+        if self._phase == "start_pending" and state.state != "teleop":
+            _LOG.warning(
+                "coordinator 拒绝 start：state=%s，reason=%s，"
+                "intent_sequence=%s；仍保持 Home",
+                state.state,
+                state.reason,
+                state.intent_sequence,
+            )
+        elif state.state in {"returning", "fault"}:
+            _LOG.warning(
+                "coordinator 进入 %s：reason=%s，intent_sequence=%s",
+                state.state,
+                state.reason,
+                state.intent_sequence,
+            )
+
     def _tick(self, now: float | None = None) -> bool:
         now = time.monotonic() if now is None else float(now)
         self._session_client.poll()
+        self._log_coordinator_transition()
         with self._lock:
             if self._phase == "armed":
                 if self._session_client.at_home is not None:
@@ -1393,6 +1485,10 @@ class MocapH5ReplayNode:
                     else:
                         self._phase = "approaching"
                         self._phase_started = now
+                        _LOG.warning(
+                            "coordinator 已接受 start：phase=approaching；"
+                            "现在可持续按住 Enter，松开立即保持"
+                        )
                 elif self._session_client.pending_intent_sequence is None:
                     self._phase = "armed"
                     self._right_rigid_home_pose = None

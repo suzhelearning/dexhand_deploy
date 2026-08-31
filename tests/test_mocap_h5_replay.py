@@ -98,6 +98,18 @@ class H5DeadmanRegressionTest(unittest.TestCase):
 
 
 class H5DirectJointRegressionTest(unittest.TestCase):
+    def test_hand_payload_interpolates_at_slow_replay_speed(self) -> None:
+        node = MocapH5ReplayNode.__new__(MocapH5ReplayNode)
+        node._recording = SimpleNamespace(
+            time_ns=np.asarray([1_000_000_000, 2_000_000_000], dtype=np.int64)
+        )
+        node._trajectory = SimpleNamespace(start_frame_index=0)
+        node._current_source_elapsed_s = 0.25
+        payload = np.asarray([np.zeros((21, 3)), np.full((21, 3), 2.0)])
+        sample, timestamp_ns = node._sample_hand_payload(payload)
+        np.testing.assert_allclose(sample, 0.5)
+        self.assertEqual(timestamp_ns, 1_250_000_000)
+
     def test_direct_joint_payload_preserves_canonical_20_joint_order(self) -> None:
         node = MocapH5ReplayNode.__new__(MocapH5ReplayNode)
         values = np.linspace(-0.2, 0.2, 40, dtype=np.float64).reshape(2, 20)
@@ -106,6 +118,10 @@ class H5DirectJointRegressionTest(unittest.TestCase):
         node._publisher = _HandPublisher()
         node._hand_joint_commands_payload = payload
         node._trajectory = SimpleNamespace(start_frame_index=0)
+        node._recording = SimpleNamespace(
+            time_ns=np.asarray([0, 1_000_000_000], dtype=np.int64)
+        )
+        node._current_source_elapsed_s = 1.0
         node._current_source_frame = 1
         node._publisher.publish_hand_joint_command = node._publisher.publish_hand_joint_command
         node._publish_hand_joint_commands()
@@ -135,6 +151,39 @@ class H5TerminalRegressionTest(unittest.TestCase):
         options = configure.call_args.kwargs
         self.assertTrue(options["force"])
         self.assertEqual(options["handlers"][0].terminator, "\n\n")
+
+    def test_coordinator_return_reason_is_logged_once(self) -> None:
+        node = MocapH5ReplayNode.__new__(MocapH5ReplayNode)
+        node._phase = "returning"
+        node._session_client = SimpleNamespace(state=SimpleNamespace(
+            state="returning",
+            reason="producer_arm stale or unhealthy",
+            intent_sequence=7,
+        ))
+        node._last_coordinator_transition = None
+        with self.assertLogs(
+            "mocap_h5_replay", level="WARNING"
+        ) as captured:
+            node._log_coordinator_transition()
+            node._log_coordinator_transition()
+        self.assertEqual(len(captured.output), 1)
+        self.assertIn("producer_arm stale or unhealthy", captured.output[0])
+
+    def test_coordinator_start_rejection_reason_is_logged(self) -> None:
+        node = MocapH5ReplayNode.__new__(MocapH5ReplayNode)
+        node._phase = "start_pending"
+        node._session_client = SimpleNamespace(state=SimpleNamespace(
+            state="idle",
+            reason="hand executor/state not fresh at zero",
+            intent_sequence=9,
+        ))
+        node._last_coordinator_transition = ("idle", "ready")
+        with self.assertLogs(
+            "mocap_h5_replay", level="WARNING"
+        ) as captured:
+            node._log_coordinator_transition()
+        self.assertIn("拒绝 start", captured.output[0])
+        self.assertIn("hand executor/state not fresh at zero", captured.output[0])
 
 
 class Frame0ViewerRegressionTest(unittest.TestCase):

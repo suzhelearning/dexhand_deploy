@@ -17,6 +17,7 @@ from pico_body_tianji.executors.wuji_hand2.node import WujiHandExecutor
 from pico_body_tianji.executors.wuji_hand2.config import WujiHandConfig
 from pico_body_tianji.marvin_hardware import MarvinFeedback
 from pico_body_tianji.protocol.messages import (
+    ARM_JOINT_NAMES,
     ArmJointCommand,
     ComponentStatus,
     HandJointCommand,
@@ -432,6 +433,22 @@ class Task5ExecutorContractTest(unittest.TestCase):
         self.assertTrue(executor.unhealthy)
         self.assertEqual(executor._state, "returning")
 
+    def test_wuji_waits_at_zero_for_first_deadman_input(self):
+        clock = _Clock(1_000_000_000)
+        executor = WujiHandExecutor(
+            mode="retarget", side="right", router_zid="router",
+            publisher_instance_id="wuji", authorized_producer="retarget",
+            authorized_publisher_instance_id="source",
+            coordinator_instance_id="coord", clock=clock,
+        )
+        executor.on_session_state(SessionState(
+            1, 1, clock(), "teleop", "start", "coordinator", 1, "coord", "router"
+        ))
+        executor.tick(now_ns=clock())
+        self.assertEqual(executor._state, "teleop")
+        self.assertFalse(executor.unhealthy)
+        self.assertFalse(executor.tracking_allowed)
+
 
     def test_mujoco_applies_both_same_tick_commands_and_publishes_rad_state(self):
         session, model, data = _FakeSession(), _FakeModel(), _FakeData()
@@ -581,6 +598,7 @@ class Task5ExecutorContractTest(unittest.TestCase):
 class _FakeMarvinHardware:
     def __init__(self) -> None:
         self.sent = []
+        self.feedback_requests = []
         self.soft_stops = 0
         self.connect_calls = 0
         self.feedback = MarvinFeedback(
@@ -595,6 +613,7 @@ class _FakeMarvinHardware:
         self.sent.append((np.asarray(left).copy(), np.asarray(right).copy()))
 
     def read_feedback(self, include_servo_errors=False):
+        self.feedback_requests.append(include_servo_errors)
         return self.feedback
 
     def soft_stop_once(self):
@@ -624,6 +643,57 @@ class MarvinExecutorSafetyTest(unittest.TestCase):
             [f"Joint{i}_{'L' if side == 'left' else 'R'}" for i in range(1, 8)],
             [value] * 7, "coord", "router",
         )
+
+    def test_canonical_rate_hz_drives_real_executor_loop(self):
+        executor = MarvinExecutor(
+            hardware_session=_FakeMarvinHardware(), publisher_instance_id="marvin",
+            router_zid="router", coordinator_instance_id="coord",
+            params={"rate_hz": 200.0},
+        )
+        self.assertEqual(executor._rate_hz, 200.0)
+
+    def test_healthy_tick_does_not_poll_slow_servo_diagnostics(self):
+        hardware = _FakeMarvinHardware()
+        executor = MarvinExecutor(
+            hardware_session=hardware, publisher_instance_id="marvin",
+            router_zid="router", coordinator_instance_id="coord",
+        )
+        executor.tick(now_ns=100)
+        self.assertEqual(hardware.feedback_requests, [False])
+
+    def test_fresh_teleop_commands_recover_from_transient_pair_gap(self):
+        hardware = _FakeMarvinHardware()
+        executor = MarvinExecutor(
+            hardware_session=hardware, publisher_instance_id="marvin",
+            router_zid="router", coordinator_instance_id="coord",
+            clock=lambda: 100,
+        )
+        home = np.asarray(executor.robot.home_all)
+        hardware.feedback = MarvinFeedback(
+            np.degrees(home[:7]), np.degrees(home[7:]), (1, 1), (1, 1),
+            (0, 0), (1, 1), (10, 10), (10, 10), ("None", "None"),
+        )
+        executor._phase = "armed_idle"
+        executor.on_session_state(SessionState(
+            1, 1, 100, "teleop", "accepted", "coordinator", 1,
+            "coord", "router",
+        ))
+        executor.tick(now_ns=100)
+        self.assertEqual(executor.phase, "returning")
+
+        hardware.sent.clear()
+        for side, values in (("left", home[:7]), ("right", home[7:] + 0.001)):
+            executor.on_arm_command(ArmJointCommand(
+                1, 2, 100, "coordinator", side, "teleop", 1, 1,
+                list(ARM_JOINT_NAMES[side]), values.tolist(), "coord", "router",
+            ))
+        executor.tick(now_ns=100)
+        self.assertEqual(executor.phase, "teleop")
+        self.assertGreater(
+            np.max(np.abs(hardware.sent[-1][1] - np.degrees(home[7:]))),
+            0.0,
+        )
+
     def test_admitted_real_capability_allows_normal_connect(self):
         hardware = _ConnectableMarvinHardware()
         executor = MarvinExecutor(

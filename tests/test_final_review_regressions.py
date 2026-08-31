@@ -14,6 +14,7 @@ class FinalReviewRegressionTest(unittest.TestCase):
     def test_hand_teleop_health_requires_tracking_and_matching_state(self) -> None:
         coordinator = object.__new__(ArmCommandCoordinator)
         coordinator._state = mock.Mock(state="teleop")
+        coordinator.profile = {}
         coordinator._hand_status = {"right": mock.Mock(value=HandExecutorStatus(
             1, 1, 100, "right", True, True, False, False, None, "hand-i", "router"
         ))}
@@ -24,6 +25,10 @@ class FinalReviewRegressionTest(unittest.TestCase):
         coordinator._profile_hand_sides = lambda: ("right",)
         coordinator._fresh = lambda value, now: True
         self.assertFalse(coordinator._hand_tracking_fresh(100))
+        coordinator._hand_status["right"].value = HandExecutorStatus(
+            1, 2, 100, "right", True, True, True, False, None, "hand-i", "router"
+        )
+        self.assertTrue(coordinator._hand_tracking_fresh(100))
 
     def test_analyzer_global_protocol_drops_are_a_gate(self) -> None:
         path = Path(__file__).parents[1] / "scripts" / "validation" / "analyze_runs.py"
