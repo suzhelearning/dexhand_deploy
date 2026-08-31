@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import h5py
 import numpy as np
-from pico_body_tianji.protocol import topics
-from pico_body_tianji.protocol.messages import LatchedBool, SessionState
-from pico_body_tianji.sources.mocap.h5 import load_mocap_h5
-from pico_body_tianji.sources.mocap.h5_replay_node import (
+from tianji_teleop.protocol import topics
+from tianji_teleop.protocol.messages import LatchedBool, SessionState
+from tianji_teleop.sources.mocap.h5 import load_mocap_h5
+from tianji_teleop.sources.mocap.h5_replay_node import (
     DEFAULT_PARAMETERS,
     MocapH5ReplayNode,
 )

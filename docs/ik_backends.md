@@ -4,7 +4,7 @@
 `tianji/target/arm/{left,right}`，发布 accepted proposal 与 solved pose；
 coordinator 才能把 proposal 变成 final command。三个 backend 为
 `pinocchio_cpp`、`pinocchio_qp`、`tianji_official`，选择只写入
-`src/pico_body_tianji/config/producers/ik.yaml` 的 `ik_backend`。
+`src/tianji_teleop/config/producers/ik.yaml` 的 `ik_backend`。
 
 所有 backend 共享 `ArmIkSolver::solve()`、`IkSettings` 和 `IkResult`，使用
 `config/robot/arm.yaml` 中的 names、Home 和 rad limits。target 的 side/frame、
@@ -13,7 +13,7 @@ sequence、freshness 或几何非法时 producer 不调用 solver，也不发送
 
 ```bash
 pixi run -e ik-build build-ik
-TIANJI_IK_BACKEND=pinocchio_cpp pixi run pico_sim
+TIANJI_IK_BACKEND=pinocchio_cpp pixi run mocap_live_sim
 ```
 
 官方 SDK 只在独立 worker 与 producer 进程加载；Marvin executor 不加载官方 IK

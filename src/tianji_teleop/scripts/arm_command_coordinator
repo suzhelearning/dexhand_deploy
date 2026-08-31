@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+from tianji_teleop.coordination.arm_command_coordinator import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,32 @@
+<robot name="tianji_arm_marker">
+  <link name="marker_mocap">
+    <inertial>
+      <origin xyz="-2.12863929093497E-07 0.00124443190416646 0.00226906870235771" rpy="0 0 0" />
+      <mass value="0.0167124616872421" />
+      <inertia ixx="1.71023387500903E-05" ixy="-1.11405188669191E-11" ixz="-1.16988732093527E-11" iyy="8.92159156719571E-06" iyz="5.34437648077156E-07" izz="8.32668495865682E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://tianji_teleop/assets/marvin_m6_ccs/meshes/marker_mocap.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 0.25 0.05 1" />
+      </material>
+    </visual>
+  </link>
+  <link name="marker_wuji2">
+    </link>
+  <joint name="marker_wuji2" type="fixed">
+    <origin xyz="0.004 0 0" rpy="0 0 0" />
+    <parent link="marker_mocap" />
+    <child link="marker_wuji2" />
+  </joint>
+  <link name="marker_tianji">
+    </link>
+  <joint name="marker_tianji" type="fixed">
+    <origin xyz="-0.004 0 0" rpy="0 0 0" />
+    <parent link="marker_mocap" />
+    <child link="marker_tianji" />
+  </joint>
+</robot>

@@ -1,6 +1,6 @@
 # Tianji Teleop
 
-这是一个由 PICO controller、`mocap/aligned/hands` live 人手或 acquisition v4 H5
+这是一个由 `mocap/aligned/hands` live 人手或 acquisition v4 H5
 回放产生 canonical target 的遥操作系统。IK producer、唯一 command coordinator、
 MuJoCo/Marvin/Wuji executor 均通过 versioned Zenoh protocol 通信。
 
@@ -11,7 +11,6 @@ MuJoCo/Marvin/Wuji executor 均通过 versioned Zenoh protocol 通信。
 ```bash
 export TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447
 pixi run doctor
-pixi run pico_sim
 pixi run mocap_live_sim
 pixi run h5_sim -- --h5 TAKE.h5
 pixi run target_replay_sim -- session.h5
@@ -29,9 +28,9 @@ pixi run h5_sim -- --h5 TAKE.h5 --headless
 preflight 共同放行：
 
 ```bash
-pixi run pico_real -- --confirm-real
 pixi run mocap_live_real -- --confirm-real
 pixi run h5_real -- --confirm-real --h5 TAKE.h5
+pixi run h5_real -- --confirm-real --h5 TAKE.h5 --speed 1
 ```
 
 `run_session.sh` 在 spawn 前为每个 component 分配 UUID，并注入
@@ -41,7 +40,7 @@ pixi run h5_real -- --confirm-real --h5 TAKE.h5
 
 ## 配置
 
-唯一配置树位于 `src/pico_body_tianji/config/`：
+唯一配置树位于 `src/tianji_teleop/config/`：
 
 - `robot/`：双臂和 Wuji Hand 2 的 names、Home、rad limits、zero；
 - `sources/`、`producers/`、`executors/`：组件参数；

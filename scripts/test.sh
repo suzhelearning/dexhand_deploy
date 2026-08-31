@@ -40,7 +40,7 @@ printf '%s\n' "managed test router: endpoint=${router_endpoint} zid=${router_zid
 
 # doctor consumes this endpoint; it must not start a second router.
 "${SCRIPT_DIR}/doctor.sh"
-PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${PYTHONPATH:-}" python - <<'PY'
+PYTHONPATH="${BUNDLE_ROOT}/src/tianji_teleop:${PYTHONPATH:-}" python - <<'PY'
 import sys
 import unittest
 

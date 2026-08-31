@@ -11,10 +11,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from pico_body_tianji.protocol.messages import ProtocolEnvelope, RawPicoControllerSample
-from pico_body_tianji.recording.recorder import RecorderProtocolError, SessionRecorderNode
-from pico_body_tianji.recording.session_h5 import IncompleteSessionError, SessionH5Reader
-from pico_body_tianji.protocol import topics
+from tianji_teleop.protocol.messages import ProtocolEnvelope, RawMocapLiveSample
+from tianji_teleop.recording.recorder import RecorderProtocolError, SessionRecorderNode
+from tianji_teleop.recording.session_h5 import IncompleteSessionError, SessionH5Reader
+from tianji_teleop.protocol import topics
 
 
 class _Session:
@@ -30,22 +30,26 @@ class SessionRecorderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.h5"
             session = _Session()
-            node = SessionRecorderNode(session, path, source_type="pico_controller", robot_model="marvin", router_zid="router")
+            node = SessionRecorderNode(session, path, source_type="mocap_live", robot_model="marvin", router_zid="router")
             keys = {key for key, _ in session.subscriptions}
-            self.assertIn(topics.RAW_PICO_CONTROLLER, keys)
-            self.assertNotIn(topics.RAW_MOCAP_LIVE, keys)
-            sample = RawPicoControllerSample(ProtocolEnvelope(1, "source-instance", "router", 1, 100), None, [0, 0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 0, 1], False)
-            node.receive(topics.RAW_PICO_CONTROLLER, json.dumps(sample.to_dict()).encode(), received_time_ns=1000)
+            self.assertIn(topics.RAW_MOCAP_LIVE, keys)
+            self.assertNotIn(topics.RAW_H5_REPLAY, keys)
+            hands = {
+                side: {"valid": False, "wrist_pose": None, "keypoints_world_m": None}
+                for side in ("left", "right")
+            }
+            sample = RawMocapLiveSample(ProtocolEnvelope(1, "source-instance", "router", 1, 100), None, "stream", 1, 1, hands)
+            node.receive(topics.RAW_MOCAP_LIVE, json.dumps(sample.to_dict()).encode(), received_time_ns=1000)
             node.close()
             with SessionH5Reader(path) as reader:
-                self.assertEqual(reader.read_raw_pico()[0]["publisher_instance_id"], "source-instance")
+                self.assertEqual(reader.read_raw_mocap()[0]["publisher_instance_id"], "source-instance")
 
     def test_unknown_raw_type_fails_and_keeps_file_incomplete(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.h5"
-            node = SessionRecorderNode(_Session(), path, source_type="pico_controller", robot_model="marvin", router_zid="router")
+            node = SessionRecorderNode(_Session(), path, source_type="h5_replay", robot_model="marvin", router_zid="router")
             with self.assertRaises(RecorderProtocolError):
-                node.receive(topics.RAW_PICO_CONTROLLER, b'{"schema_version":1,"source_type":"mocap_live"}')
+                node.receive(topics.RAW_MOCAP_LIVE, b'{"schema_version":1,"source_type":"mocap_live"}')
             node.abort()
             with self.assertRaises(IncompleteSessionError):
                 SessionH5Reader(path)
@@ -55,14 +59,14 @@ class SessionRecorderTest(unittest.TestCase):
             path = Path(directory) / "session.h5"
             path.touch()
             with self.assertRaises(FileExistsError):
-                SessionRecorderNode(_Session(), path, source_type="pico_controller", robot_model="marvin", router_zid="router")
+                SessionRecorderNode(_Session(), path, source_type="mocap_live", robot_model="marvin", router_zid="router")
 
     def test_recording_config_is_applied_to_writer(self):
         with tempfile.TemporaryDirectory() as directory:
             node = SessionRecorderNode(
                 _Session(),
                 Path(directory) / "session.h5",
-                source_type="pico_controller",
+                source_type="mocap_live",
                 robot_model="marvin",
                 router_zid="router",
                 recording_config={
@@ -78,12 +82,12 @@ class SessionRecorderTest(unittest.TestCase):
     def test_sigterm_gracefully_closes_recorder(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "marker.json"
-            config = Path(__file__).parents[1] / "src" / "pico_body_tianji" / "config" / "recording" / "session.yaml"
+            config = Path(__file__).parents[1] / "src" / "tianji_teleop" / "config" / "recording" / "session.yaml"
             code = textwrap.dedent(
                 """
                 import json
                 import os
-                import pico_body_tianji.recording.session_recorder as module
+                import tianji_teleop.recording.session_recorder as module
 
                 marker = os.environ["MARKER"]
                 class FakeSession:
@@ -111,11 +115,11 @@ class SessionRecorderTest(unittest.TestCase):
             env = os.environ.copy()
             env.update(
                 {
-                    "PYTHONPATH": str(Path(__file__).parents[1] / "src" / "pico_body_tianji")
+                    "PYTHONPATH": str(Path(__file__).parents[1] / "src" / "tianji_teleop")
                     + os.pathsep
                     + env.get("PYTHONPATH", ""),
                     "TIANJI_RECORD_PATH": str(Path(directory) / "session.h5"),
-                    "TIANJI_RECORD_SOURCE_TYPE": "pico_controller",
+                    "TIANJI_RECORD_SOURCE_TYPE": "mocap_live",
                     "TIANJI_COMPONENT_INSTANCE_ID": "recorder-instance",
                     "TIANJI_ROUTER_ZID": "router",
                     "TIANJI_RECORDING_CONFIG": str(config),
@@ -141,12 +145,12 @@ class SessionRecorderTest(unittest.TestCase):
     def test_unexpected_flush_exception_aborts_and_keeps_recording_incomplete(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "marker.json"
-            config = Path(__file__).parents[1] / "src" / "pico_body_tianji" / "config" / "recording" / "session.yaml"
+            config = Path(__file__).parents[1] / "src" / "tianji_teleop" / "config" / "recording" / "session.yaml"
             code = textwrap.dedent(
                 """
                 import json
                 import os
-                import pico_body_tianji.recording.session_recorder as module
+                import tianji_teleop.recording.session_recorder as module
 
                 marker = os.environ["MARKER"]
                 class FakeSession:
@@ -181,11 +185,11 @@ class SessionRecorderTest(unittest.TestCase):
             env = os.environ.copy()
             env.update(
                 {
-                    "PYTHONPATH": str(Path(__file__).parents[1] / "src" / "pico_body_tianji")
+                    "PYTHONPATH": str(Path(__file__).parents[1] / "src" / "tianji_teleop")
                     + os.pathsep
                     + env.get("PYTHONPATH", ""),
                     "TIANJI_RECORD_PATH": str(Path(directory) / "session.h5"),
-                    "TIANJI_RECORD_SOURCE_TYPE": "pico_controller",
+                    "TIANJI_RECORD_SOURCE_TYPE": "mocap_live",
                     "TIANJI_COMPONENT_INSTANCE_ID": "recorder-instance",
                     "TIANJI_ROUTER_ZID": "router",
                     "TIANJI_RECORDING_CONFIG": str(config),

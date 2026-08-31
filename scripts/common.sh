@@ -2,14 +2,14 @@
 set -euo pipefail
 
 BUNDLE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT_PREFIX="${BUNDLE_ROOT}/runtime/pico_body_tianji"
+PROJECT_PREFIX="${BUNDLE_ROOT}/runtime/tianji_teleop"
 ABI_LIBRARY_ROOT="${BUNDLE_ROOT}/runtime/abi/lib"
 PIN_LIBRARY_ROOT="${BUNDLE_ROOT}/runtime/pin/lib"
 ZENOH_LIBRARY_ROOT="${BUNDLE_ROOT}/vendor/zenoh/lib"
 ZENOH_CPP_INCLUDE_ROOT="${BUNDLE_ROOT}/vendor/zenoh-cpp/include"
 ZENOH_C_INCLUDE_ROOT="${BUNDLE_ROOT}/vendor/zenoh/include"
 _TELEOP_RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
-TELEOP_RUNTIME_DIR="${PICO_TIANJI_RUNTIME_DIR:-${_TELEOP_RUNTIME_BASE}/pico-tianji-teleop-${UID}}"
+TELEOP_RUNTIME_DIR="${TIANJI_TELEOP_RUNTIME_DIR:-${_TELEOP_RUNTIME_BASE}/tianji-teleop-${UID}}"
 TELEOP_GUARDS_DIR="${TELEOP_RUNTIME_DIR}/guards"
 TELEOP_LEGACY_GUARD_DIR="${TELEOP_RUNTIME_DIR}/guard"
 TELEOP_GUARD_DIR=""
@@ -381,8 +381,8 @@ PY
 
 read_teleop_node_list() {
   local endpoint="${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
-  if [[ -v PICO_TIANJI_NODE_LIST_OVERRIDE ]]; then
-    printf '%s\n' "${PICO_TIANJI_NODE_LIST_OVERRIDE}"
+  if [[ -v TIANJI_TELEOP_NODE_LIST_OVERRIDE ]]; then
+    printf '%s\n' "${TIANJI_TELEOP_NODE_LIST_OVERRIDE}"
     return 0
   fi
   TIANJI_ROUTER_ENDPOINT="${endpoint}" python - <<'PY'
@@ -421,15 +421,15 @@ assert_no_conflicting_teleop_nodes() {
   local mode="${1:-all}"
   local node_list=""
   local conflicts=""
-  if [[ "${mode}" == "real" && -v PICO_TIANJI_NODE_LIST_OVERRIDE ]]; then
+  if [[ "${mode}" == "real" && -v TIANJI_TELEOP_NODE_LIST_OVERRIDE ]]; then
     printf '%s\n' '拒绝连接真机：真机模式禁止覆盖 live token 列表。' >&2
     return 1
   fi
-  if [[ "${mode}" == "real" && "${PICO_TIANJI_SKIP_ROS_CONFLICT_CHECK:-0}" == "1" ]]; then
+  if [[ "${mode}" == "real" && "${TIANJI_TELEOP_SKIP_ROS_CONFLICT_CHECK:-0}" == "1" ]]; then
     printf '%s\n' '拒绝连接真机：真机模式禁止跳过 live token 检查。' >&2
     return 1
   fi
-  if [[ "${PICO_TIANJI_SKIP_ROS_CONFLICT_CHECK:-0}" == "1" ]]; then
+  if [[ "${TIANJI_TELEOP_SKIP_ROS_CONFLICT_CHECK:-0}" == "1" ]]; then
     return 0
   fi
   if ! node_list="$(read_teleop_node_list)"; then
@@ -537,9 +537,9 @@ require_router() {
 
 canonical_config() {
   local relative="$1"
-  local candidate="${BUNDLE_ROOT}/src/pico_body_tianji/config/${relative}"
-  if [[ ! -f "${candidate}" && -n "${PICO_BODY_TIANJI_BUNDLE_ROOT:-}" ]]; then
-    candidate="${PICO_BODY_TIANJI_BUNDLE_ROOT}/runtime/pico_body_tianji/share/pico_body_tianji/config/${relative}"
+  local candidate="${BUNDLE_ROOT}/src/tianji_teleop/config/${relative}"
+  if [[ ! -f "${candidate}" && -n "${TIANJI_TELEOP_BUNDLE_ROOT:-}" ]]; then
+    candidate="${TIANJI_TELEOP_BUNDLE_ROOT}/runtime/tianji_teleop/share/tianji_teleop/config/${relative}"
   fi
   if [[ ! -f "${candidate}" ]]; then
     printf '错误：缺少 canonical config: %s\n' "${relative}" >&2
@@ -562,9 +562,9 @@ activate_bundle_runtime() {
   fi
 
   export PYTHONDONTWRITEBYTECODE=1
-  export PICO_BODY_TIANJI_BUNDLE_ROOT="${BUNDLE_ROOT}"
-  export PATH="${PROJECT_PREFIX}/lib/pico_body_tianji:${PATH}"
-  export PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${BUNDLE_ROOT}/vendor/python:${PROJECT_PREFIX}/lib/python3.10/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
+  export TIANJI_TELEOP_BUNDLE_ROOT="${BUNDLE_ROOT}"
+  export PATH="${PROJECT_PREFIX}/lib/tianji_teleop:${PATH}"
+  export PYTHONPATH="${BUNDLE_ROOT}/src/tianji_teleop:${BUNDLE_ROOT}/vendor/python:${PROJECT_PREFIX}/lib/python3.10/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
   conda_library_path=""
   if [[ -n "${CONDA_PREFIX:-}" ]]; then
     conda_library_path="${CONDA_PREFIX}/lib:"

@@ -4,50 +4,15 @@ import unittest
 
 import numpy as np
 
-from pico_body_tianji.sources.pico_controller.controller_frame import ControllerFrame
-from pico_body_tianji.sources.common.target_mapper import (
+from tianji_teleop.sources.common.wrist_pose_frame import WristPoseFrame
+from tianji_teleop.sources.common.target_mapper import (
     EndEffectorTargetMapper,
 )
-from pico_body_tianji.sources.pico_controller.source import (
-    XRoboControllerOnlySource,
-)
-from pico_body_tianji.sources.common.target_conditioner import (
+from tianji_teleop.sources.common.target_conditioner import (
     TargetConditioner,
     TargetConditioningSettings,
 )
 from tianji_world_output.config_loader import TianjiConfig
-
-
-class _ControllerSdk:
-    def __init__(self):
-        self.opened = False
-        self.body_api_calls = 0
-
-    def init(self) -> None:
-        self.opened = True
-
-    def close(self) -> None:
-        self.opened = False
-
-    @staticmethod
-    def get_left_controller_pose():
-        return [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]
-
-    @staticmethod
-    def get_right_controller_pose():
-        return [-0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]
-
-    @staticmethod
-    def get_time_stamp_ns() -> int:
-        return 123
-
-    @staticmethod
-    def get_A_button() -> bool:
-        return False
-
-    def is_body_data_available(self) -> bool:
-        self.body_api_calls += 1
-        raise AssertionError("controller-only source accessed Body API")
 
 
 class TargetMapperTest(unittest.TestCase):
@@ -56,21 +21,19 @@ class TargetMapperTest(unittest.TestCase):
         self.mapper = EndEffectorTargetMapper(
             self.config,
             rate=90.0,
-            min_cutoff=1.0,
-            beta=0.7,
         )
-        self.initial_frame = ControllerFrame.from_poses(
+        self.initial_frame = WristPoseFrame.from_poses(
             [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0],
             [-0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0],
         )
 
     def test_initial_frame_maps_to_robot_safe_initial_poses(self) -> None:
         initialized = self.mapper.initialize(self.initial_frame)
-        targets = self.mapper.map_relative_controller_frame(self.initial_frame)
+        targets = self.mapper.map_relative_wrist_frame(self.initial_frame)
 
         self.assertEqual(
             initialized,
-            {"pico_left_wrist", "pico_right_wrist"},
+            {"left_wrist", "right_wrist"},
         )
         np.testing.assert_allclose(
             targets.left_pose[:3],
@@ -93,12 +56,12 @@ class TargetMapperTest(unittest.TestCase):
 
     def test_hand_motion_changes_target_without_body(self) -> None:
         self.mapper.initialize(self.initial_frame)
-        initial_targets = self.mapper.map_relative_controller_frame(self.initial_frame)
-        moved_frame = ControllerFrame.from_poses(
+        initial_targets = self.mapper.map_relative_wrist_frame(self.initial_frame)
+        moved_frame = WristPoseFrame.from_poses(
             [0.12, 0.2, 0.25, 0.0, 0.0, 0.0, 1.0],
             [-0.08, 0.22, 0.3, 0.0, 0.0, 0.0, 1.0],
         )
-        moved_targets = self.mapper.map_relative_controller_frame(moved_frame)
+        moved_targets = self.mapper.map_relative_wrist_frame(moved_frame)
 
         self.assertFalse(
             np.array_equal(
@@ -147,7 +110,7 @@ class TargetMapperTest(unittest.TestCase):
             },
         )
         mapper.initialize(self.initial_frame)
-        targets = mapper.map_relative_controller_frame(self.initial_frame)
+        targets = mapper.map_relative_wrist_frame(self.initial_frame)
 
         np.testing.assert_allclose(
             targets.left_default_elbow_direction,
@@ -157,21 +120,6 @@ class TargetMapperTest(unittest.TestCase):
             targets.right_default_elbow_direction,
             np.array([-1.0, 2.0, 3.0]) / np.sqrt(14.0),
         )
-
-    def test_source_can_skip_body_api_completely(self) -> None:
-        sdk = _ControllerSdk()
-        source = XRoboControllerOnlySource(sdk=sdk)
-        source.open()
-        try:
-            sample = source.read()
-        finally:
-            source.close()
-
-        self.assertIsNotNone(sample)
-        self.assertFalse(hasattr(sample, "body_frame"))
-        self.assertEqual(sample.source_timestamp_ns, 123)
-        self.assertEqual(sdk.body_api_calls, 0)
-
 
 if __name__ == "__main__":
     unittest.main()

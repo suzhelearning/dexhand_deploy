@@ -10,12 +10,14 @@ record_path=""
 input_path=""
 confirm_real=false
 display_mode=""
+playback_speed=""
 extra_args=()
 while (($#)); do
   case "$1" in
     --profile) profile="${2:-}"; shift 2 ;;
     --record) record_path="${2:-}"; shift 2 ;;
     --h5|--input) input_path="${2:-}"; shift 2 ;;
+    --speed) playback_speed="${2:-}"; shift 2 ;;
     --confirm-real) confirm_real=true; shift ;;
     --viewer)
       [[ "${display_mode}" != headless ]] || {
@@ -35,7 +37,7 @@ while (($#)); do
       ;;
     --help|-h)
       printf '%s\n' \
-        '用法: run_session.sh --profile PROFILE [--record PATH] [--confirm-real] [--h5 PATH] [--viewer|--headless]' \
+        '用法: run_session.sh --profile PROFILE [--record PATH] [--confirm-real] [--h5 PATH] [--speed RATE] [--viewer|--headless]' \
         '显示模式：h5_sim 默认打开 MuJoCo viewer；追加 --headless 可显式启用无窗口模式。' \
         '其他 profile 保持 executor config 默认；--viewer 只允许 simulation + MuJoCo executor。'
       exit 0 ;;
@@ -50,7 +52,7 @@ if [[ -z "${profile}" ]]; then
   exit 2
 fi
 case "${profile}" in
-  pico_sim|pico_real|mocap_live_sim|mocap_live_real|h5_sim|h5_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim) ;;
+  mocap_live_sim|mocap_live_real|h5_sim|h5_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim) ;;
   *) printf '错误：未知 session profile: %s\n' "${profile}" >&2; exit 2 ;;
 esac
 if [[ "${profile}" == target_replay_sim || "${profile}" == joint_replay_sim || "${profile}" == wuji_direct_real ]]; then
@@ -141,7 +143,7 @@ if [[ "${required_capability}" == real && "${confirm_real}" != true ]]; then
   exit 2
 fi
 if [[ "${required_capability}" == real ]]; then
-  export TIANJI_REAL_SPEED="${TIANJI_REAL_SPEED:-0.25}"
+  export TIANJI_REAL_SPEED="${playback_speed:-${TIANJI_REAL_SPEED:-0.25}}"
   export TIANJI_REAL_YAW_DEG="${TIANJI_REAL_YAW_DEG:-0}"
   if [[ -z "${TIANJI_REAL_PREFLIGHT_FD:-}" &&
         -z "${TIANJI_REAL_PREFLIGHT_SCANNER_FD:-}" &&
@@ -149,6 +151,7 @@ if [[ "${required_capability}" == real ]]; then
     relaunch=(bash "${SCRIPT_DIR}/run_session.sh" --profile "${profile}" --confirm-real)
     [[ -n "${record_path}" ]] && relaunch+=(--record "${record_path}")
     [[ -n "${input_path}" ]] && relaunch+=(--input "${input_path}")
+    relaunch+=(--speed "${TIANJI_REAL_SPEED}")
     [[ "${display_mode}" == viewer ]] && relaunch+=(--viewer)
     [[ "${display_mode}" == headless ]] && relaunch+=(--headless)
     ((${#extra_args[@]} == 0)) || relaunch+=(-- "${extra_args[@]}")
@@ -166,7 +169,7 @@ if [[ -n "${record_path}" ]]; then
 fi
 source_name="$(basename -- "${source_config}" .yaml)"
 case "${source_name}" in
-  pico_controller|mocap_live|h5_replay|target|joint|joint_real) ;;
+  mocap_live|h5_replay|target|joint|joint_real) ;;
   mocap_calibration) ;;
   *) printf '错误：source config 不在 canonical source/replay/diagnostic 树: %s\n' "${source_config}" >&2; exit 2 ;;
 esac
@@ -182,10 +185,10 @@ if [[ "${source_id}" == h5_replay ]]; then
     exit 2
   }
   if [[ "${hand_mode}" == auto ]]; then
-    if PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${BUNDLE_ROOT}/vendor/python:${PYTHONPATH:-}" pixi run python - "${input_path}" "${active_hand_sides}" <<'PY'
+    if PYTHONPATH="${BUNDLE_ROOT}/src/tianji_teleop:${BUNDLE_ROOT}/vendor/python:${PYTHONPATH:-}" pixi run python - "${input_path}" "${active_hand_sides}" <<'PY'
 import sys
 import numpy as np
-from pico_body_tianji.sources.mocap.h5 import load_mocap_h5
+from tianji_teleop.sources.mocap.h5 import load_mocap_h5
 recording = load_mocap_h5(sys.argv[1])
 sides = tuple(side for side in sys.argv[2].split(",") if side)
 if not sides:
@@ -470,11 +473,11 @@ if [[ "${required_capability}" == real ]]; then
   )
 fi
 if [[ -n "${record_path}" ]]; then
-  launch recorder "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${recorder_instance}" TIANJI_RECORD_PATH="${record_path}" TIANJI_RECORD_SOURCE_TYPE="${source_id}" TIANJI_RECORDING_CONFIG="$(canonical_config recording/session.yaml)" python -m pico_body_tianji.recording.session_recorder
+  launch recorder "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${recorder_instance}" TIANJI_RECORD_PATH="${record_path}" TIANJI_RECORD_SOURCE_TYPE="${source_id}" TIANJI_RECORDING_CONFIG="$(canonical_config recording/session.yaml)" python -m tianji_teleop.recording.session_recorder
 fi
-launch coordinator "${base_env[@]}" TIANJI_COORDINATOR_INSTANCE_ID="${coordinator_id}" TIANJI_COORDINATOR_CONFIG="$(canonical_config "${coordinator_config}")" python "${BUNDLE_ROOT}/src/pico_body_tianji/scripts/arm_command_coordinator"
+launch coordinator "${base_env[@]}" TIANJI_COORDINATOR_INSTANCE_ID="${coordinator_id}" TIANJI_COORDINATOR_CONFIG="$(canonical_config "${coordinator_config}")" python "${BUNDLE_ROOT}/src/tianji_teleop/scripts/arm_command_coordinator"
 if [[ "${profile}" == h5_real && "${hand_overlay}" == mujoco ]]; then
-  overlay_entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/h5_wrist_diagnostic"
+  overlay_entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/h5_wrist_diagnostic"
   [[ -x "${overlay_entry}" ]] || {
     printf '错误：h5_real 要求 passive Frame0 overlay，但入口不存在：%s\n' "${overlay_entry}" >&2
     exit 1
@@ -486,6 +489,8 @@ if [[ "${source_id}" == h5_replay ]]; then
   source_args+=(-- "${input_path}")
   if [[ "${required_capability}" == real ]]; then
     source_args+=(--speed "${TIANJI_REAL_SPEED}" --yaw-deg "${TIANJI_REAL_YAW_DEG}")
+  elif [[ -n "${playback_speed}" ]]; then
+    source_args+=(--speed "${playback_speed}")
   fi
 elif [[ "${source_id}" == mocap_live && "${required_capability}" == real ]]; then
   source_args+=(--param "speed:=${TIANJI_REAL_SPEED}" --param "yaw_deg:=${TIANJI_REAL_YAW_DEG}")

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from pico_body_tianji.protocol.messages import (
+from tianji_teleop.protocol.messages import (
     ArmTargetCommand,
     HandTargetCommand,
     LatchedBool,
@@ -14,16 +14,15 @@ from pico_body_tianji.protocol.messages import (
     ProtocolEnvelope,
     SessionState,
 )
-from pico_body_tianji.protocol import topics
-from pico_body_tianji.sources.common.session_client import SessionClient
-from pico_body_tianji.sources.common.target_mapper import (
+from tianji_teleop.protocol import topics
+from tianji_teleop.sources.common.session_client import SessionClient
+from tianji_teleop.sources.common.target_mapper import (
     ArmTargetBatch,
     EndEffectorTargetMapper,
 )
-from pico_body_tianji.sources.mocap.live_node import MocapLiveNode, parse_aligned_hands
-from pico_body_tianji.sources.common.target_publisher import TargetPublisher
-from pico_body_tianji.sources.pico_controller.controller_frame import ControllerFrame
-from pico_body_tianji.sources.pico_controller.source import XRoboControllerOnlySource
+from tianji_teleop.sources.mocap.live_node import MocapLiveNode, parse_aligned_hands
+from tianji_teleop.sources.common.target_publisher import TargetPublisher
+from tianji_teleop.sources.common.wrist_pose_frame import WristPoseFrame
 from tianji_world_output.config_loader import TianjiConfig
 
 
@@ -74,12 +73,12 @@ class CanonicalMapperTest(unittest.TestCase):
     def test_mapper_uses_canonical_names_and_preserves_geometry(self) -> None:
         config = TianjiConfig.load()
         mapper = EndEffectorTargetMapper(config, rate=90.0)
-        frame = ControllerFrame.from_poses(
+        frame = WristPoseFrame.from_poses(
             [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0],
             [-0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0],
         )
-        self.assertEqual(mapper.initialize(frame), {"pico_left_wrist", "pico_right_wrist"})
-        targets = mapper.map_relative_controller_frame(frame)
+        self.assertEqual(mapper.initialize(frame), {"left_wrist", "right_wrist"})
+        targets = mapper.map_relative_wrist_frame(frame)
         self.assertIsInstance(targets, ArmTargetBatch)
         np.testing.assert_allclose(targets.left_pose[:3], config.init_pos["left"])
         np.testing.assert_allclose(targets.right_pose[:3], config.init_pos["right"])
@@ -247,34 +246,6 @@ class MocapLiveTest(unittest.TestCase):
         node._on_aligned_payload(self._payload("stream-2", 1))
         self.assertEqual(node.phase, "returning")
         node.close()
-
-
-class PicoSourceTest(unittest.TestCase):
-    def test_source_uses_controller_api_and_does_not_read_body(self) -> None:
-        class SDK:
-            def init(self):
-                pass
-            def close(self):
-                pass
-            def get_left_controller_pose(self):
-                return [0, 0, 0, 0, 0, 0, 1]
-            def get_right_controller_pose(self):
-                return [0, 0, 0, 0, 0, 0, 1]
-            def get_time_stamp_ns(self):
-                return 321
-            def get_A_button(self):
-                return False
-            def is_body_data_available(self):
-                raise AssertionError("body API must not be accessed")
-
-        source = XRoboControllerOnlySource(sdk=SDK())
-        source.open()
-        try:
-            sample = source.read()
-        finally:
-            source.close()
-        self.assertEqual(sample.source_timestamp_ns, 321)
-        self.assertFalse(hasattr(sample, "body_frame"))
 
 
 if __name__ == "__main__":

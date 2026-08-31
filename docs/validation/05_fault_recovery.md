@@ -10,7 +10,7 @@
 
 ## fault_recovery_sim
 
-- **前置设备**：`pico_sim` pass、headless MuJoCo、IK/coordinator、可控故障注入器；准备独立 output ROOT。
+- **前置设备**：`mocap_live_sim` pass、headless MuJoCo、IK/coordinator、可控故障注入器；准备独立 output ROOT。
 - **命令**：`pixi run validation-run -- --case fault_recovery_sim --output ROOT`；危险验证在明确操作员指令下加 `--danger-stop collision_risk`。
 - **步骤**：分别注入 source 断流/deadman release、arm producer unhealthy、executor state stale、malformed/越限/rollback proposal、重复 authority、router 重连；每次恢复都先观察 returning/fault 和 bounded Home。对危险 stop 记录 request/每侧 ack、同 tick command 计数、lockout；重启 executor 后检查仍不能 teleop，重启 session 后才可重新 start。
 - **预期**：source/producer 故障走 controlled returning；executor/liveliness/state malformed 和重复 authority 锁存 fault；fault 持续 bounded Home；safety ack matching 且 executor unhealthy；coordinator command 不解锁。
@@ -19,7 +19,7 @@
 
 ## fault_recovery_real
 
-- **前置设备**：`fault_recovery_sim` pass、`marvin_pico_real_10pct` pass、Marvin/Wuji（若启用）、安全员、硬件急停、router；显式 `--confirm-real` 和 robot IP。
+- **前置设备**：`fault_recovery_sim` pass、`marvin_mocap_live_real_10pct` pass、Marvin/Wuji（若启用）、安全员、硬件急停、router；显式 `--confirm-real` 和 robot IP。
 - **命令**：`pixi run validation-run -- --case fault_recovery_real --output ROOT --confirm-real --robot-ip ROBOT_IP`。
 - **步骤**：从 10% 连接 Home；逐项按安全员指令模拟 source/producer/executor 断流、deadman、重复 authority、router 重连；对 feedback stale、tracking threshold、servo/device error 立即物理停并用 `--danger-stop`；等待所有 matching ack 后保持急停；记录 Marvin reconnect race 的实际结果，任何 fault reconnect 只能 fault_return 到 Home，仍保持 fault。
 - **预期**：真实 SDK 在 stop 同 tick 后没有新增运动命令，soft-stop/servo-disable；coordinator 不能以 Home command 解锁；重启 executor/session 前不能 teleop；正常健康 return 与危险 stop 明确分支；Wuji hand 必须 zero/at_zero/tracking false。

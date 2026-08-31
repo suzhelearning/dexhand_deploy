@@ -15,7 +15,7 @@ export CXX=/usr/bin/g++
 
 cd "${BUNDLE_ROOT}"
 rm -rf build/ik
-cmake -S src/pico_body_tianji -B build/ik \
+cmake -S src/tianji_teleop -B build/ik \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_C_COMPILER=/usr/bin/gcc \
   -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
@@ -24,12 +24,12 @@ cmake -S src/pico_body_tianji -B build/ik \
 cmake --build build/ik --parallel "$(nproc)"
 cmake --install build/ik
 
-ik_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/arm_ik_producer"
-probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_probe"
-worker_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/tianji_official_ik_worker"
-qp_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/pinocchio_qp_ik_probe"
-trajectory_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/joint_trajectory_limiter_probe"
-wuji_bridge_binary="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/wuji_hand2_bridge"
+ik_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/arm_ik_producer"
+probe_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/tianji_official_ik_probe"
+worker_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/tianji_official_ik_worker"
+qp_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/pinocchio_qp_ik_probe"
+trajectory_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/joint_trajectory_limiter_probe"
+wuji_bridge_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/wuji_hand2_bridge"
 for binary in \
   "${ik_binary}" \
   "${probe_binary}" \
@@ -49,7 +49,7 @@ do
 done
 
 "${trajectory_probe_binary}" \
-  "${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
+  "${BUNDLE_ROOT}/src/tianji_teleop/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
 
 # 便携层 ABI 检查：新二进制（系统 GCC/glibc 编译）必须能被
 # runtime/abi 的 glibc 2.35 + libstdc++ 加载。

@@ -17,17 +17,17 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from pico_body_tianji.executors.mujoco.node import (
+from tianji_teleop.executors.mujoco.node import (
     MujocoExecutor,
     _configure_viewer_platform,
 )
-from pico_body_tianji.protocol import topics
-from pico_body_tianji.protocol.messages import Frame0HandSkeleton
+from tianji_teleop.protocol import topics
+from tianji_teleop.protocol.messages import Frame0HandSkeleton
 
 
 ROOT = Path(__file__).parents[1]
 SCRIPTS = ROOT / "scripts"
-CONFIG = ROOT / "src" / "pico_body_tianji" / "config"
+CONFIG = ROOT / "src" / "tianji_teleop" / "config"
 
 
 class _FakeModel:
@@ -288,12 +288,12 @@ class ActualMujocoOverlaySmokeTest(unittest.TestCase):
         import contextlib
         import mujoco
 
-        from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
+        from tianji_teleop.mujoco_urdf import portable_mujoco_urdf
 
         urdf = (
             ROOT
             / "src"
-            / "pico_body_tianji"
+            / "tianji_teleop"
             / "assets"
             / "tianji_wuji2"
             / "tianji_wuji2.urdf"
@@ -401,8 +401,8 @@ class ManagedSourceTerminalTest(unittest.TestCase):
                     "NON_SOURCE_READER": str(non_source_reader),
                     "SOURCE_READY": str(source_ready),
                     "SOURCE_BYTE": str(source_byte),
-                    "PICO_TIANJI_NODE_LIST_OVERRIDE": "",
-                    "PICO_TIANJI_RUNTIME_DIR": str(runtime_dir),
+                    "TIANJI_TELEOP_NODE_LIST_OVERRIDE": "",
+                    "TIANJI_TELEOP_RUNTIME_DIR": str(runtime_dir),
                     "TIANJI_VALIDATION_HAND_MODE": "retarget",
                     "TIANJI_RUN_ID": "pty-run",
                 }

@@ -8,7 +8,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from pico_body_tianji.protocol.messages import (
+from tianji_teleop.protocol.messages import (
     ArmJointCommand,
     ArmJointState,
     ArmTargetCommand,
@@ -18,10 +18,9 @@ from pico_body_tianji.protocol.messages import (
     ProtocolEnvelope,
     RawH5ReplaySample,
     RawMocapLiveSample,
-    RawPicoControllerSample,
     SessionState,
 )
-from pico_body_tianji.recording.session_h5 import (
+from tianji_teleop.recording.session_h5 import (
     IncompleteSessionError,
     SessionH5Reader,
     SessionH5Writer,
@@ -57,8 +56,12 @@ class SessionH5Test(unittest.TestCase):
     def test_appendable_chunked_layout_and_nullable_time_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.h5"
-            with SessionH5Writer(path, source_type="pico_controller", robot_model="marvin", router_zid="router") as writer:
-                writer.append_raw_pico(RawPicoControllerSample(_env(1), None, [0, 0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 0, 1], False), received_time_ns=100)
+            hands = {
+                "left": {"valid": False, "wrist_pose": None, "keypoints_world_m": None},
+                "right": {"valid": False, "wrist_pose": None, "keypoints_world_m": None},
+            }
+            with SessionH5Writer(path, source_type="mocap_live", robot_model="marvin", router_zid="router") as writer:
+                writer.append_raw_mocap(RawMocapLiveSample(_env(1), None, "stream", 1, 1, hands), received_time_ns=100)
                 writer.append_arm_target(_arm_target(), received_time_ns=125)
                 writer.append_hand_target(_hand_target(), received_time_ns=130)
                 writer.append_arm_command(_arm_command(), received_time_ns=135)
@@ -70,10 +73,11 @@ class SessionH5Test(unittest.TestCase):
                 self.assertEqual(file.attrs["schema_name"], "tianji-teleop-session")
                 self.assertEqual(file.attrs["schema_version"], "1.0")
                 self.assertTrue(bool(file.attrs["complete"]))
-                for name in ("raw/pico_controller/time_ns", "target/arm/right/time_ns", "joint/state/hand/right/time_ns"):
+                self.assertNotIn("pico_controller", file["raw"])
+                for name in ("raw/mocap_live/time_ns", "target/arm/right/time_ns", "joint/state/hand/right/time_ns"):
                     self.assertIsNotNone(file[name].chunks)
                     self.assertEqual(file[name].maxshape[0], None)
-                self.assertEqual(file["raw/pico_controller/time_ns"][:].tolist(), [0])
+                self.assertEqual(file["raw/mocap_live/time_ns"][:].tolist(), [0])
                 self.assertEqual(file["target/arm/right"].attrs["frame_id"], "Base_R")
                 self.assertNotIn("sequence", file["meta/session_events"])
                 self.assertEqual(json.loads(file["joint/command/hand/right"].attrs["joint_names"]), _hand_command().names)
@@ -81,6 +85,38 @@ class SessionH5Test(unittest.TestCase):
             record = SessionH5Reader(path).read_arm_target("right")[0]
             self.assertIsNone(record["source_timestamp_ns"])
             self.assertEqual(record["time_ns"], 25)
+
+    def test_old_controller_group_remains_readable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.h5"
+            with SessionH5Writer(path, source_type="mocap_live", robot_model="marvin", router_zid="router"):
+                pass
+            with h5py.File(path, "r+") as file:
+                file.attrs["source_type"] = "pico_controller"
+                group = file["raw"].create_group("pico_controller")
+                specs = (
+                    ("time_ns", 0, np.int64),
+                    ("source_time_ns", 0, np.int64),
+                    ("source_time_valid", False, np.bool_),
+                    ("publisher_instance_id", "legacy", h5py.string_dtype("utf-8")),
+                    ("sequence", 1, np.int64),
+                    ("left_pose", [0, 0, 0, 0, 0, 0, 1], np.float64),
+                    ("right_pose", [0, 0, 0, 0, 0, 0, 1], np.float64),
+                    ("right_a_pressed", False, np.bool_),
+                )
+                for name, value, dtype in specs:
+                    shape = np.asarray(value).shape
+                    dataset = group.create_dataset(
+                        name,
+                        shape=(1,) + shape,
+                        maxshape=(None,) + shape,
+                        chunks=(1,) + shape,
+                        dtype=dtype,
+                    )
+                    dataset[0] = value
+            with SessionH5Reader(path) as reader:
+                row = reader.read_legacy_controller()[0]
+                self.assertEqual(row["publisher_instance_id"], "legacy")
 
     def test_mocap_valid_and_invalid_rows_keep_big_source_time_exact(self):
         hands = {

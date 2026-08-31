@@ -1,7 +1,7 @@
 # acquisition v4 H5 format
 
 本仓库将外部 acquisition v4 H5 作为只读输入，不在文件内追加 session 数据。
-`pico_body_tianji.sources.mocap.h5.load_mocap_h5()` 校验 root schema、时间轴、
+`tianji_teleop.sources.mocap.h5.load_mocap_h5()` 校验 root schema、时间轴、
 单侧 valid mask、wrist quaternion、keypoints 和可选 `wuji2_joints`。
 
 H5 source 在 session preflight 固定 hand path：存在 `wuji2_joints` 使用

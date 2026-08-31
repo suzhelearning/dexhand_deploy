@@ -26,13 +26,12 @@ if [[ -z "${producer_id}" ]]; then
 fi
 case "${producer_id}" in
   ik)
-    entry="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/arm_ik_producer"
-    [[ -x "${entry}" ]] || entry="${PROJECT_PREFIX}/lib/pico_body_tianji/arm_ik_producer.bin"
+    entry="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/arm_ik_producer"
+    [[ -x "${entry}" ]] || entry="${PROJECT_PREFIX}/lib/tianji_teleop/arm_ik_producer.bin"
     default_config="producers/ik.yaml"
     ;;
   policy_hold)
-    entry="${BUNDLE_ROOT}/src/pico_body_tianji/src/pico_body_tianji/scripts/policy_hold_producer"
-    [[ -x "${entry}" ]] || entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/policy_hold_producer"
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/policy_hold_producer"
     default_config="producers/policy_hold.yaml"
     ;;
   *) printf '错误：未知 producer: %s\n' "${producer_id}" >&2; exit 2 ;;
@@ -97,7 +96,7 @@ PY
 fi
 if [[ "${producer_id}" == ik ]]; then
   arm_config="$(canonical_config robot/arm.yaml)"
-  urdf_path="${TIANJI_ARM_URDF:-${BUNDLE_ROOT}/src/pico_body_tianji/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf}"
+  urdf_path="${TIANJI_ARM_URDF:-${BUNDLE_ROOT}/src/tianji_teleop/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf}"
   export TIANJI_ARM_CONFIG="${TIANJI_ARM_CONFIG:-${arm_config}}"
   export TIANJI_ARM_URDF="${urdf_path}"
   export TIANJI_IK_BACKEND="${TIANJI_IK_BACKEND:-${backend:-pinocchio_qp}}"

@@ -12,14 +12,14 @@ import yaml
 ROOT = Path(__file__).parents[1]
 RUN_CASE = ROOT / "scripts" / "validation" / "run_case.py"
 ANALYZE = ROOT / "scripts" / "validation" / "analyze_runs.py"
-MATRIX = ROOT / "src" / "pico_body_tianji" / "config" / "validation" / "test_matrix.yaml"
+MATRIX = ROOT / "src" / "tianji_teleop" / "config" / "validation" / "test_matrix.yaml"
 
 
 CASE_IDS = {
-    "acquisition_live", "pico_sim", "mocap_live_sim", "h5_sim",
+    "acquisition_live", "mocap_live_sim", "h5_sim",
     "ik_pinocchio_cpp", "ik_pinocchio_qp", "ik_tianji_official",
     "target_replay_sim", "joint_replay_sim", "policy_hold_sim",
-    "marvin_pico_real_10pct", "marvin_mocap_live_real_10pct",
+    "marvin_mocap_live_real_10pct",
     "marvin_h5_real_10pct", "wuji_retarget_dry", "wuji_retarget_real",
     "wuji_direct_real", "fault_recovery_sim", "fault_recovery_real",
 }
@@ -55,7 +55,7 @@ class ValidationToolsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             result = subprocess.run(
-                [sys.executable, str(RUN_CASE), "--case", "pico_sim", "--output", str(root), "--fake", "--headless"],
+                [sys.executable, str(RUN_CASE), "--case", "mocap_live_sim", "--output", str(root), "--fake", "--headless"],
                 cwd=ROOT, text=True, capture_output=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -75,7 +75,7 @@ class ValidationToolsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             result = subprocess.run(
-                [sys.executable, str(RUN_CASE), "--case", "pico_sim", "--output", str(root), "--fake", "--headless"],
+                [sys.executable, str(RUN_CASE), "--case", "mocap_live_sim", "--output", str(root), "--fake", "--headless"],
                 cwd=ROOT, text=True, capture_output=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -101,7 +101,7 @@ class ValidationToolsTest(unittest.TestCase):
     def test_real_case_requires_confirmation_and_prerequisites(self):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
-                [sys.executable, str(RUN_CASE), "--case", "marvin_pico_real_10pct", "--output", directory],
+                [sys.executable, str(RUN_CASE), "--case", "marvin_mocap_live_real_10pct", "--output", directory],
                 cwd=ROOT, text=True, capture_output=True,
             )
             self.assertEqual(result.returncode, 2)
@@ -118,9 +118,9 @@ class ValidationToolsTest(unittest.TestCase):
 
     def test_manifest_instance_ids_are_exported_for_session_handoff(self):
         from scripts.validation.run_case import build_parser, load_matrix, _build_manifest, instance_handoff_environment
-        args = build_parser().parse_args(["--case", "pico_sim", "--headless"])
-        case = load_matrix()["cases"]["pico_sim"]
-        manifest = _build_manifest("pico_sim", case, "pico_sim", "run-id", "supervisor-id", "router-id", "started", args)
+        args = build_parser().parse_args(["--case", "mocap_live_sim", "--headless"])
+        case = load_matrix()["cases"]["mocap_live_sim"]
+        manifest = _build_manifest("mocap_live_sim", case, "mocap_live_sim", "run-id", "supervisor-id", "router-id", "started", args)
         env = instance_handoff_environment(manifest)
         self.assertEqual(env["TIANJI_RUN_ID"], "run-id")
         self.assertEqual(env["TIANJI_SOURCE_INSTANCE_ID"], manifest["publisher_instance_ids"]["source"])
@@ -189,7 +189,7 @@ class ValidationToolsTest(unittest.TestCase):
         from scripts.validation.run_case import build_session_contract
 
         command = build_session_contract("ik_pinocchio_qp", {"ik_backend": None})
-        self.assertEqual(command["profile"], "pico_sim")
+        self.assertEqual(command["profile"], "mocap_live_sim")
         self.assertEqual(command["producer"], "ik")
         self.assertEqual(command["ik_backend"], "pinocchio_qp")
         with self.assertRaises(ValueError):
@@ -218,7 +218,7 @@ class ValidationToolsTest(unittest.TestCase):
         self.assertEqual(matrix["wuji_direct_real"]["profile"], "wuji_direct_real")
         self.assertEqual(matrix["wuji_direct_real"]["required_capability"], "real")
         self.assertIn("marvin_arm", matrix["wuji_direct_real"]["required_devices"])
-        self.assertIn("marvin_pico_real_10pct", matrix["wuji_direct_real"]["prerequisites"])
+        self.assertIn("marvin_mocap_live_real_10pct", matrix["wuji_direct_real"]["prerequisites"])
         self.assertEqual(matrix["wuji_retarget_dry"]["hand_mode"], "retarget")
         self.assertEqual(matrix["wuji_retarget_real"]["hand_mode"], "retarget")
         from scripts.validation.run_case import build_session_contract
@@ -231,7 +231,7 @@ class ValidationToolsTest(unittest.TestCase):
 
     def test_safety_ack_requires_executor_envelope_identity(self):
         from scripts.validation.run_case import SafetyStopSupervisor
-        from pico_body_tianji.protocol.messages import ProtocolEnvelope
+        from tianji_teleop.protocol.messages import ProtocolEnvelope
 
         supervisor = SafetyStopSupervisor("run", "supervisor", "router", clock=lambda: 10)
         result = supervisor.issue(
@@ -268,10 +268,10 @@ class ValidationToolsTest(unittest.TestCase):
         self.assertNotIn("state_arm", REQUIRED_EVIDENCE["acquisition_live"]["streams"])
         self.assertNotIn("home_feedback", REQUIRED_EVIDENCE["target_replay_sim"]["checks"])
         self.assertIn("target_to_solved", REQUIRED_EVIDENCE["target_replay_sim"]["checks"])
-        self.assertIn("home_feedback", REQUIRED_EVIDENCE["pico_sim"]["checks"])
+        self.assertIn("home_feedback", REQUIRED_EVIDENCE["mocap_live_sim"]["checks"])
     def test_target_replay_cli_omits_joint_only_capabilities(self):
         from unittest.mock import Mock, patch
-        from pico_body_tianji.recording import replay_cli
+        from tianji_teleop.recording import replay_cli
 
         session = Mock()
         node = Mock()
@@ -483,7 +483,7 @@ class ValidationToolsTest(unittest.TestCase):
         )
 
     def test_direct_real_replay_preflight_rejects_missing_recording_before_connect(self):
-        from pico_body_tianji.recording.replay import validate_direct_real_recording
+        from tianji_teleop.recording.replay import validate_direct_real_recording
 
         with self.assertRaises(ValueError):
             validate_direct_real_recording("/tmp/not-a-session-v1.h5")
@@ -558,7 +558,7 @@ class ValidationToolsTest(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import patch
 
-        from pico_body_tianji.executors.marvin.preflight import trusted_real_capability
+        from tianji_teleop.executors.marvin.preflight import trusted_real_capability
 
         scanner = json.dumps(
             {
@@ -633,7 +633,7 @@ class ValidationToolsTest(unittest.TestCase):
                     "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID": "supervisor",
                 },
                 clear=False,
-            ), patch("pico_body_tianji.executors.marvin.preflight.os.fstat", side_effect=fake_fstat):
+            ), patch("tianji_teleop.executors.marvin.preflight.os.fstat", side_effect=fake_fstat):
                 capability = trusted_real_capability()
             self.assertTrue(capability.admitted)
 
@@ -645,7 +645,7 @@ class ValidationToolsTest(unittest.TestCase):
         import json
         import os
         from unittest.mock import patch
-        from pico_body_tianji.executors.marvin.preflight import trusted_real_capability
+        from tianji_teleop.executors.marvin.preflight import trusted_real_capability
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "attestation.json"

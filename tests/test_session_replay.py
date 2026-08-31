@@ -6,15 +6,15 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from pico_body_tianji.protocol import topics
-from pico_body_tianji.protocol.messages import (
+from tianji_teleop.protocol import topics
+from tianji_teleop.protocol.messages import (
     ArmJointCommand,
     HandJointCommand,
     ProtocolEnvelope,
     SessionState,
 )
-from pico_body_tianji.recording.replay import JointReplayNode, TargetReplaySource
-from pico_body_tianji.recording.session_h5 import SessionH5Writer
+from tianji_teleop.recording.replay import JointReplayNode, TargetReplaySource
+from tianji_teleop.recording.session_h5 import SessionH5Writer
 
 
 class _Pub:
@@ -70,7 +70,7 @@ class ReplayLifecycleTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.h5"
             with SessionH5Writer(path, source_type="target_replay", robot_model="marvin", router_zid="router") as writer:
-                from pico_body_tianji.protocol.messages import ArmTargetCommand
+                from tianji_teleop.protocol.messages import ArmTargetCommand
                 writer.append_arm_target(ArmTargetCommand(ProtocolEnvelope(1, "saved", "router", 1, 10), 7, "saved", "right", "Base_R", [1, 2, 3], [0, 0, 0, 1], [1, 0, 0]), received_time_ns=100)
             session = _Session(); node = TargetReplaySource(path, session=session, publisher_instance_id="source", router_zid="router", active_sides=("right",), inactive_sides=("left",), active_hand_sides=(), inactive_hand_sides=("left", "right"))
             self.assertIn("tj/live/source/target_replay/source", session.tokens)

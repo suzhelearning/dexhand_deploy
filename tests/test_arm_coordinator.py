@@ -3,18 +3,21 @@ import math
 import unittest
 from types import SimpleNamespace
 
-from pico_body_tianji.protocol.messages import (
+from tianji_teleop.protocol.messages import (
     ALL_ARM_JOINT_NAMES,
     ARM_JOINT_NAMES,
+    HAND_JOINT_NAMES,
     ArmJointProposal,
     ArmJointState,
     ComponentStatus,
+    HandExecutorStatus,
+    HandJointState,
     LatchedBool,
     SessionIntent,
     SessionState,
 )
-from pico_body_tianji.coordination.arm_command_coordinator import ArmCommandCoordinator
-from pico_body_tianji.sources.common.session_client import SessionClient
+from tianji_teleop.coordination.arm_command_coordinator import ArmCommandCoordinator
+from tianji_teleop.sources.common.session_client import SessionClient
 
 
 class _QueryableSession:
@@ -93,6 +96,21 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
         self.assertFalse(self.coordinator.at_home.value)
         self.assertEqual(self.coordinator._proposals, {})
 
+    def test_hand_zero_gate_uses_point_one_rad_default(self):
+        now = 1_000_000_000
+        self.coordinator.update_hand_executor_status(HandExecutorStatus(
+            1, 1, now, "right", True, True, True, False, None,
+            "wuji-instance", "router-1",
+        ))
+        positions = [0.0] * 20
+        positions[1] = 0.075
+        self.coordinator.update_hand_state(HandJointState(
+            1, 1, now, "wuji_hand2", "right",
+            list(HAND_JOINT_NAMES["right"]), positions, None,
+            "wuji-instance", "router-1",
+        ))
+        self.assertTrue(self.coordinator._hand_at_zero_ready(now))
+
     def test_launcher_authority_mapping_rejects_foreign_component_identity(self):
         disabled = {
             "logical_id": "disabled",
@@ -118,11 +136,11 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
         coordinator.update_component(_status("source", "unexpected", 1_000_000_000))
         self.assertEqual(coordinator.state.state, "fault")
 
-    def test_reject_does_not_mutate_state_and_requires_new_intent(self):
-        before = self.coordinator.state
+    def test_reject_keeps_idle_and_correlates_intent(self):
         result = self.coordinator.handle_intent(SimpleNamespace(action="start", sequence=9, source="src", reason="run"))
         self.assertFalse(result.accepted)
-        self.assertEqual(self.coordinator.state, before)
+        self.assertEqual(self.coordinator.state.state, "idle")
+        self.assertEqual(self.coordinator.state.reason, result.reason)
         self.assertEqual(result.state.intent_sequence, 9)
 
     def test_invalid_proposal_latches_fault_and_returns_bounded_home(self):
@@ -259,7 +277,7 @@ class ArmCommandCoordinatorAuthorityRound5Test(unittest.TestCase):
         )
         self.coordinator.update_arm_state(forged_state)
         self.assertIsNone(self.coordinator._arm_state)
-from pico_body_tianji.connection_readiness import evaluate_connection, evaluate_fault_return, evaluate_start
+from tianji_teleop.connection_readiness import evaluate_connection, evaluate_fault_return, evaluate_start
 
 
 class MarvinReadinessSplitTest(unittest.TestCase):

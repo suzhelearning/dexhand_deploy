@@ -2,8 +2,8 @@ import math
 import unittest
 from types import SimpleNamespace
 
-from pico_body_tianji.coordination.arm_command_coordinator import ArmRobotConfig, ArmCommandCoordinator
-from pico_body_tianji.protocol.messages import (
+from tianji_teleop.coordination.arm_command_coordinator import ArmRobotConfig, ArmCommandCoordinator
+from tianji_teleop.protocol.messages import (
     ALL_ARM_JOINT_NAMES,
     ARM_JOINT_NAMES,
     ArmJointState,
@@ -12,7 +12,7 @@ from pico_body_tianji.protocol.messages import (
     ProtocolEnvelope,
     SessionState,
 )
-from pico_body_tianji.producers.policy.contracts import (
+from tianji_teleop.producers.policy.contracts import (
     ActionAdapter,
     ActionValidationError,
     HoldPolicyRunner,
@@ -20,7 +20,7 @@ from pico_body_tianji.producers.policy.contracts import (
     PolicyAction,
     PolicyObservation,
 )
-from pico_body_tianji.producers.policy.node import PolicyProducerNode
+from tianji_teleop.producers.policy.node import PolicyProducerNode
 
 
 ROUTER = "router-1"

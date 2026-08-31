@@ -5,7 +5,7 @@
 ## 阶段门
 
 1. **G0 代码与配置门**：`pixi run validation-run -- --list`、`pixi run doctor`、runtime/config/ACL hash 与两个仓库 dirty 状态记录完整。
-2. **G1 采集与仿真门**：依次完成 `acquisition_live`、`pico_sim`、`mocap_live_sim`、`h5_sim`、三个 IK、target/joint replay、policy hold。每个 case 的 bundle 由 `validation-analyze` 校验通过；失败 case 不得继续后续 gate。
+2. **G1 采集与仿真门**：依次完成 `acquisition_live`、`mocap_live_sim`、`h5_sim`、三个 IK、target/joint replay、policy hold。每个 case 的 bundle 由 `validation-analyze` 校验通过；失败 case 不得继续后续 gate。
 3. **G2 Marvin 真机门**：G1 全部依赖通过，且每一条 real case 显式 `--confirm-real`。从 10% velocity/acceleration 开始，只有 tracking、feedback、Home 都稳定才允许按 runbook 提升比例。
 4. **G3 Wuji 门**：retarget dry → retarget real → direct real；hand zero、限位、watchdog 和模式互斥全部通过。
 5. **G4 故障门**：先 `fault_recovery_sim`，再 `fault_recovery_real`。危险停止没有所有 executor matching ack、出现 router ZID 变化、重复 authority 或急停未保持时，立即停止，不得进入下一 gate。
@@ -15,18 +15,17 @@
 | Case | 必需设备/前置 | 能力 | hand | 比例 |
 |---|---|---|---|---|
 | `acquisition_live` | router、acquisition、aligned mocap | simulation | disabled | 1.0/1.0 |
-| `pico_sim` | router、headless MuJoCo | simulation | disabled | 1.0/1.0 |
 | `mocap_live_sim` | acquisition、aligned mocap、headless MuJoCo | simulation | disabled | 1.0/1.0 |
 | `h5_sim` | H5、headless MuJoCo | simulation | auto | 1.0/1.0 |
-| `ik_pinocchio_cpp`, `ik_pinocchio_qp`, `ik_tianji_official` | G1 `pico_sim`、相应 IK backend | simulation | disabled | 1.0/1.0 |
+| `ik_pinocchio_cpp`, `ik_pinocchio_qp`, `ik_tianji_official` | G1 `mocap_live_sim`、相应 IK backend | simulation | disabled | 1.0/1.0 |
 | `target_replay_sim` | session-v1 HDF5、headless MuJoCo | simulation | auto | 1.0/1.0 |
 | `joint_replay_sim` | session-v1 HDF5、headless MuJoCo | simulation | direct | 1.0/1.0 |
-| `policy_hold_sim` | G1 `pico_sim`、policy runner | simulation | disabled | 1.0/1.0 |
-| `marvin_{pico,mocap_live,h5}_real_10pct` | 对应 G1、Marvin、真实输入 | real | 按 profile | 0.1/0.1 |
+| `policy_hold_sim` | G1 `mocap_live_sim`、policy runner | simulation | disabled | 1.0/1.0 |
+| `marvin_{mocap_live,h5}_real_10pct` | 对应 G1、Marvin、真实输入 | real | 按 profile | 0.1/0.1 |
 | `wuji_retarget_dry` | `h5_sim`、Wuji dry | simulation | retarget | 0.1/0.1 |
 | `wuji_retarget_real` | dry + H5 sim、Wuji real | real | retarget | 0.1/0.1 |
 | `wuji_direct_real` | `joint_replay_sim`、Wuji real | real | direct | 0.1/0.1 |
-| `fault_recovery_sim` | `pico_sim`、故障注入器 | simulation | disabled | 0.1/0.1 |
+| `fault_recovery_sim` | `mocap_live_sim`、故障注入器 | simulation | disabled | 0.1/0.1 |
 | `fault_recovery_real` | `fault_recovery_sim`、Marvin real | real | disabled | 0.1/0.1 |
 
 先启动 `/home/current/syz/mocap/acquisition` 的唯一 router，并让两个仓库使用同一 `TIANJI_ROUTER_ENDPOINT`。统一运行形式：
@@ -34,7 +33,7 @@
 ```bash
 pixi run validation-run -- --case CASE_ID --output ROOT [--input INPUT]
 # 仅本地 schema/preflight smoke，不是验收：
-pixi run validation-run -- --case pico_sim --output /tmp/tianji-validation --fake --headless
+pixi run validation-run -- --case mocap_live_sim --output /tmp/tianji-validation --fake --headless
 pixi run validation-analyze -- /tmp/tianji-validation
 ```
 
@@ -45,7 +44,7 @@ real case 还必须提供 `--confirm-real --robot-ip IP`，并由工具检查 ma
 每次运行创建 `ROOT/<UTC>_<case_id>_<nonce>/`：`manifest.yaml`、`session.h5`、`status.jsonl`、`operator_events.jsonl`、`logs/<component>.log`、`operator_result.yaml`、`checksums.sha256`。manifest 保存两个仓库 commit/dirty、runtime/config/ACL hash、router endpoint/ZID、所有 publisher instance、机器、robot/hand、Motive rigid ID、H5 SHA256、IK backend、比例、起止时间和退出原因。操作者只使用 run_case 写事件，例如：
 
 ```bash
-pixi run validation-run -- --case pico_sim --output ROOT --fake --headless \
+pixi run validation-run -- --case mocap_live_sim --output ROOT --fake --headless \
   --operator-event started='operator acknowledged preflight' \
   --operator-event note='observed stable Home'
 ```

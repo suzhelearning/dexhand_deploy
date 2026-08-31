@@ -28,23 +28,40 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-SRC_ROOT = ROOT / "src" / "pico_body_tianji"
+SRC_ROOT = ROOT / "src" / "tianji_teleop"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
-from pico_body_tianji.config_loader import canonical_config_root
-from pico_body_tianji.sources.common.real_admission import RealCapabilityInput
-from scripts.validation.run_case import (
-    BUNDLE_SCHEMA,
-    BUNDLE_VERSION,
-    MATRIX_PATH,
-    _authority_contract,
-    _profile_config,
-    _source_type,
-    build_session_contract,
-    load_matrix,
-    sha256_file,
-    sha256_tree,
-)
+from tianji_teleop.config_loader import canonical_config_root
+from tianji_teleop.sources.common.real_admission import RealCapabilityInput
+if __package__:
+    from .run_case import (
+        BUNDLE_SCHEMA,
+        BUNDLE_VERSION,
+        MATRIX_PATH,
+        _authority_contract,
+        _profile_config,
+        _source_type,
+        build_session_contract,
+        load_matrix,
+        sha256_file,
+        sha256_tree,
+    )
+else:
+    VALIDATION_ROOT = Path(__file__).resolve().parent
+    if str(VALIDATION_ROOT) not in sys.path:
+        sys.path.insert(0, str(VALIDATION_ROOT))
+    from run_case import (
+        BUNDLE_SCHEMA,
+        BUNDLE_VERSION,
+        MATRIX_PATH,
+        _authority_contract,
+        _profile_config,
+        _source_type,
+        build_session_contract,
+        load_matrix,
+        sha256_file,
+        sha256_tree,
+    )
 
 REQUIRED_FILES = frozenset({
     "manifest.yaml", "status.jsonl", "operator_events.jsonl",
@@ -59,7 +76,7 @@ REQUIRED_EVIDENCE: dict[str, dict[str, set[str]]] = {
     "joint_replay_sim": {"streams": {"command_arm_left", "command_arm_right"}, "checks": {"direct_command"}},
     "wuji_direct_real": {"streams": {"command_arm_left", "command_arm_right", "command_hand_left", "command_hand_right"}, "checks": {"direct_command", "hand_zero"}},
 }
-for _case_id in ("pico_sim", "mocap_live_sim", "h5_sim", "marvin_pico_real_10pct", "marvin_mocap_live_real_10pct", "marvin_h5_real_10pct", "wuji_retarget_dry", "wuji_retarget_real", "fault_recovery_sim", "fault_recovery_real", "policy_hold_sim", "ik_pinocchio_cpp", "ik_pinocchio_qp", "ik_tianji_official"):
+for _case_id in ("mocap_live_sim", "h5_sim", "marvin_mocap_live_real_10pct", "marvin_h5_real_10pct", "wuji_retarget_dry", "wuji_retarget_real", "fault_recovery_sim", "fault_recovery_real", "policy_hold_sim", "ik_pinocchio_cpp", "ik_pinocchio_qp", "ik_tianji_official"):
     REQUIRED_EVIDENCE.setdefault(_case_id, {"streams": {"state_arm"}, "checks": {"home_feedback"}})
 REQUIRED_EVIDENCE["h5_sim"]["checks"].add("target_to_solved")
 REQUIRED_EVIDENCE["wuji_retarget_dry"]["checks"].update({"target_to_solved", "hand_zero"})
@@ -326,7 +343,7 @@ def _verify_h5(bundle: Path, manifest: Mapping[str, Any]) -> dict[str, Any]:
     if h5py is None or np is None:
         raise AnalysisError("HDF5 analysis requires h5py and numpy")
     try:
-        from pico_body_tianji.recording.session_h5 import IncompleteSessionError, SessionH5Reader
+        from tianji_teleop.recording.session_h5 import IncompleteSessionError, SessionH5Reader
         try:
             reader = SessionH5Reader(bundle / "session.h5")
         except IncompleteSessionError as exc:
@@ -567,7 +584,6 @@ def _tracking_threshold_rad(manifest: Mapping[str, Any] | None) -> float:
 
 def _metrics_from_h5(file: Any, manifest: Mapping[str, Any]) -> dict[str, Any]:
     streams = {name: _stream_metric(file, path, seq, manifest=manifest) for name, path, seq in (
-        ("raw_pico_controller", "raw/pico_controller", "sequence"),
         ("raw_mocap_live", "raw/mocap_live", "stream_sequence"),
         ("raw_h5_replay", "raw/h5_replay", "sequence"),
         ("target_arm_left", "target/arm/left", "sequence"),

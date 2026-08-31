@@ -1,7 +1,7 @@
 [workspace]
-name = "pico-tianji-real-teleop"
+name = "tianji-teleop"
 version = "0.3.0"
-description = "PICO、对齐动捕人手和 H5 回放到 Marvin 双臂遥操作与 MuJoCo 仿真"
+description = "对齐动捕人手和 H5 回放到 Marvin 双臂遥操作与 MuJoCo 仿真"
 channels = ["conda-forge", "robostack-staging"]
 platforms = ["linux-64"]
 
@@ -24,8 +24,6 @@ eclipse-zenoh = ">=1.10,<2"
 doctor = "bash scripts/doctor.sh"
 test = "bash scripts/test.sh"
 status = "bash scripts/status.sh"
-pico_sim = { cmd = "bash scripts/run_session.sh --profile pico_sim" }
-pico_real = { cmd = "bash scripts/run_session.sh --profile pico_real" }
 mocap_live_sim = { cmd = "bash scripts/run_session.sh --profile mocap_live_sim" }
 mocap_live_real = { cmd = "bash scripts/run_session.sh --profile mocap_live_real" }
 h5_sim = { cmd = "bash scripts/run_session.sh --profile h5_sim" }

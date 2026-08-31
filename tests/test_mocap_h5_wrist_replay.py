@@ -8,21 +8,21 @@ from unittest.mock import patch
 import mujoco
 import numpy as np
 
-from pico_body_tianji.protocol.messages import (
+from tianji_teleop.protocol.messages import (
     ALL_ARM_JOINT_NAMES,
     HAND_JOINT_NAMES,
     ArmJointState,
     Frame0HandSkeleton,
     HandJointState,
 )
-from pico_body_tianji.joint_state_model import urdf_joint_names
-from pico_body_tianji.mujoco_urdf import portable_mujoco_urdf
+from tianji_teleop.joint_state_model import urdf_joint_names
+from tianji_teleop.mujoco_urdf import portable_mujoco_urdf
 from tianji_world_output.config_loader import get_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
 def _load_replay_module():
-    from pico_body_tianji.diagnostics import mujoco_h5_wrist_replay
+    from tianji_teleop.diagnostics import mujoco_h5_wrist_replay
 
     return mujoco_h5_wrist_replay
 class MocapH5WristReplayCoordinateTest(unittest.TestCase):
@@ -55,7 +55,7 @@ class MocapH5WristReplayCoordinateTest(unittest.TestCase):
         config = get_config()
         urdf = (
             ROOT
-            / "src/pico_body_tianji/assets/marvin_m6_ccs/urdf"
+            / "src/tianji_teleop/assets/marvin_m6_ccs/urdf"
             / "marvin_m6_s_ccs_696_v4_wuji2.urdf"
         )
         xml, assets = portable_mujoco_urdf(urdf)
@@ -102,7 +102,7 @@ class MocapH5WristReplayCoordinateTest(unittest.TestCase):
         replay = _load_replay_module()
         urdf = (
             ROOT
-            / "src/pico_body_tianji/assets/tianji_wuji2/tianji_wuji2.urdf"
+            / "src/tianji_teleop/assets/tianji_wuji2/tianji_wuji2.urdf"
         )
         xml, assets = portable_mujoco_urdf(urdf)
         model = mujoco.MjModel.from_xml_string(xml, assets)
@@ -147,7 +147,7 @@ class MocapH5WristReplayCoordinateTest(unittest.TestCase):
 
     def test_expected_h5_overlay_aligns_path_and_keypoints_to_home(self) -> None:
         replay = _load_replay_module()
-        urdf = ROOT / "src/pico_body_tianji/assets/tianji_wuji2/tianji_wuji2.urdf"
+        urdf = ROOT / "src/tianji_teleop/assets/tianji_wuji2/tianji_wuji2.urdf"
         xml, assets = portable_mujoco_urdf(urdf)
         model = mujoco.MjModel.from_xml_string(xml, assets)
         data = mujoco.MjData(model)

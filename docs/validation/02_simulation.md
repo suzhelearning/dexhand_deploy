@@ -15,15 +15,6 @@ G0 通过；managed router 已在 acquisition 端运行；headless MuJoCo、唯�
 - **立即停止**：旧值冒充 valid、NaN、sequence 回退、router ZID 改变、第二 router 或发布阻塞。
 - **通过**：两次生命周期和 reset 数据在 H5/status 中可追溯，实例/sequence 单调且 analyze 无 schema/hash 错误。
 
-## pico_sim
-
-- **前置设备**：router、headless MuJoCo；PICO 可用则使用真实 controller，否则仅可做 fake/preflight smoke。
-- **命令**：`pixi run validation-run -- --case pico_sim --output ROOT`；无设备时 `... --fake --headless`，结果必须是 `aborted`。
-- **步骤**：先 subscriber/query snapshot，再确认 idle/Home；操作者按 controller A（若使用真实 PICO）启动，观察双臂 canonical target → IK proposal → coordinator command → MuJoCo state；随后正常 return。
-- **预期**：A 仅产生 intent；匹配 teleop state 后才出 target；左右 command 同 tick；inactive side 保持 Home；return 后 `at_home/return_complete` 闭环；headless executor 立即 ready。
-- **立即停止**：A 在拒绝/断流后残留 teleop、frame/side 错误、proposal 越限/回退、headless 未 ack stop、重启前可再次 teleop。
-- **通过**：status、target/proposal/command/state、Home 和 latch 的时序可分析，且未产生自动危险按键。
-
 ## mocap_live_sim
 
 - **前置设备**：`acquisition_live` pass、aligned mocap、headless MuJoCo；robot marker 只允许 H5/diagnostics。
@@ -44,7 +35,7 @@ G0 通过；managed router 已在 acquisition 端运行；headless MuJoCo、唯�
 
 ## ik_pinocchio_cpp / ik_pinocchio_qp / ik_tianji_official
 
-- **前置设备**：`pico_sim` pass、对应 backend 已 build/deploy；三 case 分开运行，禁止切换中复用 instance。
+- **前置设备**：`mocap_live_sim` pass、对应 backend 已 build/deploy；三 case 分开运行，禁止切换中复用 instance。
 - **命令**：分别运行 `pixi run validation-run -- --case ik_pinocchio_cpp --output ROOT`、`... ik_pinocchio_qp ...`、`... ik_tianji_official ...`。
 - **步骤**：启动指定 backend；检查 target frame `Base_L/Base_R`、proposal names/order、proposal/solved `target_sequence`；运动左右臂，停止 backend 再观察 bounded Home 和 idle。
 - **预期**：producer 只订阅 canonical target/final command，solver reject 不发布 accepted 占位；strict names、finite、step/limits；inactive side Home；三 backend 都完成 return_complete。
@@ -71,7 +62,7 @@ G0 通过；managed router 已在 acquisition 端运行；headless MuJoCo、唯�
 
 ## policy_hold_sim
 
-- **前置设备**：`pico_sim` pass、policy runner；仅 hold runner，不连接 solver API。
+- **前置设备**：`mocap_live_sim` pass、policy runner；仅 hold runner，不连接 solver API。
 - **命令**：`pixi run validation-run -- --case policy_hold_sim --output ROOT`。
 - **步骤**：确认 fresh arm state；运行 hold；注入 velocity 缺失/过 stale、shape/nonfinite action，再恢复并正常 return。
 - **预期**：Hold 输出当前 position；velocity 用有限差分且超阈值 not ready；非法 action 令 producer unhealthy、停 proposal、coordinator controlled return；finite 越限 wire proposal 才 fault；policy 不发布 final command。

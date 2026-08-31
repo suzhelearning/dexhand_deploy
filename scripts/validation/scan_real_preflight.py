@@ -17,11 +17,11 @@ import stat
 import subprocess
 import sys
 ROOT = Path(__file__).resolve().parents[2]
-SRC_ROOT = ROOT / "src" / "pico_body_tianji"
+SRC_ROOT = ROOT / "src" / "tianji_teleop"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from pico_body_tianji.sources.common.real_admission import RealCapabilityInput
+from tianji_teleop.sources.common.real_admission import RealCapabilityInput
 
 
 def main(argv: list[str] | None = None) -> int:

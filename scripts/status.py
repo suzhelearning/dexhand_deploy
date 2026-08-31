@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import threading
 
-from pico_body_tianji.protocol import topics
-from pico_body_tianji.zenoh_util import open_session, require_single_router
+from tianji_teleop.protocol import topics
+from tianji_teleop.zenoh_util import open_session, require_single_router
 
 
 class StatusMonitor:

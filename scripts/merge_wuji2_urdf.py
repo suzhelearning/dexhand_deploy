@@ -29,14 +29,14 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ASSET_ROOT = REPO_ROOT / "src/pico_body_tianji/assets"
+ASSET_ROOT = REPO_ROOT / "src/tianji_teleop/assets"
 TIANJI_URDF = (
     ASSET_ROOT
     / "marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4_mujoco.urdf"
 )
 WUJI2_URDF = ASSET_ROOT / "wuji2_right/right_with_mount.urdf"
 MARKER_URDF = ASSET_ROOT / "tianji_arm_marker/marker_frames.urdf"
-MESH_PREFIX = "package://pico_body_tianji/assets/marvin_m6_ccs/meshes/"
+MESH_PREFIX = "package://tianji_teleop/assets/marvin_m6_ccs/meshes/"
 
 
 def _remove_joint(root: ET.Element, name: str) -> ET.Element:

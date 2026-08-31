@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import unittest
 
-from pico_body_tianji.protocol.messages import (
+from tianji_teleop.protocol.messages import (
     ArmJointCommand,
     ArmJointProposal,
     ArmJointState,
@@ -19,13 +19,12 @@ from pico_body_tianji.protocol.messages import (
     ProtocolEnvelope,
     RawH5ReplaySample,
     RawMocapLiveSample,
-    RawPicoControllerSample,
     SafetyStopAck,
     SafetyStopRequest,
     SessionIntent,
     SessionState,
 )
-from pico_body_tianji.protocol import topics
+from tianji_teleop.protocol import topics
 
 
 class ProtocolTopicsTest(unittest.TestCase):
@@ -40,8 +39,8 @@ class ProtocolTopicsTest(unittest.TestCase):
             "HAND_COMMAND": "tianji/command/hand/{side}", "ARM_STATE": "tianji/state/arm",
             "HAND_STATE": "tianji/state/hand/{side}", "EXECUTOR_STATUS": "tianji/executor/status",
             "HAND_EXECUTOR_STATUS": "tianji/executor/hand/{side}/status", "SAFETY_STOP": "tianji/safety/stop",
-            "SAFETY_ACK": "tianji/safety/ack/{executor_id}", "RAW_PICO_CONTROLLER": "tianji/raw/pico_controller",
-            "RAW_MOCAP_LIVE": "tianji/raw/mocap_live", "RAW_H5_REPLAY": "tianji/raw/h5_replay",
+            "SAFETY_ACK": "tianji/safety/ack/{executor_id}", "RAW_MOCAP_LIVE": "tianji/raw/mocap_live",
+            "RAW_H5_REPLAY": "tianji/raw/h5_replay",
             "FRAME0_HAND_SKELETON": "tianji/diagnostics/h5/frame0_hand_skeleton",
             "MOCAP_ALIGNED_HANDS": "mocap/aligned/hands", "MOCAP_HANDS_FRAME": "mocap/hands/frame",
             "MOCAP_RIGID_BODY_NAMES": "mocap/rigid_body_names",
@@ -82,7 +81,7 @@ class ProtocolMessagesTest(unittest.TestCase):
             ArmTargetCommand(
                 envelope=self.envelope,
                 source_timestamp_ns=None,
-                source="pico_controller",
+                source="mocap_live",
                 side="left",
                 frame_id="Base_L",
                 position_m=[0.1, 0.2, 0.3],
@@ -164,10 +163,6 @@ class ProtocolMessagesTest(unittest.TestCase):
         ))
 
     def test_raw_and_diagnostic_messages_round_trip(self) -> None:
-        self.assert_round_trip(RawPicoControllerSample(
-            envelope=self.envelope, source_timestamp_ns=None,
-            left_pose=self.pose, right_pose=self.pose, right_a_pressed=False,
-        ))
         hands = {
             "left": {"valid": True, "wrist_pose": self.pose, "keypoints_world_m": self.keypoints},
             "right": {"valid": False, "wrist_pose": None, "keypoints_world_m": None},
@@ -212,7 +207,6 @@ class ProtocolMessagesTest(unittest.TestCase):
             HandExecutorStatus(1, 1, 1, "left", True, True, True, False, None, "hand-1", "router-1"),
             SafetyStopRequest(self.envelope, "run-1", "stop"),
             SafetyStopAck(self.envelope, "arm-1", "run-1", True, "stop"),
-            RawPicoControllerSample(self.envelope, None, self.pose, self.pose, False),
             RawMocapLiveSample(self.envelope, None, "stream-1", 1, 1, hand_records),
             RawH5ReplaySample(self.envelope, None, {"left": {**hand_records["left"], "wuji2_joints_rad": None}, "right": {**hand_records["right"], "wuji2_joints_rad": None}}),
             Frame0HandSkeleton(1, 1, "right", "motive_world", self.keypoints, [[i, i + 1] for i in range(20)], self.pose, self.pose, self.pose, self.pose, 1, "diag-1", "router-1"),
@@ -304,14 +298,15 @@ class ProtocolMessagesTest(unittest.TestCase):
             request.validate_authority("pub-1", "other-run")
         with self.assertRaises(ValueError):
             SafetyStopRequest(self.envelope, "run-1", "operator", latch=False)
-        ack = SafetyStopAck(self.envelope, "arm-1", "run-1", True, "operator")
+        executor_envelope = ProtocolEnvelope(1, "arm-1", "router-1", 1, 2)
+        ack = SafetyStopAck(executor_envelope, "arm-1", "run-1", True, "operator")
         ack.validate_for("arm-1", "run-1")
         with self.assertRaises(ValueError):
             ack.validate_for("arm-2", "run-1")
         with self.assertRaises(ValueError):
             ack.validate_for("arm-1", "other-run")
         with self.assertRaises(ValueError):
-            SafetyStopAck(self.envelope, "arm-1", "run-1", False, "operator").validate_for("arm-1", "run-1")
+            SafetyStopAck(executor_envelope, "arm-1", "run-1", False, "operator").validate_for("arm-1", "run-1")
 
     def test_rejects_nested_non_json_diagnostics_and_topic_side(self) -> None:
         for invalid in (math.nan, math.inf):
@@ -406,11 +401,6 @@ class ProtocolMessagesTest(unittest.TestCase):
                 side="left", mode="teleop", proposal_sequence=None, target_sequence=None,
                 names=[f"Joint{i}_R" for i in range(1, 8)], position_rad=[0.0] * 7,
                 publisher_instance_id="coord-1", router_zid="router-1",
-            )
-        with self.assertRaises(ValueError):
-            RawPicoControllerSample(
-                envelope=self.envelope, source_timestamp_ns=None, left_pose=self.pose,
-                right_pose=self.pose, right_a_pressed=False, source_type="bad",
             )
         with self.assertRaises(ValueError):
             SessionIntent(1, 1, 1, "source", "bad", "reason", "source-1", "router-1")

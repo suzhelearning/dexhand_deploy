@@ -52,16 +52,16 @@ if [[ -z "${executor_id}" ]]; then
 fi
 case "${executor_id}" in
   mujoco)
-    entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/mujoco_executor"
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/mujoco_executor"
     default_config="executors/mujoco.yaml"
     ;;
   marvin)
-    entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/marvin_executor"
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/marvin_executor"
     default_config="executors/marvin.yaml"
     [[ "${confirm_real}" == true ]] || { printf '%s\n' 'Marvin executor requires --confirm-real' >&2; exit 2; }
     ;;
   wuji_hand2)
-    entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/wuji_hand2_executor"
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/wuji_hand2_executor"
     default_config="executors/wuji_hand2.yaml"
     ;;
   *) printf '错误：未知 executor: %s\n' "${executor_id}" >&2; exit 2 ;;
@@ -128,7 +128,7 @@ case "${executor_id}" in
     args=(--confirm-real --config "${config}")
     marvin_robot_ip="${MARVIN_ROBOT_IP:-$(device_config_value marvin ip)}"
     args+=(--robot-ip "${marvin_robot_ip}")
-    export TIANJI_REAL_CAPABILITY_PROVIDER="${real_capability_provider:-pico_body_tianji.executors.marvin.preflight:trusted_real_capability}"
+    export TIANJI_REAL_CAPABILITY_PROVIDER="${real_capability_provider:-tianji_teleop.executors.marvin.preflight:trusted_real_capability}"
     exec python "${entry}" "${args[@]}" "$@"
     ;;
   wuji_hand2)
@@ -149,9 +149,9 @@ PY
     fi
     native=""
     for candidate in \
-      "${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji/wuji_hand2_bridge" \
-      "${BUNDLE_ROOT}/runtime/pico_body_tianji/lib/pico_body_tianji/wuji_hand2_bridge.bin" \
-      "${PROJECT_PREFIX}/lib/pico_body_tianji/wuji_hand2_bridge"; do
+      "${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/wuji_hand2_bridge" \
+      "${BUNDLE_ROOT}/runtime/tianji_teleop/lib/tianji_teleop/wuji_hand2_bridge.bin" \
+      "${PROJECT_PREFIX}/lib/tianji_teleop/wuji_hand2_bridge"; do
       if [[ -x "${candidate}" ]]; then native="${candidate}"; break; fi
     done
     if [[ "${required_capability}" == simulation ]]; then

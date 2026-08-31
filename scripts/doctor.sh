@@ -11,16 +11,15 @@ if [[ "$(uname -m)" != "x86_64" ]]; then
 fi
 activate_bundle_runtime
 
-CONFIG_ROOT="${BUNDLE_ROOT}/src/pico_body_tianji/config"
+CONFIG_ROOT="${BUNDLE_ROOT}/src/tianji_teleop/config"
 required_configs=(
   robot/arm.yaml robot/wuji_hand2.yaml robot/devices.yaml
-  sources/pico_controller.yaml sources/mocap_live.yaml sources/h5_replay.yaml
+  sources/mocap_live.yaml sources/h5_replay.yaml
   producers/ik.yaml producers/policy_hold.yaml
   coordinator/arm.yaml
   executors/mujoco.yaml executors/marvin.yaml executors/wuji_hand2.yaml
   recording/session.yaml replay/target.yaml replay/joint.yaml
   diagnostics/mocap_calibration.yaml
-  sessions/pico_sim.yaml sessions/pico_real.yaml
   sessions/mocap_live_sim.yaml sessions/mocap_live_real.yaml
   sessions/h5_sim.yaml sessions/h5_real.yaml
   sessions/target_replay_sim.yaml sessions/joint_replay_sim.yaml
@@ -35,13 +34,13 @@ done
 
 # Validate shape, strict session authority split, and robot config through the
 # same loaders used by production nodes.
-PYTHONPATH="${BUNDLE_ROOT}/src/pico_body_tianji:${PYTHONPATH:-}" python - "${CONFIG_ROOT}" <<'PY'
+PYTHONPATH="${BUNDLE_ROOT}/src/tianji_teleop:${PYTHONPATH:-}" python - "${CONFIG_ROOT}" <<'PY'
 from pathlib import Path
 import sys
 import yaml
-from pico_body_tianji.config_loader import load_component_config
-from pico_body_tianji.coordination.arm_command_coordinator import ArmRobotConfig
-from pico_body_tianji.executors.wuji_hand2.config import WujiHandConfig
+from tianji_teleop.config_loader import load_component_config
+from tianji_teleop.coordination.arm_command_coordinator import ArmRobotConfig
+from tianji_teleop.executors.wuji_hand2.config import WujiHandConfig
 
 root = Path(sys.argv[1])
 arm = ArmRobotConfig.load(root / "robot/arm.yaml")
@@ -67,14 +66,12 @@ fi
 printf '%s\n' "router endpoint=${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447} router_zid=${router_zid}"
 
 required_files=(
-  "${BUNDLE_ROOT}/vendor/python/xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so"
-  "${BUNDLE_ROOT}/vendor/lib/libPXREARobotSDK.so"
   "${BUNDLE_ROOT}/vendor/python/marvin_sdk/libMarvinSDK.so"
   "${ZENOH_LIBRARY_ROOT}/libzenohc.so"
   "${ZENOH_CPP_INCLUDE_ROOT}/zenoh.hxx"
   "${BUNDLE_ROOT}/vendor/wuji-sdk/include/wuji_sdk.h"
   "${BUNDLE_ROOT}/vendor/wuji-sdk/lib/libwuji_sdk_c.so"
-  "${BUNDLE_ROOT}/src/pico_body_tianji/assets/tianji_wuji2/tianji_wuji2.urdf"
+  "${BUNDLE_ROOT}/src/tianji_teleop/assets/tianji_wuji2/tianji_wuji2.urdf"
 )
 for file in "${required_files[@]}"; do
   if [[ ! -e "${file}" ]]; then
@@ -82,10 +79,10 @@ for file in "${required_files[@]}"; do
     exit 1
   fi
 done
-runtime_bin="${PROJECT_PREFIX}/lib/pico_body_tianji"
+runtime_bin="${PROJECT_PREFIX}/lib/tianji_teleop"
 allowed_programs=(
   arm_ik_producer tianji_official_ik_probe tianji_official_ik_worker
-  wuji_hand2_bridge pico_controller_source mocap_live mocap_h5_replay
+  wuji_hand2_bridge mocap_live mocap_h5_replay
   target_replay joint_replay session_recorder arm_command_coordinator
   policy_hold_producer mujoco_executor marvin_executor wuji_hand2_executor
   trace_metrics real_diagnostic h5_wrist_diagnostic joint_watcher
@@ -107,7 +104,7 @@ for program in "${required_programs[@]}"; do
     exit 1
   fi
 done
-runtime_config="${PROJECT_PREFIX}/share/pico_body_tianji/config"
+runtime_config="${PROJECT_PREFIX}/share/tianji_teleop/config"
 for stale_config in "${runtime_config}/mode"; do
   [[ ! -e "${stale_config}" ]] || { printf '错误：runtime 存在过时配置目录：%s\n' "${stale_config}" >&2; exit 1; }
 done

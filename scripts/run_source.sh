@@ -12,7 +12,7 @@ while (($#)); do
     --source|--profile) source_id="${2:-}"; shift 2 ;;
     --config) config_override="${2:-}"; shift 2 ;;
     --help|-h)
-      printf '%s\n' '用法: run_source.sh --source {pico_controller|mocap_live|h5_replay} [--config PATH] [参数...]'
+      printf '%s\n' '用法: run_source.sh --source {mocap_live|h5_replay} [--config PATH] [参数...]'
       exit 0 ;;
     --) shift; break ;;
     *) break ;;
@@ -23,14 +23,13 @@ if [[ -z "${source_id}" ]]; then
   exit 2
 fi
 case "${source_id}" in
-  pico_controller) entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/pico_controller_source"; default_config="sources/pico_controller.yaml" ;;
-  mocap_live) entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/mocap_live"; default_config="sources/mocap_live.yaml" ;;
-  h5_replay) entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/mocap_h5_replay"; default_config="sources/h5_replay.yaml" ;;
+  mocap_live) entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/mocap_live"; default_config="sources/mocap_live.yaml" ;;
+  h5_replay) entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/mocap_h5_replay"; default_config="sources/h5_replay.yaml" ;;
   target_replay|joint_replay)
-    entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/${source_id}"
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/${source_id}"
     default_config="replay/${source_id%_replay}.yaml" ;;
   diagnostic_mocap_calibration)
-    entry="${BUNDLE_ROOT}/src/pico_body_tianji/scripts/mocap_calibration"
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/mocap_calibration"
     default_config="diagnostics/mocap_calibration.yaml" ;;
   *)
     printf '错误：未知 source: %s\n' "${source_id}" >&2; exit 2 ;;

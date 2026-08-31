@@ -7,16 +7,16 @@ from unittest.mock import patch
 
 import numpy as np
 
-import pico_body_tianji.executors.mujoco.node as mujoco_node
-import pico_body_tianji.executors.wuji_hand2.main as wuji_main_module
+import tianji_teleop.executors.mujoco.node as mujoco_node
+import tianji_teleop.executors.wuji_hand2.main as wuji_main_module
 
-from pico_body_tianji.executors.marvin.bridge import MarvinExecutor
-from pico_body_tianji.executors.marvin.readiness import MarvinReadiness
-from pico_body_tianji.executors.mujoco.node import MujocoExecutor
-from pico_body_tianji.executors.wuji_hand2.node import WujiHandExecutor
-from pico_body_tianji.executors.wuji_hand2.config import WujiHandConfig
-from pico_body_tianji.marvin_hardware import MarvinFeedback
-from pico_body_tianji.protocol.messages import (
+from tianji_teleop.executors.marvin.bridge import MarvinExecutor
+from tianji_teleop.executors.marvin.readiness import MarvinReadiness
+from tianji_teleop.executors.mujoco.node import MujocoExecutor
+from tianji_teleop.executors.wuji_hand2.node import WujiHandExecutor
+from tianji_teleop.executors.wuji_hand2.config import WujiHandConfig
+from tianji_teleop.marvin_hardware import MarvinFeedback
+from tianji_teleop.protocol.messages import (
     ARM_JOINT_NAMES,
     ArmJointCommand,
     ComponentStatus,
@@ -27,7 +27,7 @@ from pico_body_tianji.protocol.messages import (
     SafetyStopRequest,
     SessionState,
 )
-from pico_body_tianji.sources.common.real_admission import RealCapabilityInput
+from tianji_teleop.sources.common.real_admission import RealCapabilityInput
 
 
 class _FakeModel:
@@ -152,7 +152,7 @@ class Task5ExecutorContractTest(unittest.TestCase):
         config_path = (
             Path(__file__).parents[1]
             / "src"
-            / "pico_body_tianji"
+            / "tianji_teleop"
             / "config"
             / "executors"
             / "mujoco.yaml"
@@ -512,6 +512,7 @@ class Task5ExecutorContractTest(unittest.TestCase):
         self.assertEqual(len(config.joint_names), 20)
         self.assertEqual(config.joint_names[16], "r_pinky_mcp_flex")
         self.assertEqual(len(config.zero_tolerance_rad), 20)
+        self.assertEqual(set(config.zero_tolerance_rad), {0.1})
 
     def test_wuji_direct_rejects_wrong_publisher_without_refreshing_watchdog(self):
         executor = WujiHandExecutor(
@@ -554,7 +555,7 @@ class Task5ExecutorContractTest(unittest.TestCase):
             executor.config.validate_positions([0.0] * 20),
             executor.config.validate_positions([0.0] * 20),
         ))
-        from pico_body_tianji.executors.wuji_hand2.node import _retarget_keypoints
+        from tianji_teleop.executors.wuji_hand2.node import _retarget_keypoints
         np.testing.assert_allclose(
             _retarget_keypoints(points, executor.config),
             _retarget_keypoints(shifted, executor.config),

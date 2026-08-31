@@ -9,20 +9,19 @@ from types import SimpleNamespace
 import h5py
 import numpy as np
 
-from pico_body_tianji.protocol.messages import LatchedBool, SessionState
-from pico_body_tianji.sources.common.real_admission import RealCapabilityInput
-from pico_body_tianji.sources.common.session_client import SessionClient
-from pico_body_tianji.sources.mocap.h5 import load_mocap_h5
-from pico_body_tianji.sources.mocap.h5_replay_node import (
+from tianji_teleop.protocol.messages import LatchedBool, SessionState
+from tianji_teleop.sources.common.real_admission import RealCapabilityInput
+from tianji_teleop.sources.common.session_client import SessionClient
+from tianji_teleop.sources.mocap.h5 import load_mocap_h5
+from tianji_teleop.sources.mocap.h5_replay_node import (
     DEFAULT_PARAMETERS,
     MocapH5ReplayNode,
     main as h5_main,
     validate_h5_hand_real_preflight,
 )
-from pico_body_tianji.sources.mocap.live_node import AlignedHandFrame, MocapLiveNode
-from pico_body_tianji.sources.mocap.motive import MotiveFrameSource
-from pico_body_tianji.sources.pico_controller.node import PicoControllerSource
-from pico_body_tianji.diagnostics.mocap_calibration_node import (
+from tianji_teleop.sources.mocap.live_node import AlignedHandFrame, MocapLiveNode
+from tianji_teleop.sources.mocap.motive import MotiveFrameSource
+from tianji_teleop.diagnostics.mocap_calibration_node import (
     MocapLiveNode as CalibrationNode,
 )
 
@@ -348,20 +347,6 @@ class LiveOrientationRound5Test(unittest.TestCase):
 
 
 class EntryAndDiagnosticsRound5Test(unittest.TestCase):
-    def test_pico_run_has_formal_start_entry(self) -> None:
-        node = PicoControllerSource.__new__(PicoControllerSource)
-        node._session_client = _FakeSessionClient()
-        node._publisher = _FakePublisher()
-        node._phase = "armed"
-        node._last_error = None
-        node._last_source_state = "unavailable"
-        node._last_source_timestamp_ns = None
-        node._last_a = False
-        node._return_timed_out = False
-        node._closed = True
-        self.assertEqual(node.run(), 0)
-        self.assertEqual(node._session_client.started, 1)
-
     def test_h5_validate_only_cli_loads_recording(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "take.h5"

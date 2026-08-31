@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from pico_body_tianji.coordination.arm_command_coordinator import ArmCommandCoordinator
-from pico_body_tianji.protocol.messages import HAND_JOINT_NAMES, HandExecutorStatus, HandJointState
+from tianji_teleop.coordination.arm_command_coordinator import ArmCommandCoordinator
+from tianji_teleop.protocol.messages import HAND_JOINT_NAMES, HandExecutorStatus, HandJointState
 
 
 class FinalReviewRegressionTest(unittest.TestCase):
@@ -37,7 +37,7 @@ class FinalReviewRegressionTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         manifest = {
-            "case_id": "pico_sim", "profile": "pico_sim", "required_capability": "simulation",
+            "case_id": "mocap_live_sim", "profile": "mocap_live_sim", "required_capability": "simulation",
             "authority_contract": [],
         }
         case = {"velocity_ratio": 1.0}
@@ -60,11 +60,11 @@ class FinalReviewRegressionTest(unittest.TestCase):
         self.assertEqual(duplicate["order_errors"], 1)
 
     def test_replay_router_is_provenance_not_admission(self) -> None:
-        from pico_body_tianji.recording import replay
+        from tianji_teleop.recording import replay
         source = Path(replay.__file__).read_text(encoding="utf-8")
         self.assertNotIn('recording router_zid does not match replay router', source)
     def test_replay_cli_drives_authorized_start_and_control_ticks(self) -> None:
-        from pico_body_tianji.recording import replay_cli
+        from tianji_teleop.recording import replay_cli
 
         node = mock.Mock()
         node.phase = "replaying"

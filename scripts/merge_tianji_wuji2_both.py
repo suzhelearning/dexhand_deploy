@@ -26,7 +26,7 @@ import shutil
 import xml.etree.ElementTree as ET
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ASSET_ROOT = REPO_ROOT / "src/pico_body_tianji/assets"
+ASSET_ROOT = REPO_ROOT / "src/tianji_teleop/assets"
 TIANJI_URDF = (
     ASSET_ROOT
     / "marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
@@ -215,7 +215,7 @@ def _attach_side(tianji: ET.Element, marker_tree: ET.Element, hand: ET.Element,
     # collision 与 visual 复用同一 STL；按 package:// 前缀提取文件名即可。
     for mesh in hand.findall(".//mesh"):
         filename = mesh.get("filename", "")
-        prefix = "package://pico_body_tianji/assets/marvin_m6_ccs/meshes/"
+        prefix = "package://tianji_teleop/assets/marvin_m6_ccs/meshes/"
         if not filename.startswith(prefix):
             raise ValueError(f"手部 mesh 不是包内 URI: {filename}")
         asset_name = filename[len(prefix):]
@@ -341,14 +341,14 @@ def main() -> int:
     _ensure_tcp_inertia(tianji)
 
     # 改写 tianji 双臂自身的 package:// mesh 引用为相对路径并收集。
-    # 此时 tianji 树仍含 <video>/<mesh> 引用，部分 url 为 package://pico_body_tianji/...
+    # 此时 tianji 树仍含 <video>/<mesh> 引用，部分 url 为 package://tianji_teleop/...
     for mesh in tianji.findall(".//mesh"):
         filename = mesh.get("filename", "")
-        if not filename.startswith("package://pico_body_tianji/assets/"
+        if not filename.startswith("package://tianji_teleop/assets/"
                                    "marvin_m6_ccs/meshes/"):
             continue
         asset_name = filename.removeprefix(
-            "package://pico_body_tianji/assets/marvin_m6_ccs/meshes/"
+            "package://tianji_teleop/assets/marvin_m6_ccs/meshes/"
         )
         mesh.set("filename", f"meshes/{asset_name}")
         mesh_map[asset_name] = str(ASSET_MESH_DIR / asset_name)

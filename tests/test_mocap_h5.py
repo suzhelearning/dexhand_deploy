@@ -7,7 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from pico_body_tianji.sources.mocap.h5 import (
+from tianji_teleop.sources.mocap.h5 import (
     HandPoseTrajectory,
     MocapRecording,
     align_pose_to_reference,

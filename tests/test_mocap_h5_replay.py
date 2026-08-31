@@ -7,20 +7,20 @@ from unittest.mock import patch
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from pico_body_tianji.protocol.messages import (
+from tianji_teleop.protocol.messages import (
     ArmSolvedPose,
     ArmTargetCommand,
     HAND_JOINT_NAMES,
     ProtocolEnvelope,
 )
-from pico_body_tianji.sources.mocap.h5_replay_node import (
+from tianji_teleop.sources.mocap.h5_replay_node import (
     DEFAULT_PARAMETERS,
     MocapH5ReplayNode,
     _WUJI2_MOUNT_TO_WRIST_POSE,
     _configure_logging,
     _configured_pose,
 )
-from pico_body_tianji.sources.mocap.h5 import compose_pose, invert_pose
+from tianji_teleop.sources.mocap.h5 import compose_pose, invert_pose
 
 
 class _Deadman:
@@ -131,7 +131,7 @@ class H5DirectJointRegressionTest(unittest.TestCase):
         self.assertEqual(call["producer"], "h5_direct")
 
     def test_direct_payload_keeps_invalid_frames_out_of_real_preflight(self) -> None:
-        from pico_body_tianji.sources.mocap.h5_replay_node import (
+        from tianji_teleop.sources.mocap.h5_replay_node import (
             validate_h5_hand_real_preflight,
         )
 
@@ -145,7 +145,7 @@ class H5DirectJointRegressionTest(unittest.TestCase):
 class H5TerminalRegressionTest(unittest.TestCase):
     def test_h5_logging_keeps_blank_line_message_separator(self) -> None:
         with patch(
-            "pico_body_tianji.sources.mocap.h5_replay_node.logging.basicConfig"
+            "tianji_teleop.sources.mocap.h5_replay_node.logging.basicConfig"
         ) as configure:
             _configure_logging()
         options = configure.call_args.kwargs
@@ -188,7 +188,7 @@ class H5TerminalRegressionTest(unittest.TestCase):
 
 class Frame0ViewerRegressionTest(unittest.TestCase):
     def test_canonical_diagnostic_validate_only_is_passive(self) -> None:
-        from pico_body_tianji.diagnostics import mujoco_h5_wrist_replay as viewer
+        from tianji_teleop.diagnostics import mujoco_h5_wrist_replay as viewer
 
         recording = SimpleNamespace(output_hz=60.0, summary=lambda: {"frames": 1})
         with patch.object(viewer, "load_mocap_h5", return_value=recording):
@@ -197,7 +197,7 @@ class Frame0ViewerRegressionTest(unittest.TestCase):
         run_viewer.assert_not_called()
 
     def test_canonical_diagnostic_viewer_is_opt_in(self) -> None:
-        from pico_body_tianji.diagnostics import mujoco_h5_wrist_replay as viewer
+        from tianji_teleop.diagnostics import mujoco_h5_wrist_replay as viewer
 
         recording = SimpleNamespace(output_hz=60.0, summary=lambda: {"frames": 1})
         with patch.object(viewer, "load_mocap_h5", return_value=recording):

@@ -21,8 +21,8 @@ def main() -> int:
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("missing session command")
-    if not math.isfinite(args.speed) or not 0.0 < args.speed <= 0.25:
-        parser.error("real session speed must be in (0, 0.25]")
+    if not math.isfinite(args.speed) or not 0.0 < args.speed <= 1.0:
+        parser.error("real session speed must be in (0, 1]")
     if not math.isfinite(args.yaw_deg) or args.yaw_deg != 0.0:
         parser.error("real session yaw must be 0")
 

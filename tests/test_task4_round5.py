@@ -4,14 +4,14 @@ import json
 from pathlib import Path
 import unittest
 
-from pico_body_tianji.protocol.messages import ProtocolError, strict_loads
+from tianji_teleop.protocol.messages import ProtocolError, strict_loads
 
 
 class ProducerInitializationContractTest(unittest.TestCase):
     def test_ready_and_liveliness_are_announced_after_all_io_declarations(self) -> None:
         source = (
             Path(__file__).parents[1]
-            / "src/pico_body_tianji/src/producers/arm_ik_producer_node.cpp"
+            / "src/tianji_teleop/src/producers/arm_ik_producer_node.cpp"
         ).read_text(encoding="utf-8")
         publisher = source.index('status_publisher_ = session_.declare_publisher')
         target_subscriber = source.index('target_subscribers_[index] = session_.declare_subscriber')
@@ -46,7 +46,7 @@ class StrictProtocolFixtureTest(unittest.TestCase):
             "sequence": 7,
             "timestamp_ns": 1,
             "source_timestamp_ns": None,
-            "source": "pico_controller",
+            "source": "mocap_live",
             "side": "right",
             "frame_id": "Base_R",
             "position_m": [0.1, 0.2, 0.3],
@@ -63,7 +63,7 @@ class StrictProtocolFixtureTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_cpp_fixture_emissions_are_accepted_by_python_protocol(self) -> None:
-        from pico_body_tianji.protocol.messages import ArmJointProposal, ArmSolvedPose, ComponentStatus
+        from tianji_teleop.protocol.messages import ArmJointProposal, ArmSolvedPose, ComponentStatus
         import subprocess
 
         fixture = Path(__file__).parents[1] / "build/ik/protocol_cpp_fixture"
@@ -77,7 +77,7 @@ class StrictProtocolFixtureTest(unittest.TestCase):
             parser.from_dict(strict_loads(result.stdout))
 
     def test_python_arm_command_is_accepted_by_cpp_fixture(self) -> None:
-        from pico_body_tianji.protocol.messages import ArmJointCommand
+        from tianji_teleop.protocol.messages import ArmJointCommand
         import subprocess
 
         command = ArmJointCommand(

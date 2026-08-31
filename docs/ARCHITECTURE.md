@@ -2,7 +2,7 @@
 
 ## 五层 authority
 
-1. **Source**：PICO、aligned mocap、H5 或 session replay 只发布 target/raw 和
+1. **Source**：aligned mocap、H5 或 session replay 只发布 target/raw 和
    `SessionIntent`，等待 coordinator 的匹配 `teleop` state。
 2. **Producer**：IK、policy 或 direct replay 接受 target/current command，发布
    有限的 arm proposal、solved pose 或 hand command；不发布 final arm command。

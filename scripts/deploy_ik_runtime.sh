@@ -3,14 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-STAGING_BIN="${BUNDLE_ROOT}/staging/ik/lib/pico_body_tianji"
-RUNTIME_BIN="${BUNDLE_ROOT}/runtime/pico_body_tianji/lib/pico_body_tianji"
+STAGING_BIN="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop"
+RUNTIME_BIN="${BUNDLE_ROOT}/runtime/tianji_teleop/lib/tianji_teleop"
 NEW_IK="${STAGING_BIN}/arm_ik_producer"
 NEW_PROBE="${STAGING_BIN}/tianji_official_ik_probe"
 NEW_WORKER="${STAGING_BIN}/tianji_official_ik_worker"
 NEW_BRIDGE="${STAGING_BIN}/wuji_hand2_bridge"
 RUNTIME_PROGRAMS=(
-  pico_controller_source
   mocap_live
   mocap_h5_replay
   mocap_calibration
@@ -32,14 +31,14 @@ SDK_SOURCE_ROOT="${TIANJI_OFFICIAL_SDK_ROOT:-/home/ice/TJ_FX_ROBOT_CONTRL_SDK}"
 SDK_RUNTIME_ROOT="${BUNDLE_ROOT}/runtime/tianji_official"
 SDK_LIBRARY="${SDK_SOURCE_ROOT}/kinematicsSDK/libKine.so"
 SDK_CONFIG="${SDK_SOURCE_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
-RUNTIME_SHARE="${BUNDLE_ROOT}/runtime/pico_body_tianji/share/pico_body_tianji"
-SOURCE_CONFIG="${BUNDLE_ROOT}/src/pico_body_tianji/config"
-STAGING_CONFIG="${BUNDLE_ROOT}/staging/ik/share/pico_body_tianji/config"
+RUNTIME_SHARE="${BUNDLE_ROOT}/runtime/tianji_teleop/share/tianji_teleop"
+SOURCE_CONFIG="${BUNDLE_ROOT}/src/tianji_teleop/config"
+STAGING_CONFIG="${BUNDLE_ROOT}/staging/ik/share/tianji_teleop/config"
 RUNTIME_CONFIG="${RUNTIME_SHARE}/config"
-SOURCE_ASSETS="${BUNDLE_ROOT}/src/pico_body_tianji/assets"
+SOURCE_ASSETS="${BUNDLE_ROOT}/src/tianji_teleop/assets"
 RUNTIME_ASSETS="${RUNTIME_SHARE}/assets"
-RUNTIME_PYTHON="${BUNDLE_ROOT}/runtime/pico_body_tianji/lib/python3.10/site-packages/pico_body_tianji"
-STAGING_PYTHON="${BUNDLE_ROOT}/staging/ik/lib/python3.10/site-packages/pico_body_tianji"
+RUNTIME_PYTHON="${BUNDLE_ROOT}/runtime/tianji_teleop/lib/python3.10/site-packages/tianji_teleop"
+STAGING_PYTHON="${BUNDLE_ROOT}/staging/ik/lib/python3.10/site-packages/tianji_teleop"
 STRIP_TOOL="${IK_STRIP_TOOL:-/usr/bin/strip}"
 
 for binary in "${NEW_IK}" "${NEW_PROBE}" "${NEW_WORKER}" "${NEW_BRIDGE}"; do
@@ -119,13 +118,14 @@ fi
 mkdir -p \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK" \
   "${SDK_RUNTIME_ROOT}/CommonConfig" \
+  "${RUNTIME_BIN}" \
   "${RUNTIME_CONFIG}" \
   "${RUNTIME_ASSETS}"
 mkdir -p "${RUNTIME_PYTHON}" "${STAGING_PYTHON}"
 for python_root in "${RUNTIME_PYTHON}" "${STAGING_PYTHON}"; do
   rsync -a --delete --delete-excluded \
     --exclude '__pycache__/' --exclude '*.pyc' \
-    "${BUNDLE_ROOT}/src/pico_body_tianji/pico_body_tianji/" \
+    "${BUNDLE_ROOT}/src/tianji_teleop/tianji_teleop/" \
     "${python_root}/"
 done
 # 允许 TIANJI_OFFICIAL_SDK_ROOT 指向 runtime 自身（自拷贝场景，

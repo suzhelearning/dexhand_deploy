@@ -30,13 +30,13 @@ from typing import Any, Callable, Iterable, Mapping
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-SRC_ROOT = ROOT / "src" / "pico_body_tianji"
+SRC_ROOT = ROOT / "src" / "tianji_teleop"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from pico_body_tianji.config_loader import DEFAULT_ROUTER_ENDPOINT, canonical_config_root
-from pico_body_tianji.protocol.messages import ProtocolEnvelope, SafetyStopAck, SafetyStopRequest
-from pico_body_tianji.sources.common.real_admission import RealCapabilityInput
+from tianji_teleop.config_loader import DEFAULT_ROUTER_ENDPOINT, canonical_config_root
+from tianji_teleop.protocol.messages import ProtocolEnvelope, SafetyStopAck, SafetyStopRequest
+from tianji_teleop.sources.common.real_admission import RealCapabilityInput
 
 MATRIX_PATH = canonical_config_root() / "validation" / "test_matrix.yaml"
 MATRIX_SCHEMA = "tianji-validation-matrix"
@@ -55,23 +55,21 @@ def monotonic_ns() -> int:
     
 CASE_CONTRACTS = {
     "acquisition_live": {"profile": "acquisition_live", "producer": "acquisition", "ik_backend": None, "recordable": False, "source_capability": "simulation", "hand_mode": "disabled"},
-    "pico_sim": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
     "mocap_live_sim": {"profile": "mocap_live_sim", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
     "h5_sim": {"profile": "h5_sim", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "simulation", "hand_mode": "auto"},
-    "ik_pinocchio_cpp": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
-    "ik_pinocchio_qp": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
-    "ik_tianji_official": {"profile": "pico_sim", "producer": "ik", "ik_backend": "tianji_official", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "ik_pinocchio_cpp": {"profile": "mocap_live_sim", "producer": "ik", "ik_backend": "pinocchio_cpp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "ik_pinocchio_qp": {"profile": "mocap_live_sim", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "ik_tianji_official": {"profile": "mocap_live_sim", "producer": "ik", "ik_backend": "tianji_official", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
     "target_replay_sim": {"profile": "target_replay_sim", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": False, "source_capability": "simulation", "hand_mode": "auto"},
     "joint_replay_sim": {"profile": "joint_replay_sim", "producer": "joint_replay", "ik_backend": None, "recordable": False, "source_capability": "simulation", "hand_mode": "direct"},
-    "policy_hold_sim": {"profile": "pico_sim", "producer": "policy_hold", "ik_backend": None, "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
-    "marvin_pico_real_10pct": {"profile": "pico_real", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "real", "hand_mode": "disabled"},
+    "policy_hold_sim": {"profile": "mocap_live_sim", "producer": "policy_hold", "ik_backend": None, "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
     "marvin_mocap_live_real_10pct": {"profile": "mocap_live_real", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "real", "hand_mode": "disabled"},
     "marvin_h5_real_10pct": {"profile": "h5_real", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "real", "hand_mode": "auto"},
     "wuji_retarget_dry": {"profile": "h5_sim", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "simulation", "hand_mode": "retarget"},
     "wuji_retarget_real": {"profile": "h5_real", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "real", "hand_mode": "retarget"},
     "wuji_direct_real": {"profile": "wuji_direct_real", "producer": "joint_replay", "ik_backend": None, "recordable": False, "source_capability": "real", "hand_mode": "direct"},
-    "fault_recovery_sim": {"profile": "pico_sim", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
-    "fault_recovery_real": {"profile": "pico_real", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "real", "hand_mode": "disabled"},
+    "fault_recovery_sim": {"profile": "mocap_live_sim", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "simulation", "hand_mode": "disabled"},
+    "fault_recovery_real": {"profile": "mocap_live_real", "producer": "ik", "ik_backend": "pinocchio_qp", "recordable": True, "source_capability": "real", "hand_mode": "disabled"},
 }
 
 
@@ -399,7 +397,7 @@ class ZenohSafetyTransport:
 
     def __init__(self, endpoint: str, *, timeout_s: float = 3.0) -> None:
         import threading
-        from pico_body_tianji.zenoh_util import open_session
+        from tianji_teleop.zenoh_util import open_session
 
         self._threading = threading
         self.timeout_s = float(timeout_s)
@@ -453,8 +451,6 @@ class ZenohSafetyTransport:
 def _source_type(profile: str) -> str:
     values = {
         "acquisition_live": "mocap_live",
-        "pico_sim": "pico_controller",
-        "pico_real": "pico_controller",
         "mocap_live_sim": "mocap_live",
         "mocap_live_real": "mocap_live",
         "h5_sim": "h5_replay",
@@ -464,7 +460,7 @@ def _source_type(profile: str) -> str:
         "wuji_direct_real": "joint_replay",
         "diagnostic_mocap_calibration_sim": "diagnostic_mocap_calibration",
     }
-    return values.get(profile, "pico_controller")
+    return values.get(profile, "mocap_live")
 def _profile_config(profile: str) -> dict[str, Any]:
     path = canonical_config_root() / "sessions" / f"{profile}.yaml"
     if not path.is_file():
@@ -706,7 +702,7 @@ def _create_empty_session(path: Path, source_type: str, router_zid: str) -> None
     # Empty is intentional: fake/headless mode proves the schema and safety
     # plumbing only. It is never reported as a successful device run.
     try:
-        from pico_body_tianji.recording.session_h5 import SessionH5Writer
+        from tianji_teleop.recording.session_h5 import SessionH5Writer
     except ModuleNotFoundError as exc:
         # ``validation-run --list`` and local preflight must work without the
         # optional Zenoh wheel.  Keep a minimal HDF5 artifact for that mode;
@@ -735,7 +731,7 @@ class ManagedEvidenceCapture:
     """Capture real wire/status/liveliness evidence while a session is online."""
 
     def __init__(self, endpoint: str, bundle: Path, run_id: str) -> None:
-        from pico_body_tianji.zenoh_util import open_session
+        from tianji_teleop.zenoh_util import open_session
 
         self.bundle = bundle
         self.run_id = run_id
@@ -823,7 +819,10 @@ def _prerequisites_passed(root: Path, prerequisites: Iterable[str]) -> tuple[boo
     if not prerequisites:
         return True, missing
     try:
-        from scripts.validation.analyze_runs import AnalysisError, analyze_bundle
+        if __package__:
+            from .analyze_runs import AnalysisError, analyze_bundle
+        else:
+            from analyze_runs import AnalysisError, analyze_bundle
     except ImportError as exc:
         raise RuntimeError(f"cannot load prerequisite analyzer: {exc}") from exc
     matrix = load_matrix()
@@ -851,7 +850,7 @@ def _h5_contains_hand_joints(path: Path | None, active_sides: Iterable[str] = ("
     if path is None or not path.is_file():
         return False
     try:
-        from pico_body_tianji.sources.mocap.h5 import load_mocap_h5
+        from tianji_teleop.sources.mocap.h5 import load_mocap_h5
         recording = load_mocap_h5(path)
         import numpy as np
         sides = tuple(str(side) for side in active_sides)
@@ -1427,7 +1426,7 @@ def _run_session(bundle: Path, manifest: dict[str, Any], status: Any, args: argp
         _write_status(status, event="session_finished", component="run_session", supervisor=manifest["publisher_instance_ids"]["validation_supervisor"], run_id=manifest["run_id"], exit_reason=exit_reason, process_returncode=process.returncode)
         if evidence_capture is not None:
             evidence_capture.close()
-    runtime_dir = Path(env.get("PICO_TIANJI_RUNTIME_DIR", os.environ.get("PICO_TIANJI_RUNTIME_DIR", "/tmp")))
+    runtime_dir = Path(env.get("TIANJI_TELEOP_RUNTIME_DIR", os.environ.get("TIANJI_TELEOP_RUNTIME_DIR", "/tmp")))
     for child_log in runtime_dir.glob(f"{manifest['run_id']}-*.log"):
         destination = bundle / "logs" / f"{child_log.stem}.log"
         try:

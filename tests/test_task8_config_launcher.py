@@ -9,7 +9,7 @@ import unittest
 
 import yaml
 
-from pico_body_tianji.config_loader import (
+from tianji_teleop.config_loader import (
     DEFAULT_ROUTER_ENDPOINT,
     canonical_config_root,
     load_component_config,
@@ -18,7 +18,7 @@ from pico_body_tianji.config_loader import (
 
 
 ROOT = Path(__file__).parents[1]
-CONFIG = ROOT / "src" / "pico_body_tianji" / "config"
+CONFIG = ROOT / "src" / "tianji_teleop" / "config"
 SCRIPTS = ROOT / "scripts"
 
 
@@ -28,7 +28,6 @@ class Task8ConfigTreeTest(unittest.TestCase):
             "robot/arm.yaml",
             "robot/wuji_hand2.yaml",
             "robot/devices.yaml",
-            "sources/pico_controller.yaml",
             "sources/mocap_live.yaml",
             "sources/h5_replay.yaml",
             "producers/ik.yaml",
@@ -41,8 +40,6 @@ class Task8ConfigTreeTest(unittest.TestCase):
             "replay/target.yaml",
             "replay/joint.yaml",
             "diagnostics/mocap_calibration.yaml",
-            "sessions/pico_sim.yaml",
-            "sessions/pico_real.yaml",
             "sessions/mocap_live_sim.yaml",
             "sessions/mocap_live_real.yaml",
             "sessions/h5_sim.yaml",
@@ -54,7 +51,7 @@ class Task8ConfigTreeTest(unittest.TestCase):
         self.assertTrue(all((CONFIG / path).is_file() for path in required))
 
     def test_session_config_cannot_copy_router_or_ik_authority(self) -> None:
-        session = yaml.safe_load((CONFIG / "sessions/pico_sim.yaml").read_text())
+        session = yaml.safe_load((CONFIG / "sessions/mocap_live_sim.yaml").read_text())
         self.assertNotIn("router_endpoint", session)
         self.assertNotIn("ik_backend", session)
         ik = yaml.safe_load((CONFIG / "producers/ik.yaml").read_text())
@@ -102,9 +99,8 @@ class Task8ConfigTreeTest(unittest.TestCase):
             self.assertIn("arm_ik_producer", script)
             self.assertIn("mujoco_executor", script)
             self.assertNotIn("legacy", script.lower())
-        self.assertIn("pico_controller_source", doctor)
-        cmake = (ROOT / "src" / "pico_body_tianji" / "CMakeLists.txt").read_text(encoding="utf-8")
-        python_install = cmake.split("install(\n  DIRECTORY pico_body_tianji", 1)[1].split("install(\n  DIRECTORY assets", 1)[0]
+        cmake = (ROOT / "src" / "tianji_teleop" / "CMakeLists.txt").read_text(encoding="utf-8")
+        python_install = cmake.split("install(\n  DIRECTORY tianji_teleop", 1)[1].split("install(\n  DIRECTORY assets", 1)[0]
         self.assertIn('PATTERN "__pycache__" EXCLUDE', python_install)
         self.assertNotIn('PATTERN "mode"', python_install)
         self.assertIn("--delete-excluded", deploy)
@@ -119,20 +115,20 @@ class Task8LauncherTest(unittest.TestCase):
 
     def test_confirmed_real_launcher_issues_sealed_capability(self) -> None:
         command = (
-            "from pico_body_tianji.executors.marvin.preflight import "
+            "from tianji_teleop.executors.marvin.preflight import "
             "trusted_real_capability; print(trusted_real_capability().admitted)"
         )
         result = subprocess.run(
             [
                 sys.executable,
                 str(SCRIPTS / "run_confirmed_real_session.py"),
-                "--profile", "h5_real", "--speed", "0.25", "--yaw-deg", "0",
+                "--profile", "h5_real", "--speed", "1", "--yaw-deg", "0",
                 "--", sys.executable, "-c", command,
             ],
             cwd=ROOT,
             text=True,
             capture_output=True,
-            env={**os.environ, "PYTHONPATH": str(ROOT / "src/pico_body_tianji")},
+            env={**os.environ, "PYTHONPATH": str(ROOT / "src/tianji_teleop")},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "True")
@@ -140,7 +136,7 @@ class Task8LauncherTest(unittest.TestCase):
             [
                 sys.executable,
                 str(SCRIPTS / "run_confirmed_real_session.py"),
-                "--profile", "h5_real", "--speed", "1", "--yaw-deg", "0",
+                "--profile", "h5_real", "--speed", "1.01", "--yaw-deg", "0",
                 "--", sys.executable, "-c", "print('must not run')",
             ],
             cwd=ROOT,
@@ -148,7 +144,7 @@ class Task8LauncherTest(unittest.TestCase):
             capture_output=True,
         )
         self.assertEqual(rejected.returncode, 2)
-        self.assertIn("speed must be in (0, 0.25]", rejected.stderr)
+        self.assertIn("speed must be in (0, 1]", rejected.stderr)
 
     def test_replay_record_is_rejected_before_router_access(self) -> None:
         result = subprocess.run(
@@ -303,8 +299,8 @@ class Task8LauncherTest(unittest.TestCase):
                     "PATH": f"{bin_dir}:{env['PATH']}",
                     "CAPTURE": str(capture),
                     "REAL_PYTHON": sys.executable,
-                    "PICO_TIANJI_NODE_LIST_OVERRIDE": "",
-                    "PICO_TIANJI_RUNTIME_DIR": str(root / "runtime"),
+                    "TIANJI_TELEOP_NODE_LIST_OVERRIDE": "",
+                    "TIANJI_TELEOP_RUNTIME_DIR": str(root / "runtime"),
                     "TIANJI_VALIDATION_HAND_MODE": "retarget",
                 }
             )

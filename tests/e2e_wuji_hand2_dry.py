@@ -12,10 +12,10 @@ import unittest
 
 import numpy as np
 
-from pico_body_tianji.protocol.messages import HandTargetCommand, ProtocolEnvelope, SessionState
-from pico_body_tianji.zenoh_util import open_session
-from pico_body_tianji.executors.wuji_hand2.config import WujiHandConfig
-from pico_body_tianji.executors.wuji_hand2.node import _retarget_keypoints
+from tianji_teleop.protocol.messages import HandTargetCommand, ProtocolEnvelope, SessionState
+from tianji_teleop.zenoh_util import open_session
+from tianji_teleop.executors.wuji_hand2.config import WujiHandConfig
+from tianji_teleop.executors.wuji_hand2.node import _retarget_keypoints
 
 
 class WujiHand2DryRunTest(unittest.TestCase):
@@ -61,10 +61,10 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
         router = os.environ.get("TIANJI_ROUTER_ZID", "")
         if not endpoint or not router:
             raise unittest.SkipTest("managed router endpoint unavailable")
-        root = Path(os.environ.get("PICO_BODY_TIANJI_BUNDLE_ROOT", Path(__file__).parents[1]))
+        root = Path(os.environ.get("TIANJI_TELEOP_BUNDLE_ROOT", Path(__file__).parents[1]))
         candidates = (
-            root / "staging/ik/lib/pico_body_tianji/wuji_hand2_bridge",
-            root / "runtime/pico_body_tianji/lib/pico_body_tianji/wuji_hand2_bridge.bin",
+            root / "staging/ik/lib/tianji_teleop/wuji_hand2_bridge",
+            root / "runtime/tianji_teleop/lib/tianji_teleop/wuji_hand2_bridge.bin",
         )
         binary = next((path for path in candidates if path.is_file()), None)
         if binary is None:
@@ -96,7 +96,7 @@ class WujiHand2ProcessDryRunTest(unittest.TestCase):
             "TIANJI_HAND_PRODUCER_INSTANCE_ID": cls.producer_instance,
             "TIANJI_HAND_INPUT_INSTANCE_ID": cls.source_instance,
             "TIANJI_HAND_LOGICAL_PRODUCER_ID": "validation-wuji-retarget",
-            "TIANJI_WUJI_CONFIG": str(root / "src/pico_body_tianji/config/robot/wuji_hand2.yaml"),
+            "TIANJI_WUJI_CONFIG": str(root / "src/tianji_teleop/config/robot/wuji_hand2.yaml"),
             "TIANJI_RUN_ID": "validation-wuji-run",
             "TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID": "validation-supervisor",
             "LD_LIBRARY_PATH": str(root / "vendor/wuji-sdk/lib") + (":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else ""),

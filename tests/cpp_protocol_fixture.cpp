@@ -1,4 +1,4 @@
-#include "pico_body_tianji/protocol/json_parser.hpp"
+#include "tianji_teleop/protocol/json_parser.hpp"
 
 #include <cmath>
 #include <iostream>
@@ -6,9 +6,9 @@
 #include <string>
 
 namespace {
-using pico_body_tianji::protocol::field;
-using pico_body_tianji::protocol::require_exact_fields;
-using pico_body_tianji::protocol::StrictJsonParser;
+using tianji_teleop::protocol::field;
+using tianji_teleop::protocol::require_exact_fields;
+using tianji_teleop::protocol::StrictJsonParser;
 
 void parse_target(const std::string &payload, const std::string &router, const std::string &side) {
   const auto root = StrictJsonParser::parse(payload);
@@ -23,9 +23,9 @@ void parse_target(const std::string &payload, const std::string &router, const s
       field(root, "frame_id").as_string("frame_id") != (side == "left" ? "Base_L" : "Base_R")) {
     throw std::invalid_argument("target identity/frame mismatch");
   }
-  const auto quaternion = pico_body_tianji::protocol::vector_field(root, "orientation_xyzw", 4);
-  const auto elbow = pico_body_tianji::protocol::vector_field(root, "elbow_reference_direction", 3);
-  (void)pico_body_tianji::protocol::vector_field(root, "position_m", 3);
+  const auto quaternion = tianji_teleop::protocol::vector_field(root, "orientation_xyzw", 4);
+  const auto elbow = tianji_teleop::protocol::vector_field(root, "elbow_reference_direction", 3);
+  (void)tianji_teleop::protocol::vector_field(root, "position_m", 3);
   const auto qnorm = std::sqrt(quaternion[0] * quaternion[0] + quaternion[1] * quaternion[1] + quaternion[2] * quaternion[2] + quaternion[3] * quaternion[3]);
   const auto enorm = std::sqrt(elbow[0] * elbow[0] + elbow[1] * elbow[1] + elbow[2] * elbow[2]);
   if (qnorm < 0.999 || qnorm > 1.001 || enorm < 1e-8) throw std::invalid_argument("invalid target geometry");
@@ -50,12 +50,12 @@ void parse_command(const std::string &payload, const std::string &router, const 
   }
   const auto mode = field(root, "mode").as_string("mode");
   if (mode != "idle" && mode != "teleop" && mode != "returning") throw std::invalid_argument("invalid command mode");
-  const auto names = pico_body_tianji::protocol::string_array_field(root, "names", 7);
+  const auto names = tianji_teleop::protocol::string_array_field(root, "names", 7);
   for (std::size_t index = 0; index < names.size(); ++index) {
     const auto expected = "Joint" + std::to_string(index + 1) + (side == "left" ? "_L" : "_R");
     if (names[index] != expected) throw std::invalid_argument("command joint order mismatch");
   }
-  (void)pico_body_tianji::protocol::vector_field(root, "position_rad", 7);
+  (void)tianji_teleop::protocol::vector_field(root, "position_rad", 7);
   (void)field(root, "publisher_instance_id").as_string("publisher_instance_id");
   (void)field(root, "producer").as_string("producer");
   (void)field(root, "sequence").as_uint("sequence");

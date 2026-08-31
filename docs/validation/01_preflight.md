@@ -29,7 +29,7 @@ pixi run doctor
 5. 对 H5 记录 SHA256、Motive rigid ID；对真实手部确认模式是 retarget 或 direct 且只有一个 hand command publisher。
 6. 建立结果根目录并记录预检事件：
    ```bash
-   pixi run validation-run -- --case pico_sim --output ROOT --fake --headless \
+   pixi run validation-run -- --case mocap_live_sim --output ROOT --fake --headless \
      --operator-event preflight='operator checked physical E-stop and workspace'
    ```
    此命令只验证 bundle 链路，不能作为设备 pass。
