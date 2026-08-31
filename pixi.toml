@@ -15,6 +15,7 @@ packaging = ">=24,<26"
 lark = ">=1.1,<2"
 netifaces = ">=0.11,<1"
 h5py = ">=3.10,<4"
+pytorch-cpu = ">=2.7,<3"
 
 [pypi-dependencies]
 # zenoh-python：PyPI 包名 eclipse-zenoh，import 名 zenoh
@@ -36,6 +37,7 @@ wuji_hand2_real = { cmd = "bash scripts/run_session.sh --profile h5_real" }
 validation-run = "python scripts/validation/run_case.py"
 validation-analyze = "python scripts/validation/analyze_runs.py"
 validation-scan-real = "python scripts/validation/scan_real_preflight.py"
+rl_infer = "python scripts/regrind_cpu_infer.py"
 # C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。
 # 编译器使用 Ubuntu 24.04 系统 GCC 13；脚本会在编译前严格检查它们与
 # runtime 的 ABI 版本。
