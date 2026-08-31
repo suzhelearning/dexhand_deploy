@@ -1,9 +1,11 @@
 rate: 50.0
-checkpoint_sha256: c2373a187e823209204abfd2a7c07987aa7cd3c674029c9ca0c20dfbac13e211
+checkpoint_sha256: ecc3620e1cee0116ce91f458086f1a85f6ddf7b8cedc5cbd4ab59f1ea871bb50
 reference_sha256: aa73644d97d7de2a8f7a7453bec4a5f103ea7a1003f8bf16f13906fcc8e4f5ad
 motive_stale_s: 0.04
 hand_stale_s: 0.04
 maximum_input_skew_s: 0.02
+wrist_frame0_position_tolerance_m: 0.01
+wrist_frame0_orientation_tolerance_deg: 5.0
 hammer_start_position_tolerance_m: 0.01
 hammer_start_orientation_tolerance_deg: 5.0
 hand_maximum_step_rad: 0.01

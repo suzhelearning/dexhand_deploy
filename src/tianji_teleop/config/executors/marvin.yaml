@@ -1,4 +1,5 @@
 robot_ip: ""
+connection_wait_s: 10.0
 rate_hz: 200.0
 velocity_ratio: 10
 acceleration_ratio: 10

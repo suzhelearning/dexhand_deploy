@@ -681,6 +681,10 @@ def main(argv: list[str] | None = None) -> int:
             params=params,
         )
         if not node.connect():
+            _LOG.error(
+                "Marvin startup failed: %s",
+                node.readiness.last_error or node.status.error or node.phase,
+            )
             return 1
         node.run()
     finally:

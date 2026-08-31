@@ -25,8 +25,10 @@
 from __future__ import annotations
 import ctypes
 
+import glob
 import os
 import select
+import struct
 import sys
 import termios
 import threading
@@ -97,11 +99,70 @@ def raw_keyboard(
             break
 
 
+class _EvdevKeyState:
+    _EVENT = struct.Struct("@llHHi")
+    _KEY_CODES = {"Return": 28, "KP_Enter": 96}
+
+    def __init__(
+        self,
+        key_names: tuple[str, ...],
+        *,
+        event_paths: tuple[str, ...] | None = None,
+    ) -> None:
+        try:
+            self._keycodes = {self._KEY_CODES[name] for name in key_names}
+        except KeyError as exc:
+            raise RuntimeError(f"Wayland 不支持按键 {exc.args[0]!r}") from exc
+        paths = list(event_paths or sorted(glob.glob("/dev/input/by-id/*-event-kbd")))
+        if not paths:
+            paths = sorted(glob.glob("/dev/input/event*"))
+        self._fds: list[int] = []
+        self._buffers: dict[int, bytes] = {}
+        for path in paths:
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+            except OSError:
+                continue
+            self._fds.append(fd)
+            self._buffers[fd] = b""
+        if not self._fds:
+            raise RuntimeError(
+                "Wayland 无法读取物理键盘；请将当前用户加入 input 组并重新登录"
+            )
+        self._pressed: dict[tuple[int, int], bool] = {}
+
+    def is_pressed(self) -> bool:
+        for fd in self._fds:
+            data = self._buffers[fd]
+            while True:
+                try:
+                    chunk = os.read(fd, 4096)
+                except BlockingIOError:
+                    break
+                except OSError as exc:
+                    raise RuntimeError(f"Wayland 键盘读取失败：{exc}") from exc
+                if not chunk:
+                    break
+                data += chunk
+            complete = len(data) - len(data) % self._EVENT.size
+            for offset in range(0, complete, self._EVENT.size):
+                _, _, event_type, code, value = self._EVENT.unpack_from(data, offset)
+                if event_type == 1 and code in self._keycodes:
+                    self._pressed[(fd, code)] = value != 0
+            self._buffers[fd] = data[complete:]
+        return any(self._pressed.values())
+
+    def close(self) -> None:
+        for fd in self._fds:
+            os.close(fd)
+        self._fds.clear()
+
+
 class X11KeyState:
-    """通过 XQueryKeymap 读取物理按键状态，包含按下与松开。
+    """读取物理按键状态，包含按下与松开。
 
     termios 只能收到字节，无法区分按住与松开；自动轨迹的 deadman
-    因此必须使用 X11 键位图。查询失败时构造函数抛错，调用方应禁止
+    因此 X11 使用键位图，Wayland 使用 evdev。查询失败时构造函数抛错，调用方应禁止
     自动运动，不能退化为按键自动重复超时。
     """
 
@@ -113,6 +174,11 @@ class X11KeyState:
     ) -> None:
         if not key_names:
             raise ValueError("key_names 不能为空")
+        self._evdev: _EvdevKeyState | None = None
+        if display_name is None and os.environ.get("XDG_SESSION_TYPE") == "wayland":
+            self._evdev = _EvdevKeyState(key_names)
+            self._display = None
+            return
         display_spec = (
             os.environ.get("DISPLAY")
             if display_name is None
@@ -168,6 +234,8 @@ class X11KeyState:
         self._keymap = ctypes.create_string_buffer(32)
 
     def is_pressed(self) -> bool:
+        if self._evdev is not None:
+            return self._evdev.is_pressed()
         if self._display is None:
             raise RuntimeError("X11 键位查询器已经关闭")
         self._x11.XQueryKeymap(self._display, self._keymap)
@@ -178,6 +246,10 @@ class X11KeyState:
         )
 
     def close(self) -> None:
+        if self._evdev is not None:
+            self._evdev.close()
+            self._evdev = None
+            return
         if self._display is None:
             return
         self._x11.XCloseDisplay(self._display)

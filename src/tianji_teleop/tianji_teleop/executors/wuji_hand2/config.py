@@ -78,9 +78,14 @@ class WujiHandConfig:
         return cls.from_mapping(value)
 
     def validate_positions(self, values: Sequence[float], *, field: str = "position_rad") -> list[float]:
-        if not isinstance(values, (list, tuple)) or len(values) != 20:
+        if isinstance(values, (str, bytes, Mapping)):
             raise ValueError(f"{field} must contain 20 values")
-        result = [float(value) for value in values]
+        try:
+            result = [float(value) for value in values]
+        except TypeError as exc:
+            raise ValueError(f"{field} must contain 20 values") from exc
+        if len(result) != 20:
+            raise ValueError(f"{field} must contain 20 values")
         if not all(math.isfinite(value) for value in result):
             raise ValueError(f"{field} must contain finite values")
         if any(value < lo or value > hi for value, lo, hi in zip(result, self.lower_limits_rad, self.upper_limits_rad)):

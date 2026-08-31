@@ -61,7 +61,9 @@ class Task8ConfigTreeTest(unittest.TestCase):
 
     def test_real_device_defaults_are_canonical_and_used(self) -> None:
         devices = yaml.safe_load((CONFIG / "robot/devices.yaml").read_text())
+        marvin = yaml.safe_load((CONFIG / "executors/marvin.yaml").read_text())
         self.assertEqual(devices["marvin"]["ip"], "192.168.1.190")
+        self.assertGreaterEqual(float(marvin["connection_wait_s"]), 5.0)
         self.assertEqual(devices["wuji_hand2"]["right"]["ip"], "192.168.1.111")
         self.assertEqual(
             devices["wuji_hand2"]["right"]["serial"], "WH2KA01260814006"
@@ -104,7 +106,19 @@ class Task8ConfigTreeTest(unittest.TestCase):
         self.assertEqual(profile["hand_executor"], "wuji_hand2")
         launcher = (SCRIPTS / "run_session.sh").read_text(encoding="utf-8")
         self.assertIn('hand_producer_id_array+=("regrind_policy")', launcher)
+        self.assertIn('launch regrind_alignment_viewer', launcher)
         self.assertTrue(os.access(ROOT / "src/tianji_teleop/scripts/regrind_policy", os.X_OK))
+
+    def test_real_launcher_starts_hand_feedback_before_arm_executor(self) -> None:
+        launcher = (SCRIPTS / "run_session.sh").read_text(encoding="utf-8")
+        marker = 'if [[ "${required_capability}" == real ]]; then\n  launch_arm_producer\n  launch source'
+        start = launcher.index(marker)
+        real_launches = launcher[start:launcher.index("\nelse\n", start)]
+        self.assertLess(
+            real_launches.index("launch_hand_executor"),
+            real_launches.index("launch_arm_executor"),
+        )
+
     def test_deploy_and_doctor_match_only_deleted_entries(self) -> None:
         deploy = (SCRIPTS / "deploy_ik_runtime.sh").read_text(encoding="utf-8")
         doctor = (SCRIPTS / "doctor.sh").read_text(encoding="utf-8")

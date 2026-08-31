@@ -101,6 +101,13 @@ class TargetMapperTest(unittest.TestCase):
         self.assertTrue(diagnostics.linear_speed_limited)
         self.assertTrue(diagnostics.angular_speed_limited)
 
+        conditioner.synchronize([0.05, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])
+        held_position, _, held = conditioner.condition(
+            [0.05, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]
+        )
+        np.testing.assert_allclose(held_position, [0.05, 0.0, 0.0])
+        self.assertEqual(held.applied_linear_speed_m_s, 0.0)
+
     def test_explicit_home_zsp_overrides_legacy_default(self) -> None:
         mapper = EndEffectorTargetMapper(
             self.config,

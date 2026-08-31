@@ -39,7 +39,7 @@ while (($#)); do
       printf '%s\n' \
         '用法: run_session.sh --profile PROFILE [--record PATH] [--confirm-real] [--h5 PATH] [--speed RATE] [--viewer|--headless]' \
         '显示模式：h5_sim 默认打开 MuJoCo viewer；追加 --headless 可显式启用无窗口模式。' \
-        '其他 profile 保持 executor config 默认；--viewer 只允许 simulation + MuJoCo executor。'
+        'regrind_real 可用 --viewer 打开只读 frame0 对齐窗口；其他 profile 保持 executor config 默认。'
       exit 0 ;;
     --) shift; extra_args+=("$@"); break ;;
     *)
@@ -121,16 +121,19 @@ if [[ -z "${display_mode}" ]]; then
     display_mode=config
   fi
 fi
-if [[ "${display_mode}" != config && "${arm_executor_config}" != executors/mujoco.yaml ]]; then
+regrind_alignment_viewer=false
+if [[ "${profile}" == regrind_real && "${display_mode}" == viewer ]]; then
+  regrind_alignment_viewer=true
+elif [[ "${display_mode}" != config && "${arm_executor_config}" != executors/mujoco.yaml ]]; then
   printf '%s\n' '错误：--viewer/--headless 仅适用于 MuJoCo executor。' >&2
   exit 2
 fi
-if [[ "${display_mode}" == viewer && "${required_capability}" != simulation ]]; then
+if [[ "${display_mode}" == viewer && "${required_capability}" != simulation && "${regrind_alignment_viewer}" != true ]]; then
   printf '%s\n' '错误：--viewer 只允许 simulation + MuJoCo executor。' >&2
   exit 2
 fi
 arm_display_args=()
-if [[ "${display_mode}" == viewer ]]; then
+if [[ "${display_mode}" == viewer && "${regrind_alignment_viewer}" != true ]]; then
   arm_display_args+=(--viewer)
 elif [[ "${display_mode}" == headless ]]; then
   arm_display_args+=(--headless)
@@ -483,6 +486,14 @@ if [[ -n "${record_path}" ]]; then
   launch recorder "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${recorder_instance}" TIANJI_RECORD_PATH="${record_path}" TIANJI_RECORD_SOURCE_TYPE="${source_id}" TIANJI_RECORDING_CONFIG="$(canonical_config recording/session.yaml)" python -m tianji_teleop.recording.session_recorder
 fi
 launch coordinator "${base_env[@]}" TIANJI_COORDINATOR_INSTANCE_ID="${coordinator_id}" TIANJI_COORDINATOR_CONFIG="$(canonical_config "${coordinator_config}")" python "${BUNDLE_ROOT}/src/tianji_teleop/scripts/arm_command_coordinator"
+if [[ "${regrind_alignment_viewer}" == true ]]; then
+  viewer_entry="${BUNDLE_ROOT}/scripts/regrind_live_infer.py"
+  [[ -f "${viewer_entry}" ]] || {
+    printf '错误：regrind_real viewer 入口不存在：%s\n' "${viewer_entry}" >&2
+    exit 1
+  }
+  launch regrind_alignment_viewer "${base_env[@]}" python "${viewer_entry}" "${extra_args[@]}" --viewer
+fi
 if [[ "${profile}" == h5_real && "${hand_overlay}" == mujoco ]]; then
   overlay_entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/h5_wrist_diagnostic"
   [[ -x "${overlay_entry}" ]] || {
@@ -540,8 +551,8 @@ launch_arm_producer() {
 if [[ "${required_capability}" == real ]]; then
   launch_arm_producer
   launch source "${source_args[@]}"
-  launch_arm_executor
   launch_hand_executor
+  launch_arm_executor
 else
   launch_arm_executor
   launch_hand_executor

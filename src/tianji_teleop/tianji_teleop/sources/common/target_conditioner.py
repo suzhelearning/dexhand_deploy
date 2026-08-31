@@ -134,6 +134,16 @@ class TargetConditioner:
         self._linear_velocity = np.zeros(3, dtype=np.float64)
         self._angular_velocity = np.zeros(3, dtype=np.float64)
 
+    def synchronize(self, position, quaternion) -> None:
+        """Resume limiting from a measured hold pose without a target jump."""
+        self._position = _finite_vector(position, size=3, label="hold position")
+        quaternion = _finite_vector(quaternion, size=4, label="hold quaternion")
+        if np.linalg.norm(quaternion) < 1.0e-8:
+            raise ValueError("hold quaternion must be nonzero")
+        self._rotation = R.from_quat(quaternion)
+        self._linear_velocity.fill(0.0)
+        self._angular_velocity.fill(0.0)
+
     def condition(
         self, position, quaternion
     ) -> tuple[np.ndarray, np.ndarray, TargetConditioningDiagnostics]:
