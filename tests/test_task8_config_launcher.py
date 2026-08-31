@@ -30,6 +30,7 @@ class Task8ConfigTreeTest(unittest.TestCase):
             "robot/devices.yaml",
             "sources/mocap_live.yaml",
             "sources/h5_replay.yaml",
+            "sources/regrind_policy.yaml",
             "producers/ik.yaml",
             "producers/policy_hold.yaml",
             "coordinator/arm.yaml",
@@ -44,6 +45,7 @@ class Task8ConfigTreeTest(unittest.TestCase):
             "sessions/mocap_live_real.yaml",
             "sessions/h5_sim.yaml",
             "sessions/h5_real.yaml",
+            "sessions/regrind_real.yaml",
             "sessions/target_replay_sim.yaml",
             "sessions/joint_replay_sim.yaml",
             "sessions/diagnostic_mocap_calibration_sim.yaml",
@@ -79,7 +81,7 @@ class Task8ConfigTreeTest(unittest.TestCase):
                 bad.unlink()
 
     def test_hand_enabled_profiles_select_one_hand_executor_authority(self) -> None:
-        for profile in ("h5_sim", "h5_real", "target_replay_sim", "joint_replay_sim"):
+        for profile in ("h5_sim", "h5_real", "regrind_real", "target_replay_sim", "joint_replay_sim"):
             with self.subTest(profile=profile):
                 value = yaml.safe_load((CONFIG / "sessions" / f"{profile}.yaml").read_text())
                 self.assertEqual(value["hand_executor"], "wuji_hand2")
@@ -92,6 +94,17 @@ class Task8ConfigTreeTest(unittest.TestCase):
         self.assertIn("TIANJI_RECORDING_CONFIG=", launcher)
         self.assertIn('hand_args+=(--hand-sides "${active_hand_sides}" --hand-overlay)', launcher)
         self.assertIn('hand_executor}" == wuji_hand2', launcher)
+
+    def test_regrind_real_uses_direct_wuji_and_existing_arm_ik(self) -> None:
+        profile = yaml.safe_load((CONFIG / "sessions/regrind_real.yaml").read_text())
+        self.assertEqual(profile["required_capability"], "real")
+        self.assertEqual(profile["arm_producer_config"], "producers/ik.yaml")
+        self.assertEqual(profile["arm_executor_config"], "executors/marvin.yaml")
+        self.assertEqual(profile["hand_mode"], "direct")
+        self.assertEqual(profile["hand_executor"], "wuji_hand2")
+        launcher = (SCRIPTS / "run_session.sh").read_text(encoding="utf-8")
+        self.assertIn('hand_producer_id_array+=("regrind_policy")', launcher)
+        self.assertTrue(os.access(ROOT / "src/tianji_teleop/scripts/regrind_policy", os.X_OK))
     def test_deploy_and_doctor_match_only_deleted_entries(self) -> None:
         deploy = (SCRIPTS / "deploy_ik_runtime.sh").read_text(encoding="utf-8")
         doctor = (SCRIPTS / "doctor.sh").read_text(encoding="utf-8")

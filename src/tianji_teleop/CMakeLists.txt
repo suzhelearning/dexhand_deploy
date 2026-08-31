@@ -254,6 +254,7 @@ install(
   PROGRAMS
     scripts/mocap_live
     scripts/mocap_h5_replay
+    scripts/regrind_policy
     scripts/mocap_calibration
     scripts/target_replay
     scripts/joint_replay

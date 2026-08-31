@@ -52,7 +52,7 @@ if [[ -z "${profile}" ]]; then
   exit 2
 fi
 case "${profile}" in
-  mocap_live_sim|mocap_live_real|h5_sim|h5_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim) ;;
+  mocap_live_sim|mocap_live_real|h5_sim|h5_real|regrind_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim) ;;
   *) printf '错误：未知 session profile: %s\n' "${profile}" >&2; exit 2 ;;
 esac
 if [[ "${profile}" == target_replay_sim || "${profile}" == joint_replay_sim || "${profile}" == wuji_direct_real ]]; then
@@ -63,6 +63,10 @@ if [[ "${profile}" == target_replay_sim || "${profile}" == joint_replay_sim || "
 fi
 if [[ "${profile}" == diagnostic_mocap_calibration_sim && -n "${record_path}" ]]; then
   printf '%s\n' 'diagnostic profile cannot be recorded: no session raw schema' >&2
+  exit 2
+fi
+if [[ "${profile}" == regrind_real && -n "${record_path}" ]]; then
+  printf '%s\n' 'regrind_real recording is not implemented yet' >&2
   exit 2
 fi
 profile_config="$(canonical_config "sessions/${profile}.yaml")"
@@ -169,7 +173,7 @@ if [[ -n "${record_path}" ]]; then
 fi
 source_name="$(basename -- "${source_config}" .yaml)"
 case "${source_name}" in
-  mocap_live|h5_replay|target|joint|joint_real) ;;
+  mocap_live|h5_replay|regrind_policy|target|joint|joint_real) ;;
   mocap_calibration) ;;
   *) printf '错误：source config 不在 canonical source/replay/diagnostic 树: %s\n' "${source_config}" >&2; exit 2 ;;
 esac
@@ -266,6 +270,9 @@ if [[ -n "${active_hand_sides}" ]]; then
     hand_executor_instance_array+=("${mapped_hand_executor:-$(new_instance_id)}")
     if [[ "${source_id}" == h5_replay && "${hand_mode}" == direct ]]; then
       hand_producer_id_array+=("h5_direct")
+      hand_producer_instance_array+=("${source_instance}")
+    elif [[ "${source_id}" == regrind_policy && "${hand_mode}" == direct ]]; then
+      hand_producer_id_array+=("regrind_policy")
       hand_producer_instance_array+=("${source_instance}")
     elif [[ "${source_id}" == joint_replay ]]; then
       hand_producer_id_array+=("joint_replay")
