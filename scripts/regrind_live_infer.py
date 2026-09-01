@@ -21,6 +21,7 @@ from tianji_teleop.executors.mujoco.node import _frame_from_wrist_axis_geoms
 from tianji_teleop.executors.wuji_hand2.config import WujiHandConfig
 from tianji_teleop.mujoco_urdf import portable_mujoco_urdf
 from tianji_teleop.protocol import topics
+from tianji_teleop.protocol.messages import ComponentStatus, ProtocolError
 from tianji_teleop.regrind_policy import action_to_targets, build_observation, infer, load_actor, load_reference
 from tianji_teleop.sources.mocap.h5 import compose_pose, invert_pose
 from tianji_teleop.sources.mocap.regrind import RegrindMotiveTracker
@@ -77,7 +78,7 @@ def _build_alignment_model(reference_path: Path, mujoco_module):
 
 
 class _ExpectedHandOverlay:
-    """Frame0 Wuji2 hand geometry expressed at the expected wrist pose."""
+    """Reference Wuji2 hand geometry expressed at the expected wrist pose."""
 
     _RGBA = np.asarray([0.1, 1.0, 0.2, 0.32], dtype=np.float32)
 
@@ -85,8 +86,13 @@ class _ExpectedHandOverlay:
         data = mujoco_module.MjData(model)
         data.qpos[:] = qpos
         hand = WujiHandConfig.load()
-        values = hand.validate_positions(joints, field="reference frame0 joints")
-        for name, value in zip(hand.sdk_joint_names(side="right"), values):
+        joint_frames = np.asarray(joints, dtype=np.float64)
+        if joint_frames.shape == (20,):
+            joint_frames = joint_frames[None, :]
+        if joint_frames.ndim != 2 or joint_frames.shape[1] != 20:
+            raise ValueError("reference joints must have shape [frames,20]")
+        addresses = []
+        for name in hand.sdk_joint_names(side="right"):
             model_name = (
                 name.replace("_mcp_", "_finger_mcp_")
                 .replace("_pip", "_finger_pip")
@@ -96,9 +102,9 @@ class _ExpectedHandOverlay:
             joint_id = mujoco_module.mj_name2id(
                 model, mujoco_module.mjtObj.mjOBJ_JOINT, model_name
             )
-            data.qpos[model.jnt_qposadr[joint_id]] = value
-        mujoco_module.mj_forward(model, data)
+            addresses.append(int(model.jnt_qposadr[joint_id]))
         wrist_from_world = invert_pose(home_wrist)
+        geom_ids = []
         self._geoms = []
         for geom_id in range(model.ngeom):
             mesh_id = int(model.geom_dataid[geom_id])
@@ -110,19 +116,39 @@ class _ExpectedHandOverlay:
             )
             if int(model.geom_group[geom_id]) != 1 or not (mesh_name or "").startswith("wuji2_r_"):
                 continue
-            pose = np.concatenate((
-                data.geom_xpos[geom_id],
-                Rotation.from_matrix(data.geom_xmat[geom_id].reshape(3, 3)).as_quat(),
-            ))
+            geom_ids.append(geom_id)
             self._geoms.append((
                 int(model.geom_type[geom_id]),
                 model.geom_size[geom_id].copy(),
                 mesh_id,
-                compose_pose(wrist_from_world, pose),
             ))
+        frames = []
+        for frame_index, frame in enumerate(joint_frames):
+            values = hand.validate_positions(
+                frame, field=f"reference joints[{frame_index}]"
+            )
+            for address, value in zip(addresses, values):
+                data.qpos[address] = value
+            mujoco_module.mj_forward(model, data)
+            frames.append([
+                compose_pose(
+                    wrist_from_world,
+                    np.concatenate((
+                        data.geom_xpos[geom_id],
+                        Rotation.from_matrix(
+                            data.geom_xmat[geom_id].reshape(3, 3)
+                        ).as_quat(),
+                    )),
+                )
+                for geom_id in geom_ids
+            ])
+        self._frames = np.asarray(frames, dtype=np.float64)
 
-    def draw(self, scene, mujoco_module, expected_wrist) -> None:
-        for geom_type, size, data_id, wrist_from_geom in self._geoms:
+    def draw(self, scene, mujoco_module, expected_wrist, frame_index=0) -> None:
+        index = min(max(int(frame_index), 0), len(self._frames) - 1)
+        for (geom_type, size, data_id), wrist_from_geom in zip(
+            self._geoms, self._frames[index]
+        ):
             if scene.ngeom >= scene.maxgeom:
                 break
             pose = compose_pose(expected_wrist, wrist_from_geom)
@@ -141,6 +167,43 @@ class _ExpectedHandOverlay:
             scene.ngeom += 1
 
 
+class _PolicyFrameTracker:
+    def __init__(self, *, router_zid: str, source_instance: str, frame_count: int) -> None:
+        self._router_zid = router_zid
+        self._source_instance = source_instance
+        self._frame_count = int(frame_count)
+        self._sequence = -1
+        self._current = ("waiting", 0)
+
+    def on_status(self, sample) -> bool:
+        try:
+            status = ComponentStatus.from_dict(RealStateMirror._payload(sample))
+            frame_index = status.diagnostics.get("frame_index")
+            if (
+                status.component_role != "source"
+                or status.component_id != "regrind_policy"
+                or status.router_zid != self._router_zid
+                or status.publisher_instance_id != self._source_instance
+                or isinstance(frame_index, bool)
+                or not isinstance(frame_index, int)
+                or not 0 <= frame_index <= self._frame_count
+                or status.sequence <= self._sequence
+            ):
+                return False
+        except (ProtocolError, TypeError, ValueError):
+            return False
+        self._sequence = status.sequence
+        reference_index = (
+            min(max(frame_index - 1, 0), self._frame_count - 1)
+            if status.phase == "running" else 0
+        )
+        self._current = (status.phase, reference_index)
+        return True
+
+    def current(self) -> tuple[str, int]:
+        return self._current
+
+
 def _run_alignment_viewer(
     reference_path: Path,
     reference,
@@ -154,7 +217,7 @@ def _run_alignment_viewer(
     model = _build_alignment_model(reference_path, mujoco)
     data = mujoco.MjData(model)
     router_zid = require_single_router(session, os.environ.get("TIANJI_ROUTER_ZID"))
-    _, arm_instance, hand_instance = _authority_instances(
+    source_instance, arm_instance, hand_instance = _authority_instances(
         router_zid, source_logical_id="regrind_policy"
     )
     mirror = RealStateMirror(
@@ -197,11 +260,17 @@ def _run_alignment_viewer(
     set_pose("live_hammer", current_hammer)
     mujoco.mj_forward(model, data)
     expected_hand = _ExpectedHandOverlay(
-        model, data.qpos, home_wrist, reference.joints[0], mujoco
+        model, data.qpos, home_wrist, reference.joints, mujoco
+    )
+    policy_frame = _PolicyFrameTracker(
+        router_zid=router_zid,
+        source_instance=source_instance,
+        frame_count=reference.frame_count,
     )
     subscriptions = (
         session.declare_subscriber(topics.ARM_STATE, mirror.on_arm_state),
         session.declare_subscriber(topics.hand_state("right"), mirror.on_hand_state),
+        session.declare_subscriber(topics.SOURCE_STATUS, policy_frame.on_status),
     )
     last_passed = False
     try:
@@ -222,6 +291,15 @@ def _run_alignment_viewer(
                 sample = live.latest()
                 age_s = float("inf") if sample is None else time.monotonic() - sample.received_at
                 if sample is not None:
+                    policy_phase, reference_index = policy_frame.current()
+                    reference_wrist = np.concatenate((
+                        reference.wrist_pos[reference_index],
+                        np.roll(reference.wrist_quat_wxyz[reference_index], -1),
+                    ))
+                    reference_hammer = np.concatenate((
+                        reference.object_pos[reference_index],
+                        np.roll(reference.object_quat_wxyz[reference_index], -1),
+                    ))
                     expected_wrist, expected_hammer, current_wrist, current_hammer = _alignment_scene_poses(
                         home_wrist,
                         live_home_wrist,
@@ -272,23 +350,26 @@ def _run_alignment_viewer(
                                 geom, mujoco.mjtGeom.mjGEOM_ARROW, width, start, end,
                             )
                             scene.ngeom += 1
-                        expected_hand.draw(scene, mujoco, expected_wrist)
+                        expected_hand.draw(
+                            scene, mujoco, expected_wrist, reference_index
+                        )
                     status = "PASS" if last_passed else ("STALE" if not fresh else "ADJUST")
                     viewer.set_texts((
                         mujoco.mjtFontScale.mjFONTSCALE_150,
                         mujoco.mjtGridPos.mjGRID_TOPLEFT,
                         "READ-ONLY  Solid robot: LIVE state\n"
-                        "Orange hammer: LIVE  Green hammer/hand: EXPECTED frame0\n"
+                        "Orange hammer: LIVE  Green hammer/hand: EXPECTED reference\n"
                         "Control terminal: s + hold Enter -> frame0\n"
                         "Then release, align hammer, press i; hold Enter -> infer\n"
                         "Yellow arrow: move live hammer toward target\n"
                         "Robot/Zenoh: +X forward(red), +Y left(green), +Z up(blue)\n"
                         "Correction in robot world XYZ (mm)\n"
                         "Position / orientation error\n"
-                        "Motive age\nStatus",
+                        "Motive age\nPolicy phase / reference frame\nStatus",
                         f"\n\n\n\n\n\n[{delta_mm[0]:+7.1f}, {delta_mm[1]:+7.1f}, {delta_mm[2]:+7.1f}]\n"
                         f"{position_error_mm:7.1f} mm / {orientation_error_deg:6.1f} deg\n"
-                        f"{age_s * 1000.0:7.1f} ms\n{status}",
+                        f"{age_s * 1000.0:7.1f} ms\n"
+                        f"{policy_phase} / {reference_index}\n{status}",
                     ))
                 else:
                     viewer.set_texts((

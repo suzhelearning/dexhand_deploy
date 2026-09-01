@@ -738,7 +738,7 @@ class RegrindPolicyNode:
                 next_tick += period
             if now >= next_status:
                 self._publish_status(now)
-                next_status += 0.2
+                next_status += period if self._phase == "running" else 0.2
             time.sleep(max(0.001, min(next_tick, next_status) - time.monotonic()))
 
     def close(self) -> None:

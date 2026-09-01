@@ -15,7 +15,11 @@ from tianji_teleop.sources.mocap.h5 import compose_pose, invert_pose
 from tianji_teleop.executors.wuji_hand2.config import WujiHandConfig
 from tianji_teleop.joint_state_model import urdf_joint_names
 from tianji_teleop.mujoco_urdf import portable_mujoco_urdf
-from tianji_teleop.protocol.messages import HAND_JOINT_NAMES, HandJointState
+from tianji_teleop.protocol.messages import (
+    HAND_JOINT_NAMES,
+    ComponentStatus,
+    HandJointState,
+)
 from tianji_teleop.regrind_policy import action_to_targets, quat_wxyz_to_rot6d
 from tianji_teleop.sources.regrind_policy_node import RegrindPolicyNode, _pose_error
 
@@ -141,14 +145,20 @@ class RegrindRealPreflightTest(unittest.TestCase):
         position, rotation = scope["_frame_from_wrist_axis_geoms"](model, data)
         home_wrist = np.concatenate((position, Rotation.from_matrix(rotation).as_quat()))
         overlay = scope["_ExpectedHandOverlay"](
-            model, data.qpos, home_wrist, np.asarray([0.1] * 20), mujoco
+            model,
+            data.qpos,
+            home_wrist,
+            np.asarray([[0.0] * 20, [0.1] * 20]),
+            mujoco,
         )
         home_scene = mujoco.MjvScene(model, 100)
         shifted_scene = mujoco.MjvScene(model, 100)
-        overlay.draw(home_scene, mujoco, home_wrist)
+        next_frame_scene = mujoco.MjvScene(model, 100)
+        overlay.draw(home_scene, mujoco, home_wrist, 0)
         shifted_wrist = home_wrist.copy()
         shifted_wrist[0] += 0.1
-        overlay.draw(shifted_scene, mujoco, shifted_wrist)
+        overlay.draw(shifted_scene, mujoco, shifted_wrist, 0)
+        overlay.draw(next_frame_scene, mujoco, home_wrist, 1)
 
         self.assertEqual(home_scene.ngeom, 22)
         self.assertEqual(shifted_scene.ngeom, 22)
@@ -159,6 +169,50 @@ class RegrindRealPreflightTest(unittest.TestCase):
             np.tile([0.1, 0.0, 0.0], (22, 1)),
             atol=1e-7,
         )
+        next_positions = np.stack(
+            [next_frame_scene.geoms[i].pos for i in range(22)]
+        )
+        self.assertGreater(
+            float(np.max(np.linalg.norm(next_positions - home_positions, axis=1))),
+            0.001,
+        )
+
+    def test_policy_frame_tracker_holds_frame0_until_running(self) -> None:
+        scope = runpy.run_path(
+            Path(__file__).resolve().parents[1] / "scripts/regrind_live_infer.py",
+            run_name="regrind_policy_frame_tracker_check",
+        )
+        tracker = scope["_PolicyFrameTracker"](
+            router_zid="router",
+            source_instance="source-instance",
+            frame_count=342,
+        )
+
+        def status(phase: str, frame_index: int, sequence: int = 1):
+            return ComponentStatus(
+                1,
+                sequence,
+                sequence,
+                "source",
+                "regrind_policy",
+                phase,
+                True,
+                True,
+                ["real"],
+                None,
+                {"frame_index": frame_index},
+                "source-instance",
+                "router",
+            ).to_dict()
+
+        self.assertTrue(tracker.on_status(status("ready", 17)))
+        self.assertEqual(tracker.current(), ("ready", 0))
+        self.assertTrue(tracker.on_status(status("running", 17, 2)))
+        self.assertEqual(tracker.current(), ("running", 16))
+        foreign = status("running", 30, 3)
+        foreign["publisher_instance_id"] = "foreign"
+        self.assertFalse(tracker.on_status(foreign))
+        self.assertEqual(tracker.current(), ("running", 16))
 
     def test_home_calibration_preserves_reference_frame0_delta(self) -> None:
         node = RegrindPolicyNode.__new__(RegrindPolicyNode)
