@@ -58,6 +58,21 @@ def _create_official_session() -> MarvinHardwareSession:
     return create_official_marvin_session()
 
 
+def _apply_speed_overrides(params: dict[str, Any]) -> None:
+    """Apply explicit real-arm speed overrides; connect validates 1..100."""
+    for env_name, parameter in (
+        ("TIANJI_MARVIN_VELOCITY_RATIO", "velocity_ratio"),
+        ("TIANJI_MARVIN_ACCELERATION_RATIO", "acceleration_ratio"),
+    ):
+        raw = os.environ.get(env_name)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            params[parameter] = int(raw)
+        except ValueError as exc:
+            raise RuntimeError(f"{env_name} must be an integer in [1, 100]") from exc
+
+
 class MarvinExecutor:
     """双臂 canonical final-command consumer与 Marvin SDK 安全边界。"""
 
@@ -669,6 +684,7 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("Marvin executor config must be a mapping")
         configured.update(params)
         params = configured
+    _apply_speed_overrides(params)
     session = open_session()
     node = None
     try:

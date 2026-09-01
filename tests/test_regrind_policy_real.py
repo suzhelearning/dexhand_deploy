@@ -6,6 +6,7 @@ import runpy
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -50,6 +51,149 @@ class RegrindRealPreflightTest(unittest.TestCase):
         wrist, error = node._fresh_arm_wrist(1.2)
         self.assertIsNone(wrist)
         self.assertIn("200 ms", error)
+
+    def test_reference_phase_waits_for_arm_tracking_and_ik_recovery(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        node._lock = threading.RLock()
+        node._router_zid = "router"
+        node._arm_producer_instance_id = "ik-instance"
+        node._arm_producer_status = None
+        node._arm_producer_received_at = 0.0
+        node._arm_producer_sequence = -1
+        node._arm_producer_input_error = None
+        node._params = {
+            "arm_stale_s": 0.15,
+            "phase_tracking_position_tolerance_m": 0.01,
+            "phase_tracking_orientation_tolerance_deg": 5.0,
+        }
+        node._wrist_to_tcp = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        node._cached_tcp = node._wrist_to_tcp.copy()
+        node._phase_tracking_errors = None
+
+        def status(sequence: int, *, degraded: bool) -> dict:
+            return ComponentStatus(
+                1,
+                sequence,
+                sequence,
+                "producer_arm",
+                "arm_ik_producer",
+                "ready",
+                True,
+                True,
+                ["real"],
+                "transient reject" if degraded else None,
+                {
+                    "degraded": degraded,
+                    "velocity_ratio": 0.8,
+                    "acceleration_ratio": 0.9,
+                    "jerk_ratio": 1.01 if degraded else 0.7,
+                },
+                "ik-instance",
+                "router",
+            ).to_dict()
+
+        node._on_arm_producer_status(status(1, degraded=True))
+        ready, reason = node._reference_phase_ready(
+            time.monotonic(), node._cached_tcp
+        )
+        self.assertFalse(ready)
+        self.assertIn("degraded", reason)
+
+        node._on_arm_producer_status(status(2, degraded=False))
+        ready, reason = node._reference_phase_ready(
+            time.monotonic(), node._cached_tcp
+        )
+        self.assertTrue(ready, reason)
+
+        actual_wrist = node._cached_tcp.copy()
+        actual_wrist[0] = 0.02
+        ready, reason = node._reference_phase_ready(time.monotonic(), actual_wrist)
+        self.assertFalse(ready)
+        self.assertIn("tracking", reason)
+
+    def test_running_tick_holds_policy_until_reference_governor_is_ready(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        identity = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        sample = SimpleNamespace(wrist_xyzw=identity)
+        joints = np.zeros(20)
+        inferred = []
+        published = []
+        node._phase = "running"
+        node._frame_index = 3
+        node._reference = SimpleNamespace(frame_count=342)
+        node._training_from_motive = identity
+        node._previous_wrist_pos = np.zeros(3)
+        node._previous_wrist_quat = np.asarray([1.0, 0.0, 0.0, 0.0])
+        node._previous_joints = joints.copy()
+        node._last_action = np.zeros(26)
+        node._last_error = None
+        node._deadman_pressed = False
+        node._inference_enabled = False
+        node._deadman_error = None
+        node._phase_hold_reason = None
+        node._last_phase_hold_log_at = 0.0
+        node._session_client = SimpleNamespace(
+            poll=lambda: None,
+            start_authorized=True,
+        )
+        node._real_admitted = lambda: (True, None)
+        node._fresh_inputs = lambda _now: (sample, joints, None)
+        node._check_hand_tracking = lambda _joints, _now: None
+        node._read_deadman = lambda: True
+        node._fresh_arm_wrist = lambda _now: (identity, None)
+        node._reference_phase_ready = lambda _now, _wrist: (
+            False,
+            "arm IK producer degraded",
+        )
+        node._publish_cached = lambda: published.append(node._frame_index)
+        node._infer_target = lambda _sample, _joints: inferred.append(node._frame_index)
+
+        self.assertTrue(node._tick(1.0))
+        self.assertEqual(inferred, [])
+        self.assertEqual(published, [3])
+
+        node._reference_phase_ready = lambda _now, _wrist: (True, None)
+        self.assertTrue(node._tick(1.02))
+        self.assertEqual(inferred, [3])
+
+    def test_running_inference_stays_enabled_after_enter_release(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        identity = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        sample = SimpleNamespace(wrist_xyzw=identity)
+        joints = np.zeros(20)
+        pressed = iter((True, False))
+        inferred = []
+        node._phase = "running"
+        node._frame_index = 3
+        node._reference = SimpleNamespace(frame_count=342)
+        node._training_from_motive = identity
+        node._previous_wrist_pos = np.zeros(3)
+        node._previous_wrist_quat = np.asarray([1.0, 0.0, 0.0, 0.0])
+        node._previous_joints = joints.copy()
+        node._last_action = np.zeros(26)
+        node._last_error = None
+        node._deadman_pressed = False
+        node._inference_enabled = False
+        node._deadman_error = None
+        node._phase_hold_reason = None
+        node._last_phase_hold_log_at = 0.0
+        node._session_client = SimpleNamespace(
+            poll=lambda: None,
+            start_authorized=True,
+        )
+        node._real_admitted = lambda: (True, None)
+        node._fresh_inputs = lambda _now: (sample, joints, None)
+        node._check_hand_tracking = lambda _joints, _now: None
+        node._read_deadman = lambda: next(pressed, False)
+        node._fresh_arm_wrist = lambda _now: (identity, None)
+        node._reference_phase_ready = lambda _now, _wrist: (True, None)
+        node._publish_cached = lambda: None
+        node._infer_target = lambda _sample, _joints: inferred.append(node._frame_index) or setattr(node, "_frame_index", node._frame_index + 1)
+
+        self.assertTrue(node._tick(1.0))
+        self.assertTrue(node._inference_enabled)
+        self.assertTrue(node._tick(1.02))
+        self.assertEqual(inferred, [3, 4])
 
     def test_regrind_hand_replay_does_not_require_model(self) -> None:
         scope = runpy.run_path(
@@ -143,6 +287,11 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._lock = threading.RLock()
         node._arm_received_at = 0.0
         node._arm_input_error = None
+        node._arm_producer_status = None
+        node._arm_producer_received_at = 0.0
+        node._arm_producer_input_error = None
+        node._phase_hold_reason = None
+        node._phase_tracking_errors = None
         node._deadman_pressed = False
         node._session_client = SimpleNamespace(startup_ready=True)
         node._publisher = SimpleNamespace(
@@ -172,6 +321,11 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._lock = threading.RLock()
         node._arm_received_at = 0.0
         node._arm_input_error = None
+        node._arm_producer_status = None
+        node._arm_producer_received_at = 0.0
+        node._arm_producer_input_error = None
+        node._phase_hold_reason = None
+        node._phase_tracking_errors = None
         node._deadman_pressed = False
         node._session_client = SimpleNamespace(startup_ready=False)
 

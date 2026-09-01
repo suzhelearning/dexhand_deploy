@@ -78,6 +78,8 @@ DEFAULT_PARAMETERS = {
     "maximum_input_skew_s": 0.02,
     "wrist_frame0_position_tolerance_m": 0.01,
     "wrist_frame0_orientation_tolerance_deg": 5.0,
+    "phase_tracking_position_tolerance_m": 0.01,
+    "phase_tracking_orientation_tolerance_deg": 5.0,
     "hammer_start_position_tolerance_m": 0.01,
     "hammer_start_orientation_tolerance_deg": 5.0,
     "hand_maximum_step_rad": 0.01,
@@ -142,6 +144,7 @@ class RegrindPolicyNode:
         publisher_instance_id: str,
         router_zid: str,
         coordinator_instance_id: str,
+        arm_producer_instance_id: str,
         arm_executor_instance_id: str,
         hand_executor_instance_id: str,
         real_capability: Any,
@@ -165,6 +168,7 @@ class RegrindPolicyNode:
             )
         self._start_frame = int(start_frame)
         self._router_zid = router_zid
+        self._arm_producer_instance_id = arm_producer_instance_id
         self._arm_executor_instance_id = arm_executor_instance_id
         self._hand_executor_instance_id = hand_executor_instance_id
         self._real_capability = real_capability
@@ -255,11 +259,20 @@ class RegrindPolicyNode:
         self._arm_received_at = 0.0
         self._arm_sequence = -1
         self._arm_input_error: str | None = None
+        self._arm_producer_status: ComponentStatus | None = None
+        self._arm_producer_received_at = 0.0
+        self._arm_producer_sequence = -1
+        self._arm_producer_input_error: str | None = None
         self._hand_state: HandJointState | None = None
         self._hand_received_at = 0.0
         self._hand_sequence = -1
         self._input_error: str | None = None
         self._arm_state_sub = ZenohJsonSub(session, topics.ARM_STATE, self._on_arm_state)
+        self._arm_producer_status_sub = ZenohJsonSub(
+            session,
+            topics.PRODUCER_STATUS,
+            self._on_arm_producer_status,
+        )
         self._hand_state_sub = ZenohJsonSub(session, topics.hand_state("right"), self._on_hand_state)
         self._phase = "armed"
         self._phase_started = time.monotonic()
@@ -279,12 +292,18 @@ class RegrindPolicyNode:
         self._tracking_error_since: float | None = None
         self._approach_stable_ticks = 0
         self._frame0_errors: tuple[float, float, float] | None = None
+        self._phase_tracking_errors: tuple[float, float] | None = None
+        self._phase_hold_reason: str | None = None
+        self._last_phase_hold_log_at = 0.0
         self._last_approach_log_at = 0.0
         self._required_approach_ticks = max(
             1,
             round(self._rate * float(params["hand_tracking_error_duration_s"])),
         )
         self._deadman_pressed = False
+        self._inference_enabled = False
+        self._hold_enter = bool(params.get("hold_enter", False))
+        self._enter_edge_pending = False
         self._deadman_error: str | None = None
         try:
             self._deadman: X11KeyState | None = X11KeyState(("Return", "KP_Enter"))
@@ -301,10 +320,14 @@ class RegrindPolicyNode:
         _LOG.warning(
             "REAL Regrind loaded: checkpoint iteration=%s, frames=%s. "
             "Press s, then hold Enter to reach frame %s; release Enter and align the hammer in the viewer; "
-            "press i, then hold Enter to infer. Release Enter to hold; s returns Home; q returns and exits.",
+            "%s; "
+            "s returns Home; q returns and exits.",
             iteration,
             self._reference.frame_count,
             self._start_frame,
+            "press i, then press Enter once to infer automatically; press Enter again to pause"
+            if not self._hold_enter
+            else "press i, then hold Enter to infer; release to hold",
         )
 
     def _arm_wrist_fk_scene(self, positions: Any) -> np.ndarray:
@@ -369,6 +392,74 @@ class RegrindPolicyNode:
         if age > float(self._params["arm_stale_s"]):
             return None, f"Marvin arm feedback stale ({age * 1000.0:.0f} ms)"
         return wrist, None
+
+    def _on_arm_producer_status(self, payload: Any) -> None:
+        try:
+            status = ComponentStatus.from_dict(payload)
+        except (TypeError, ValueError):
+            return
+        if status.component_role != "producer_arm":
+            return
+        try:
+            if (
+                status.component_id != "arm_ik_producer"
+                or status.router_zid != self._router_zid
+                or status.publisher_instance_id != self._arm_producer_instance_id
+            ):
+                raise ValueError("arm IK producer status authority mismatch")
+            if not isinstance(status.diagnostics.get("degraded", False), bool):
+                raise ValueError("arm IK producer degraded diagnostic must be boolean")
+        except ValueError as exc:
+            with self._lock:
+                self._arm_producer_input_error = str(exc)
+            return
+        with self._lock:
+            if status.sequence <= self._arm_producer_sequence:
+                self._arm_producer_input_error = "arm IK producer status sequence rollback"
+                return
+            self._arm_producer_status = status
+            self._arm_producer_received_at = time.monotonic()
+            self._arm_producer_sequence = status.sequence
+            self._arm_producer_input_error = None
+
+    def _reference_phase_ready(
+        self,
+        now: float,
+        actual_wrist_robot: np.ndarray,
+    ) -> tuple[bool, str | None]:
+        with self._lock:
+            status = self._arm_producer_status
+            received_at = self._arm_producer_received_at
+            input_error = self._arm_producer_input_error
+        if input_error:
+            return False, input_error
+        if status is None:
+            return False, "arm IK producer status not received"
+        if now - received_at > float(self._params["arm_stale_s"]):
+            return False, "arm IK producer status stale"
+        if not status.ready or not status.healthy:
+            return False, status.error or "arm IK producer not healthy"
+        if status.diagnostics.get("degraded", False):
+            detail = f": {status.error}" if status.error else ""
+            return False, f"arm IK producer degraded{detail}"
+        if self._cached_tcp is None:
+            self._phase_tracking_errors = None
+            return True, None
+        actual_tcp = compose_pose(actual_wrist_robot, self._wrist_to_tcp)
+        position_error, orientation_error = _pose_error(actual_tcp, self._cached_tcp)
+        self._phase_tracking_errors = position_error, orientation_error
+        if (
+            position_error > float(self._params["phase_tracking_position_tolerance_m"])
+            or orientation_error > float(
+                self._params["phase_tracking_orientation_tolerance_deg"]
+            )
+        ):
+            return (
+                False,
+                f"arm tracking {position_error * 1000.0:.1f} mm / "
+                f"{orientation_error:.1f} deg",
+            )
+        return True, None
 
     def _on_hand_state(self, payload: Any) -> None:
         try:
@@ -450,6 +541,11 @@ class RegrindPolicyNode:
             with self._lock:
                 self._request_inference()
             return
+        if key in ("\r", "\n"):
+            with self._lock:
+                if self._phase == "running" and not getattr(self, "_hold_enter", False):
+                    self._enter_edge_pending = True
+            return
         if key != "s":
             return
         with self._lock:
@@ -489,8 +585,13 @@ class RegrindPolicyNode:
         self._tracking_error_since = None
         self._approach_stable_ticks = 0
         self._frame0_errors = None
+        self._phase_tracking_errors = None
+        self._phase_hold_reason = None
+        self._last_phase_hold_log_at = 0.0
         self._last_approach_log_at = 0.0
         self._frame_index = self._start_frame
+        self._inference_enabled = False
+        self._enter_edge_pending = False
         self._last_error = None
         self._conditioner.reset()
         self._session_client.request_start("regrind_real_s")
@@ -585,13 +686,18 @@ class RegrindPolicyNode:
         self._tracking_error_since = None
         self._last_action.fill(0.0)
         self._frame_index = self._start_frame
+        self._inference_enabled = False
+        self._enter_edge_pending = False
         self._phase = "running"
         self._phase_started = now
         _LOG.warning(
-            "inference armed; hammer frame %s %.1f mm / %.1f deg passed. Hold Enter to infer; release to hold.",
+            "inference armed; hammer frame %s %.1f mm / %.1f deg passed. %s.",
             self._start_frame,
             position_error * 1000.0,
             orientation_error,
+            "Press Enter once to infer automatically; press Enter again to pause"
+            if not getattr(self, "_hold_enter", False)
+            else "Hold Enter to infer; release to hold",
         )
 
     def _begin_return(self, reason: str, *, exit_after_return: bool) -> None:
@@ -600,6 +706,8 @@ class RegrindPolicyNode:
             return
         self._cached_tcp = None
         self._cached_joints = None
+        self._inference_enabled = False
+        self._enter_edge_pending = False
         self._exit_after_return = exit_after_return
         self._return_deadline = time.monotonic() + float(self._params["return_timeout_s"])
         try:
@@ -748,18 +856,49 @@ class RegrindPolicyNode:
         with self._lock:
             arm_received_at = self._arm_received_at
             arm_input_error = self._arm_input_error
+            arm_producer_status = self._arm_producer_status
+            arm_producer_received_at = self._arm_producer_received_at
+            arm_producer_input_error = self._arm_producer_input_error
+        arm_producer_diagnostics = (
+            {} if arm_producer_status is None else arm_producer_status.diagnostics
+        )
         diagnostics = {
             "mode": "real_closed_loop",
             "frame_index": self._frame_index,
             "frame_count": self._reference.frame_count,
             "start_frame": self._start_frame,
             "deadman_pressed": self._deadman_pressed,
+            "inference_enabled": getattr(self, "_inference_enabled", False),
+            "enter_mode": "hold" if getattr(self, "_hold_enter", False) else "toggle",
             "motive_age_ms": None if sample is None else (now - sample.received_at) * 1000.0,
             "arm_fk_age_ms": (
                 None if arm_received_at == 0.0
                 else (now - arm_received_at) * 1000.0
             ),
             "arm_fk_input_error": arm_input_error,
+            "arm_ik_age_ms": (
+                None
+                if arm_producer_received_at == 0.0
+                else (now - arm_producer_received_at) * 1000.0
+            ),
+            "arm_ik_input_error": arm_producer_input_error,
+            "arm_ik_degraded": arm_producer_diagnostics.get("degraded"),
+            "arm_ik_velocity_ratio": arm_producer_diagnostics.get("velocity_ratio"),
+            "arm_ik_acceleration_ratio": arm_producer_diagnostics.get(
+                "acceleration_ratio"
+            ),
+            "arm_ik_jerk_ratio": arm_producer_diagnostics.get("jerk_ratio"),
+            "phase_hold_reason": self._phase_hold_reason,
+            "phase_tracking_position_error_mm": (
+                None
+                if self._phase_tracking_errors is None
+                else self._phase_tracking_errors[0] * 1000.0
+            ),
+            "phase_tracking_orientation_error_deg": (
+                None
+                if self._phase_tracking_errors is None
+                else self._phase_tracking_errors[1]
+            ),
             "input_error": input_error,
             "admission_error": admission_error,
             "ready_for_inference_key": self._phase == "ready",
@@ -849,7 +988,11 @@ class RegrindPolicyNode:
             self._begin_return("coordinator left teleop", exit_after_return=True)
             return True
         was_pressed = self._deadman_pressed
+        was_inference_enabled = self._inference_enabled
+        enter_edge_pending = getattr(self, "_enter_edge_pending", False)
+        self._enter_edge_pending = False
         pressed = self._read_deadman()
+        self._deadman_pressed = pressed
         if self._deadman_error:
             self._last_error = self._deadman_error
             self._begin_return("deadman read failed", exit_after_return=True)
@@ -887,13 +1030,48 @@ class RegrindPolicyNode:
         if self._phase == "ready":
             self._publish_cached()
             return True
-        if pressed:
+        if self._phase == "running":
+            if getattr(self, "_hold_enter", False):
+                self._inference_enabled = pressed
+            elif enter_edge_pending or (pressed and not was_pressed):
+                self._inference_enabled = not self._inference_enabled
+                _LOG.warning(
+                    "inference %s (Enter toggle)",
+                    "started" if self._inference_enabled else "paused",
+                )
+        if self._inference_enabled:
+            actual_wrist_robot, arm_error = self._fresh_arm_wrist(now)
+            if actual_wrist_robot is None:
+                self._last_error = arm_error
+                self._begin_return(arm_error or "arm feedback lost", exit_after_return=True)
+                return True
+            phase_ready, hold_reason = self._reference_phase_ready(
+                now,
+                actual_wrist_robot,
+            )
+            self._phase_hold_reason = hold_reason
+            if not phase_ready:
+                if now - self._last_phase_hold_log_at >= 1.0:
+                    self._last_phase_hold_log_at = now
+                    _LOG.warning(
+                        "reference phase holding at frame %s: %s",
+                        self._frame_index,
+                        hold_reason,
+                    )
+                wrist = compose_pose(self._training_from_motive, sample.wrist_xyzw)
+                self._previous_wrist_pos = wrist[:3].copy()
+                self._previous_wrist_quat = np.roll(wrist[3:], 1)
+                self._previous_joints = joints.copy()
+                self._publish_cached()
+                return True
+            self._phase_hold_reason = None
             if self._frame_index >= self._reference.frame_count - 1:
                 self._begin_return("Regrind reference complete", exit_after_return=True)
                 return True
             self._infer_target(sample, joints)
         else:
-            if was_pressed:
+            self._phase_hold_reason = None
+            if was_inference_enabled:
                 self._hold_measured_target(sample, joints)
             wrist = compose_pose(self._training_from_motive, sample.wrist_xyzw)
             self._previous_wrist_pos = wrist[:3].copy()
@@ -921,6 +1099,7 @@ class RegrindPolicyNode:
     def close(self) -> None:
         self._stop_event.set()
         self._arm_state_sub.close()
+        self._arm_producer_status_sub.close()
         self._hand_state_sub.close()
         self._motive.close()
         self._hand_status_pub.close()
@@ -930,6 +1109,17 @@ class RegrindPolicyNode:
             self._deadman.close()
         self._publisher.close()
         self._session_client.close()
+
+
+def _arm_producer_instance() -> str:
+    try:
+        authorities = json.loads(os.environ["TIANJI_AUTHORITIES"])
+        value = authorities["producer_arm"]["publisher_instance_id"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("launcher did not provide arm producer authority") from exc
+    if not isinstance(value, str) or not value:
+        raise RuntimeError("arm producer authority is invalid")
+    return value
 
 
 def _arm_executor_instance() -> str:
@@ -960,6 +1150,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--config", default="")
+    parser.add_argument(
+        "--hold-enter",
+        action="store_true",
+        help="使用按住 Enter 才推理的模式；默认按一次 Enter 后自动推理",
+    )
     args = parser.parse_args(argv)
     if not args.model.is_file() or not args.reference.is_file():
         parser.error("--model and --reference must be existing files")
@@ -967,6 +1162,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("regrind_policy source is real-only")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     params = load_node_config(args.config, "regrind_policy", DEFAULT_PARAMETERS, {})
+    params["hold_enter"] = args.hold_enter
     from ..executors.marvin.preflight import trusted_real_capability
 
     session = open_session(os.environ.get("TIANJI_ROUTER_ENDPOINT"))
@@ -985,6 +1181,7 @@ def main(argv: list[str] | None = None) -> int:
             publisher_instance_id=instance,
             router_zid=router,
             coordinator_instance_id=coordinator,
+            arm_producer_instance_id=_arm_producer_instance(),
             arm_executor_instance_id=_arm_executor_instance(),
             hand_executor_instance_id=_hand_executor_instance(),
             real_capability=trusted_real_capability,

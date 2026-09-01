@@ -6,11 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import yaml
 
 import tianji_teleop.executors.mujoco.node as mujoco_node
 import tianji_teleop.executors.wuji_hand2.main as wuji_main_module
 
-from tianji_teleop.executors.marvin.bridge import MarvinExecutor
+from tianji_teleop.executors.marvin.bridge import MarvinExecutor, _apply_speed_overrides
 from tianji_teleop.executors.marvin.readiness import MarvinReadiness
 from tianji_teleop.executors.mujoco.node import MujocoExecutor
 from tianji_teleop.executors.wuji_hand2.node import WujiHandExecutor
@@ -638,6 +639,20 @@ class _ConnectableMarvinHardware(_FakeMarvinHardware):
 
 
 class MarvinExecutorSafetyTest(unittest.TestCase):
+    def test_explicit_marvin_speed_overrides_are_applied(self):
+        params = {"velocity_ratio": 10, "acceleration_ratio": 10}
+        with patch.dict(
+            "os.environ",
+            {
+                "TIANJI_MARVIN_VELOCITY_RATIO": "100",
+                "TIANJI_MARVIN_ACCELERATION_RATIO": "80",
+            },
+            clear=False,
+        ):
+            _apply_speed_overrides(params)
+        self.assertEqual(params["velocity_ratio"], 100)
+        self.assertEqual(params["acceleration_ratio"], 80)
+
     def _command(self, side, sequence=1, timestamp=100, value=0.005, mode="returning"):
         return ArmJointCommand(
             1, sequence, timestamp, "coordinator", side, mode, None, None,
@@ -652,6 +667,15 @@ class MarvinExecutorSafetyTest(unittest.TestCase):
             params={"rate_hz": 200.0},
         )
         self.assertEqual(executor._rate_hz, 200.0)
+
+    def test_real_output_slew_does_not_underrun_coordinator_step(self):
+        config_root = Path(__file__).resolve().parents[1] / "src" / "tianji_teleop" / "config"
+        coordinator = yaml.safe_load((config_root / "coordinator" / "arm.yaml").read_text())
+        marvin = yaml.safe_load((config_root / "executors" / "marvin.yaml").read_text())
+        self.assertGreaterEqual(
+            float(marvin["maximum_output_step_deg"]),
+            np.degrees(float(coordinator["maximum_command_step_rad"])),
+        )
 
     def test_healthy_tick_does_not_poll_slow_servo_diagnostics(self):
         hardware = _FakeMarvinHardware()

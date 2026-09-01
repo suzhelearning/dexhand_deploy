@@ -243,6 +243,7 @@ def _run_alignment_viewer(
     stale_s: float,
     session,
     start_frame: int,
+    hold_enter: bool = False,
 ) -> bool:
     import mujoco
     import mujoco.viewer
@@ -384,8 +385,12 @@ def _run_alignment_viewer(
                         "READ-ONLY  Solid robot: LIVE state\n"
                         "Orange hammer: LIVE  Green hammer/hand: EXPECTED reference\n"
                         f"Control terminal: s + hold Enter -> frame {start_frame}\n"
-                        "Then release, align hammer, press i; hold Enter -> infer\n"
-                        "Yellow arrow: move live hammer toward target\n"
+                        + (
+                            "Then release, align hammer, press i; hold Enter -> infer\n"
+                            if hold_enter
+                            else "Then release, align hammer, press i; Enter once -> infer, again -> pause\n"
+                        )
+                        + "Yellow arrow: move live hammer toward target\n"
                         "Robot/Zenoh: +X forward(red), +Y left(green), +Z up(blue)\n"
                         "Correction in robot world XYZ (mm)\n"
                         "Position / orientation error\n"
@@ -542,6 +547,11 @@ def main() -> int:
     parser.add_argument("--wait-s", type=float, default=10.0)
     parser.add_argument("--print-every", type=int, default=1)
     parser.add_argument("--start-frame", type=int, default=0)
+    parser.add_argument(
+        "--hold-enter",
+        action="store_true",
+        help="viewer text uses the hold-Enter inference mode",
+    )
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--viewer", action="store_true", help="open read-only live/expected frame-0 alignment viewer")
     parser.add_argument("--hand-replay", action="store_true", help="replay only the Regrind Wuji hand in MuJoCo")
@@ -624,7 +634,7 @@ def main() -> int:
         if args.viewer:
             passed = _run_alignment_viewer(
                 args.reference, reference, live, args.stale_s, session,
-                args.start_frame,
+                args.start_frame, args.hold_enter,
             )
             print(json.dumps({"event": "viewer_closed", "real_start_preflight_passed": passed}), flush=True)
             return 0
