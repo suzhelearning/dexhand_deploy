@@ -40,6 +40,7 @@ validation-scan-real = "python scripts/validation/scan_real_preflight.py"
 rl_infer = "PYTHONPATH=src/tianji_teleop:vendor/python python scripts/regrind_cpu_infer.py"
 rl_live_infer = "PYTHONPATH=src/tianji_teleop:vendor/python python scripts/regrind_live_infer.py"
 regrind_real = "bash scripts/run_session.sh --profile regrind_real"
+regrind_hand_sim = "PYTHONPATH=src/tianji_teleop:vendor/python python scripts/regrind_live_infer.py --hand-replay"
 # C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。
 # 编译器使用 Ubuntu 24.04 系统 GCC 13；脚本会在编译前严格检查它们与
 # runtime 的 ABI 版本。

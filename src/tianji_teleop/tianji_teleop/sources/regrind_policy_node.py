@@ -14,10 +14,20 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 import torch
+import mujoco
 
+from ..coordination.arm_command_coordinator import ArmRobotConfig
+from ..executors.mujoco.node import _frame_from_wrist_axis_geoms
 from ..executors.wuji_hand2.config import WujiHandConfig
+from ..joint_state_model import urdf_joint_names
+from ..mujoco_urdf import portable_mujoco_urdf
 from ..protocol import topics
-from ..protocol.messages import ComponentStatus, HAND_JOINT_NAMES, HandJointState
+from ..protocol.messages import (
+    ArmJointState,
+    ComponentStatus,
+    HAND_JOINT_NAMES,
+    HandJointState,
+)
 from ..regrind_policy import action_to_targets, build_observation, infer, load_actor, load_reference
 from ..zenoh_util import (
     ZenohJsonSub,
@@ -47,9 +57,23 @@ from .mocap.regrind import (
 _LOG = logging.getLogger("regrind_policy")
 DEFAULT_PARAMETERS = {
     "checkpoint_sha256": "ecc3620e1cee0116ce91f458086f1a85f6ddf7b8cedc5cbd4ab59f1ea871bb50",
-    "reference_sha256": "aa73644d97d7de2a8f7a7453bec4a5f103ea7a1003f8bf16f13906fcc8e4f5ad",
+    "reference_sha256": [
+        "aa73644d97d7de2a8f7a7453bec4a5f103ea7a1003f8bf16f13906fcc8e4f5ad",
+        "714a4173cb7e6f7f09c714bcd769e586380b7888b381ad64dbfb0d62a5b8dd21",
+        "06ece855d61a1876ed93970406d217c7e01b7f25bc258cbebf144e44b3fc9aa6",
+        "98560e512afb8d80212e058ebd663cb98bd86c28ed05560b6aba8e23d8c6f706",
+        "b480f1c064bd1ed1b5d6fe6007120a50aa602ad92658ac2d0f8d5bdf0e722b7a",
+        "fa0d2e846f072c117d99aab87dfd8575c1be7c9b11ee85dff46fe9d4a02b2c97",
+        "fec8f43384929eac088a7baa68326554275d1c8a88af32f1f0f55f0c41401021",
+        "829a7541ddaa2dc7e4d4820fb5b0d08e246f675e770d45ed80865a2959ed0422",
+        "4cd8b5c95c2482c46182809d951a16721b7d35a63167432879750f84f5a62a41",
+        "afb1f894c6ac458488d85262d619ab9022c7c67c1a83ab258dc19423fe34eeb4",
+        "86234219c6872ed973a0d8573245b0a200ef3e8c000abbaedc89d0b6d6753662",
+        "7f423dd07f7040801c9c5a3ed6f676eeb4f7f59b1890f65c686f89a885b117f1",
+    ],
     "rate": 50.0,
     "motive_stale_s": 0.04,
+    "arm_stale_s": 0.15,
     "hand_stale_s": 0.04,
     "maximum_input_skew_s": 0.02,
     "wrist_frame0_position_tolerance_m": 0.01,
@@ -91,6 +115,16 @@ def _configured_pose(params: dict[str, Any], prefix: str) -> np.ndarray:
     return pose
 
 
+def _require_authorized_sha256(path: Path, expected: Any) -> None:
+    values = [expected] if isinstance(expected, str) else expected
+    allowed = (
+        {value.lower() for value in values if isinstance(value, str)}
+        if isinstance(values, list) else set()
+    )
+    if hashlib.sha256(path.read_bytes()).hexdigest() not in allowed:
+        raise ValueError(f"{path.name} SHA256 does not match the authorized Regrind artifact")
+
+
 def _pose_error(actual_xyzw: np.ndarray, expected_xyzw: np.ndarray) -> tuple[float, float]:
     position = float(np.linalg.norm(actual_xyzw[:3] - expected_xyzw[:3]))
     rotation = Rotation.from_quat(expected_xyzw[3:]).inv() * Rotation.from_quat(actual_xyzw[3:])
@@ -108,8 +142,10 @@ class RegrindPolicyNode:
         publisher_instance_id: str,
         router_zid: str,
         coordinator_instance_id: str,
+        arm_executor_instance_id: str,
         hand_executor_instance_id: str,
         real_capability: Any,
+        start_frame: int = 0,
     ) -> None:
         self._params = params
         self._rate = float(params["rate"])
@@ -119,13 +155,17 @@ class RegrindPolicyNode:
         if not capability.admitted or float(capability.speed) != 1.0 or float(capability.yaw_deg) != 0.0:
             raise ValueError("real Regrind requires admitted --speed 1 and yaw 0")
         for path, key in ((model, "checkpoint_sha256"), (reference, "reference_sha256")):
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            if digest != str(params[key]).lower():
-                raise ValueError(f"{path.name} SHA256 does not match the authorized Regrind artifact")
+            _require_authorized_sha256(path, params[key])
         torch.set_num_threads(1)
         self._actor, self._mean, self._variance, iteration = load_actor(model)
         self._reference = load_reference(reference)
+        if not 0 <= start_frame < self._reference.frame_count - 1:
+            raise ValueError(
+                f"start_frame must be in [0, {self._reference.frame_count - 2}]"
+            )
+        self._start_frame = int(start_frame)
         self._router_zid = router_zid
+        self._arm_executor_instance_id = arm_executor_instance_id
         self._hand_executor_instance_id = hand_executor_instance_id
         self._real_capability = real_capability
 
@@ -146,6 +186,25 @@ class RegrindPolicyNode:
         self._home_tcp = np.concatenate((config.init_pos["right"], config.init_quat["right"]))
         tcp_to_wrist = compose_pose(_configured_pose(params, "right_tcp_to_mount"), MOUNT_TO_WRIST)
         self._home_wrist = compose_pose(self._home_tcp, tcp_to_wrist)
+        root = Path(__file__).resolve().parents[4]
+        xml, assets = portable_mujoco_urdf(
+            root / "src/tianji_teleop/assets/tianji_wuji2/tianji_wuji2.urdf"
+        )
+        self._arm_fk_model = mujoco.MjModel.from_xml_string(xml, assets)
+        self._arm_fk_data = mujoco.MjData(self._arm_fk_model)
+        self._arm_fk_addresses = []
+        for name in urdf_joint_names():
+            joint_id = mujoco.mj_name2id(
+                self._arm_fk_model, mujoco.mjtObj.mjOBJ_JOINT, name
+            )
+            if joint_id < 0:
+                raise ValueError(f"arm FK model lacks joint {name}")
+            self._arm_fk_addresses.append(
+                int(self._arm_fk_model.jnt_qposadr[joint_id])
+            )
+        self._arm_config = ArmRobotConfig.load()
+        home_fk = self._arm_wrist_fk_scene(self._arm_config.home_all)
+        self._robot_from_fk_scene = compose_pose(self._home_wrist, invert_pose(home_fk))
         self._robot_from_training: np.ndarray | None = None
         self._wrist_to_tcp = invert_pose(tcp_to_wrist)
         self._conditioner = TargetConditioner(
@@ -192,10 +251,15 @@ class RegrindPolicyNode:
         )
         self._session_client.start()
         self._lock = threading.RLock()
+        self._arm_wrist_robot: np.ndarray | None = None
+        self._arm_received_at = 0.0
+        self._arm_sequence = -1
+        self._arm_input_error: str | None = None
         self._hand_state: HandJointState | None = None
         self._hand_received_at = 0.0
         self._hand_sequence = -1
         self._input_error: str | None = None
+        self._arm_state_sub = ZenohJsonSub(session, topics.ARM_STATE, self._on_arm_state)
         self._hand_state_sub = ZenohJsonSub(session, topics.hand_state("right"), self._on_hand_state)
         self._phase = "armed"
         self._phase_started = time.monotonic()
@@ -203,7 +267,7 @@ class RegrindPolicyNode:
         self._exit_after_return = False
         self._quit = False
         self._last_error: str | None = None
-        self._frame_index = 0
+        self._frame_index = self._start_frame
         self._training_from_motive: np.ndarray | None = None
         self._previous_wrist_pos: np.ndarray | None = None
         self._previous_wrist_quat: np.ndarray | None = None
@@ -236,11 +300,75 @@ class RegrindPolicyNode:
         self._keyboard_thread.start()
         _LOG.warning(
             "REAL Regrind loaded: checkpoint iteration=%s, frames=%s. "
-            "Press s, then hold Enter to reach frame0; release Enter and align the hammer in the viewer; "
+            "Press s, then hold Enter to reach frame %s; release Enter and align the hammer in the viewer; "
             "press i, then hold Enter to infer. Release Enter to hold; s returns Home; q returns and exits.",
             iteration,
             self._reference.frame_count,
+            self._start_frame,
         )
+
+    def _arm_wrist_fk_scene(self, positions: Any) -> np.ndarray:
+        values = np.asarray(positions, dtype=np.float64)
+        if values.shape != (14,) or not np.isfinite(values).all():
+            raise ValueError("arm FK requires 14 finite joint positions")
+        for address, value in zip(self._arm_fk_addresses, values):
+            self._arm_fk_data.qpos[address] = value
+        mujoco.mj_forward(self._arm_fk_model, self._arm_fk_data)
+        position, rotation = _frame_from_wrist_axis_geoms(
+            self._arm_fk_model, self._arm_fk_data
+        )
+        return np.concatenate((position, Rotation.from_matrix(rotation).as_quat()))
+
+    def _on_arm_state(self, payload: Any) -> None:
+        try:
+            state = ArmJointState.from_dict(payload)
+            if (
+                state.executor != "marvin"
+                or state.router_zid != self._router_zid
+                or state.publisher_instance_id != self._arm_executor_instance_id
+            ):
+                raise ValueError("Marvin arm state authority mismatch")
+            positions = np.asarray(state.position_rad, dtype=np.float64)
+            lower = np.asarray(self._arm_config.lower_limits_rad * 2)
+            upper = np.asarray(self._arm_config.upper_limits_rad * 2)
+            if np.any(positions < lower) or np.any(positions > upper):
+                raise ValueError("Marvin arm state exceeds configured joint limits")
+            wrist = compose_pose(
+                self._robot_from_fk_scene,
+                self._arm_wrist_fk_scene(positions),
+            )
+        except (TypeError, ValueError) as exc:
+            with self._lock:
+                self._arm_input_error = str(exc)
+            return
+        with self._lock:
+            first_feedback = self._arm_wrist_robot is None
+            if state.sequence <= self._arm_sequence:
+                self._arm_input_error = "Marvin arm state sequence rollback"
+                return
+            self._arm_wrist_robot = wrist
+            self._arm_received_at = time.monotonic()
+            self._arm_sequence = state.sequence
+            self._arm_input_error = None
+        if first_feedback:
+            _LOG.warning("Marvin arm feedback ready; press s to start")
+
+    def _fresh_arm_wrist(self, now: float) -> tuple[np.ndarray | None, str | None]:
+        with self._lock:
+            wrist = (
+                None if self._arm_wrist_robot is None
+                else self._arm_wrist_robot.copy()
+            )
+            received_at = self._arm_received_at
+            error = self._arm_input_error
+        if error:
+            return None, error
+        if wrist is None:
+            return None, "Marvin arm feedback not received; wait for the ready message"
+        age = now - received_at
+        if age > float(self._params["arm_stale_s"]):
+            return None, f"Marvin arm feedback stale ({age * 1000.0:.0f} ms)"
+        return wrist, None
 
     def _on_hand_state(self, payload: Any) -> None:
         try:
@@ -334,6 +462,7 @@ class RegrindPolicyNode:
         now = time.monotonic()
         admitted, reason = self._real_admitted()
         sample, joints, input_reason = self._fresh_inputs(now)
+        arm_wrist, arm_reason = self._fresh_arm_wrist(now)
         if not admitted or not self._session_client.startup_ready or not self._session_client.at_home:
             _LOG.error("start rejected: %s", reason or "coordinator/Home snapshot not ready")
             return
@@ -342,6 +471,9 @@ class RegrindPolicyNode:
             return
         if sample is None or joints is None:
             _LOG.error("start rejected: %s", input_reason)
+            return
+        if arm_wrist is None:
+            _LOG.error("start rejected: %s", arm_reason)
             return
         if not self._hand_config.at_zero(joints):
             _LOG.error("start rejected: Wuji hand is not at zero")
@@ -358,17 +490,18 @@ class RegrindPolicyNode:
         self._approach_stable_ticks = 0
         self._frame0_errors = None
         self._last_approach_log_at = 0.0
-        self._frame_index = 0
+        self._frame_index = self._start_frame
         self._last_error = None
         self._conditioner.reset()
         self._session_client.request_start("regrind_real_s")
         self._phase = "start_pending"
         self._phase_started = now
-        frame0_tcp = self._reference_frame_zero_tcp()
-        position_error, orientation_error = _pose_error(frame0_tcp, self._home_tcp)
+        start_tcp = self._reference_start_tcp()
+        position_error, orientation_error = _pose_error(start_tcp, self._home_tcp)
         _LOG.warning(
-            "start requested; frame0 is %.1f mm / %.1f deg from Home. "
+            "start requested; frame %s is %.1f mm / %.1f deg from Home. "
             "Hold Enter after authorization to approach it.",
+            self._start_frame,
             position_error * 1000.0,
             orientation_error,
         )
@@ -376,7 +509,7 @@ class RegrindPolicyNode:
     def _calibrate_world(self, live_home_wrist: np.ndarray) -> None:
         # The Regrind H5 manifest and Motive publisher both use table-edge
         # +X-forward/+Y-left/+Z-up world coordinates. Only Base_R extrinsics
-        # are calibrated at Home; frame0 must remain a distinct target.
+        # are calibrated at Home; the selected start frame remains a distinct target.
         self._training_from_motive = np.asarray(
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float64
         )
@@ -385,27 +518,39 @@ class RegrindPolicyNode:
             invert_pose(np.asarray(live_home_wrist, dtype=np.float64)),
         )
 
-    def _reference_frame_zero_tcp(self) -> np.ndarray:
+    def _reference_start_wrist_robot(self) -> np.ndarray:
         assert self._robot_from_training is not None
         wrist_training = np.concatenate(
-            (self._reference.wrist_pos[0], np.roll(self._reference.wrist_quat_wxyz[0], -1))
+            (
+                self._reference.wrist_pos[self._start_frame],
+                np.roll(self._reference.wrist_quat_wxyz[self._start_frame], -1),
+            )
         )
+        return compose_pose(self._robot_from_training, wrist_training)
+
+    def _reference_start_tcp(self) -> np.ndarray:
         return compose_pose(
-            compose_pose(self._robot_from_training, wrist_training),
-            self._wrist_to_tcp,
+            self._reference_start_wrist_robot(), self._wrist_to_tcp
         )
 
     def _hammer_start_error(self, sample: RegrindMotiveSample) -> tuple[float, float]:
         assert self._training_from_motive is not None
         aligned_hammer = compose_pose(self._training_from_motive, sample.hammer_xyzw)
         reference_hammer = np.concatenate(
-            (self._reference.object_pos[0], np.roll(self._reference.object_quat_wxyz[0], -1))
+            (
+                self._reference.object_pos[self._start_frame],
+                np.roll(self._reference.object_quat_wxyz[self._start_frame], -1),
+            )
         )
         return _pose_error(aligned_hammer, reference_hammer)
 
     def _request_inference(self) -> None:
         if self._phase != "ready":
-            _LOG.info("inference key ignored: reach frame0 first (phase=%s)", self._phase)
+            _LOG.info(
+                "inference key ignored: reach frame %s first (phase=%s)",
+                self._start_frame,
+                self._phase,
+            )
             return
         if self._read_deadman():
             _LOG.error("inference rejected: release Enter before pressing i")
@@ -425,7 +570,8 @@ class RegrindPolicyNode:
             or orientation_error > float(self._params["hammer_start_orientation_tolerance_deg"])
         ):
             _LOG.error(
-                "inference rejected: hammer differs from frame0 (%.1f mm, %.1f deg)",
+                "inference rejected: hammer differs from frame %s (%.1f mm, %.1f deg)",
+                self._start_frame,
                 position_error * 1000.0,
                 orientation_error,
             )
@@ -435,11 +581,12 @@ class RegrindPolicyNode:
         self._previous_wrist_quat = np.roll(wrist[3:], 1)
         self._previous_joints = joints.copy()
         self._last_action.fill(0.0)
-        self._frame_index = 0
+        self._frame_index = self._start_frame
         self._phase = "running"
         self._phase_started = now
         _LOG.warning(
-            "inference armed; hammer frame0 %.1f mm / %.1f deg passed. Hold Enter to infer; release to hold.",
+            "inference armed; hammer frame %s %.1f mm / %.1f deg passed. Hold Enter to infer; release to hold.",
+            self._start_frame,
             position_error * 1000.0,
             orientation_error,
         )
@@ -474,25 +621,31 @@ class RegrindPolicyNode:
             self._tracking_error_since = None
         return None
 
-    def _approach_frame_zero(self, sample: RegrindMotiveSample, joints: np.ndarray) -> bool:
+    def _approach_start_frame(
+        self, actual_wrist_robot: np.ndarray, joints: np.ndarray
+    ) -> bool:
         assert self._training_from_motive is not None
-        tcp_robot = self._reference_frame_zero_tcp()
+        tcp_robot = self._reference_start_tcp()
         tcp_position, tcp_quaternion, _ = self._conditioner.condition(tcp_robot[:3], tcp_robot[3:])
         desired_joints = np.clip(
-            self._reference.joints[0],
+            self._reference.joints[self._start_frame],
             self._hand_config.lower_limits_rad,
             self._hand_config.upper_limits_rad,
         )
         maximum_step = float(self._params["hand_maximum_step_rad"])
-        target_joints = joints + np.clip(desired_joints - joints, -maximum_step, maximum_step)
+        command_base = joints if self._last_hand_target is None else self._last_hand_target
+        target_joints = command_base + np.clip(
+            desired_joints - command_base,
+            -maximum_step,
+            maximum_step,
+        )
         self._cached_tcp = np.concatenate((tcp_position, tcp_quaternion))
         self._cached_joints = target_joints
         self._last_hand_target = target_joints.copy()
-        live_wrist = compose_pose(self._training_from_motive, sample.wrist_xyzw)
-        reference_wrist = np.concatenate(
-            (self._reference.wrist_pos[0], np.roll(self._reference.wrist_quat_wxyz[0], -1))
+        position_error, orientation_error = _pose_error(
+            actual_wrist_robot,
+            self._reference_start_wrist_robot(),
         )
-        position_error, orientation_error = _pose_error(live_wrist, reference_wrist)
         joint_error = float(np.max(np.abs(joints - desired_joints)))
         self._frame0_errors = position_error, orientation_error, joint_error
         return (
@@ -587,12 +740,21 @@ class RegrindPolicyNode:
             and self._phase in {"armed", "start_pending", "approaching", "ready", "running"}
             and self._session_client.startup_ready
         )
+        with self._lock:
+            arm_received_at = self._arm_received_at
+            arm_input_error = self._arm_input_error
         diagnostics = {
             "mode": "real_closed_loop",
             "frame_index": self._frame_index,
             "frame_count": self._reference.frame_count,
+            "start_frame": self._start_frame,
             "deadman_pressed": self._deadman_pressed,
             "motive_age_ms": None if sample is None else (now - sample.received_at) * 1000.0,
+            "arm_fk_age_ms": (
+                None if arm_received_at == 0.0
+                else (now - arm_received_at) * 1000.0
+            ),
+            "arm_fk_input_error": arm_input_error,
             "input_error": input_error,
             "admission_error": admission_error,
             "ready_for_inference_key": self._phase == "ready",
@@ -613,7 +775,7 @@ class RegrindPolicyNode:
             phase=self._phase,
             ready=ready,
             healthy=healthy,
-            capabilities=["real"] if admitted else [],
+            capabilities=["real"],
             error=self._last_error or admission_error,
             diagnostics=diagnostics,
         )
@@ -626,7 +788,7 @@ class RegrindPolicyNode:
             self._phase,
             ready,
             healthy,
-            ["real"] if admitted else [],
+            ["real"],
             self._last_error or admission_error,
             diagnostics,
             self._publisher.publisher_instance_id,
@@ -643,7 +805,10 @@ class RegrindPolicyNode:
             if self._session_client.start_authorized:
                 self._phase = "approaching"
                 self._phase_started = now
-                _LOG.warning("start authorized; hold Enter to reach reference frame0")
+                _LOG.warning(
+                    "start authorized; hold Enter to reach reference frame %s",
+                    self._start_frame,
+                )
             elif self._session_client.pending_intent_sequence is None:
                 self._phase = "armed"
                 _LOG.error("coordinator rejected start: %s", self._session_client.state.reason if self._session_client.state else "unknown")
@@ -685,8 +850,13 @@ class RegrindPolicyNode:
             self._begin_return("deadman read failed", exit_after_return=True)
             return True
         if self._phase == "approaching":
+            actual_wrist_robot, arm_error = self._fresh_arm_wrist(now)
+            if actual_wrist_robot is None:
+                self._last_error = arm_error
+                self._begin_return(arm_error or "arm feedback lost", exit_after_return=True)
+                return True
             if pressed:
-                if self._approach_frame_zero(sample, joints):
+                if self._approach_start_frame(actual_wrist_robot, joints):
                     self._approach_stable_ticks += 1
                 else:
                     self._approach_stable_ticks = 0
@@ -694,7 +864,8 @@ class RegrindPolicyNode:
                     self._last_approach_log_at = now
                     assert self._frame0_errors is not None
                     _LOG.warning(
-                        "approaching frame0: wrist %.1f mm / %.1f deg, hand max %.3f rad",
+                        "approaching frame %s: arm FK r_wrist %.1f mm / %.1f deg, hand max %.3f rad",
+                        self._start_frame,
                         self._frame0_errors[0] * 1000.0,
                         self._frame0_errors[1],
                         self._frame0_errors[2],
@@ -703,7 +874,8 @@ class RegrindPolicyNode:
                     self._phase = "ready"
                     self._phase_started = now
                     _LOG.warning(
-                        "frame0 reached; release Enter, align the live hammer to the green target, then press i"
+                        "frame %s reached; release Enter, align the live hammer to the green target, then press i",
+                        self._start_frame,
                     )
             self._publish_cached()
             return True
@@ -743,6 +915,7 @@ class RegrindPolicyNode:
 
     def close(self) -> None:
         self._stop_event.set()
+        self._arm_state_sub.close()
         self._hand_state_sub.close()
         self._motive.close()
         self._hand_status_pub.close()
@@ -752,6 +925,17 @@ class RegrindPolicyNode:
             self._deadman.close()
         self._publisher.close()
         self._session_client.close()
+
+
+def _arm_executor_instance() -> str:
+    try:
+        authorities = json.loads(os.environ["TIANJI_AUTHORITIES"])
+        value = authorities["executor_arm"]["publisher_instance_id"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("launcher did not provide arm executor authority") from exc
+    if not isinstance(value, str) or not value:
+        raise RuntimeError("arm executor authority is invalid")
+    return value
 
 
 def _hand_executor_instance() -> str:
@@ -769,6 +953,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--reference", type=Path, required=True)
+    parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--config", default="")
     args = parser.parse_args(argv)
     if not args.model.is_file() or not args.reference.is_file():
@@ -795,8 +980,10 @@ def main(argv: list[str] | None = None) -> int:
             publisher_instance_id=instance,
             router_zid=router,
             coordinator_instance_id=coordinator,
+            arm_executor_instance_id=_arm_executor_instance(),
             hand_executor_instance_id=_hand_executor_instance(),
             real_capability=trusted_real_capability,
+            start_frame=args.start_frame,
         )
         return node.run()
     except KeyboardInterrupt:

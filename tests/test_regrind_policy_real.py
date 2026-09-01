@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import runpy
+import sys
+import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import mujoco
 import numpy as np
@@ -21,10 +25,79 @@ from tianji_teleop.protocol.messages import (
     HandJointState,
 )
 from tianji_teleop.regrind_policy import action_to_targets, quat_wxyz_to_rot6d
-from tianji_teleop.sources.regrind_policy_node import RegrindPolicyNode, _pose_error
+from tianji_teleop.sources.regrind_policy_node import (
+    RegrindPolicyNode,
+    _pose_error,
+    _require_authorized_sha256,
+)
 
 
 class RegrindRealPreflightTest(unittest.TestCase):
+    def test_arm_feedback_reports_missing_and_stale_separately(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        node._lock = threading.RLock()
+        node._params = {"arm_stale_s": 0.15}
+        node._arm_wrist_robot = None
+        node._arm_received_at = 0.0
+        node._arm_input_error = None
+
+        wrist, error = node._fresh_arm_wrist(1.0)
+        self.assertIsNone(wrist)
+        self.assertIn("not received", error)
+
+        node._arm_wrist_robot = np.zeros(7)
+        node._arm_received_at = 1.0
+        wrist, error = node._fresh_arm_wrist(1.2)
+        self.assertIsNone(wrist)
+        self.assertIn("200 ms", error)
+
+    def test_regrind_hand_replay_does_not_require_model(self) -> None:
+        scope = runpy.run_path(
+            Path(__file__).resolve().parents[1] / "scripts/regrind_live_infer.py",
+            run_name="regrind_hand_replay_cli_check",
+        )
+        reference = SimpleNamespace(frame_count=10)
+        sample = SimpleNamespace(
+            received_at=float("inf"),
+            wrist_xyzw=np.zeros(7),
+            hammer_xyzw=np.zeros(7),
+        )
+        live = SimpleNamespace(latest=lambda: sample, close=lambda: None)
+        session = SimpleNamespace(close=lambda: None)
+        called = []
+        scope["main"].__globals__["load_reference"] = lambda _path: reference
+        scope["main"].__globals__["open_session"] = lambda _endpoint: session
+        scope["main"].__globals__["RegrindMotiveTracker"] = (
+            lambda *_args, **_kwargs: live
+        )
+        scope["main"].__globals__["_run_reference_hand_replay"] = (
+            lambda path, value, rate, tracker, stale_s, start_frame: called.append(
+                (path, value, rate, tracker, stale_s, start_frame)
+            ) or 0
+        )
+        with patch.object(
+            sys, "argv",
+            [
+                "regrind_live_infer.py", "--hand-replay",
+                "--reference", __file__, "--start-frame", "5",
+            ],
+        ):
+            self.assertEqual(scope["main"](), 0)
+        self.assertEqual(
+            called, [(Path(__file__), reference, 50.0, live, 0.25, 5)]
+        )
+
+    def test_regrind_artifact_sha256_accepts_allowlist_and_rejects_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.h5"
+            path.write_bytes(b"authorized reference")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+            _require_authorized_sha256(path, ["0" * 64, digest])
+            _require_authorized_sha256(path, digest)
+            with self.assertRaisesRegex(ValueError, "SHA256"):
+                _require_authorized_sha256(path, ["0" * 64])
+
     def test_valid_authorized_hand_state_recovers_from_one_bad_sample(self) -> None:
         node = RegrindPolicyNode.__new__(RegrindPolicyNode)
         node._lock = threading.RLock()
@@ -64,8 +137,12 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._last_error = None
         node._phase = "armed"
         node._reference = SimpleNamespace(frame_count=342)
+        node._start_frame = 0
         node._frame_index = 0
         node._frame0_errors = None
+        node._lock = threading.RLock()
+        node._arm_received_at = 0.0
+        node._arm_input_error = None
         node._deadman_pressed = False
         node._session_client = SimpleNamespace(startup_ready=True)
         node._publisher = SimpleNamespace(
@@ -80,6 +157,43 @@ class RegrindRealPreflightTest(unittest.TestCase):
 
         self.assertTrue(published[0]["ready"])
         self.assertEqual(published[0]["diagnostics"]["input_error"], "waiting for live inputs")
+
+    def test_pending_real_admission_publishes_valid_component_status(self) -> None:
+        statuses = []
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        node._real_admitted = lambda: (False, "admission pending")
+        node._fresh_inputs = lambda _now: (None, None, "waiting for live inputs")
+        node._last_error = None
+        node._phase = "armed"
+        node._reference = SimpleNamespace(frame_count=342)
+        node._start_frame = 0
+        node._frame_index = 0
+        node._frame0_errors = None
+        node._lock = threading.RLock()
+        node._arm_received_at = 0.0
+        node._arm_input_error = None
+        node._deadman_pressed = False
+        node._session_client = SimpleNamespace(startup_ready=False)
+
+        def publish_source_status(**value):
+            statuses.append(ComponentStatus(
+                1, 1, 1, "source", value["component_id"], value["phase"],
+                value["ready"], value["healthy"], value["capabilities"],
+                value["error"], value["diagnostics"], "source-instance", "router",
+            ).to_dict())
+
+        node._publisher = SimpleNamespace(
+            sequence=1,
+            publisher_instance_id="source-instance",
+            router_zid="router",
+            publish_source_status=publish_source_status,
+        )
+        node._hand_status_pub = SimpleNamespace(put_json=statuses.append)
+
+        node._publish_status(1.0)
+
+        self.assertEqual([status["capabilities"] for status in statuses], [["real"], ["real"]])
+        self.assertTrue(all(not status["healthy"] for status in statuses))
 
     def test_alignment_viewer_preserves_zenoh_world_axes(self) -> None:
         scope = runpy.run_path(
@@ -151,33 +265,59 @@ class RegrindRealPreflightTest(unittest.TestCase):
             np.asarray([[0.0] * 20, [0.1] * 20]),
             mujoco,
         )
+        selected_meshes = {
+            mujoco.mj_id2name(
+                model, mujoco.mjtObj.mjOBJ_MESH,
+                int(model.geom_dataid[geom_id]),
+            )
+            for geom_id in overlay._geom_ids
+        }
+        self.assertIn("wuji2_r_wrist", selected_meshes)
+        self.assertNotIn("wuji2_r_mount", selected_meshes)
         home_scene = mujoco.MjvScene(model, 100)
         shifted_scene = mujoco.MjvScene(model, 100)
         next_frame_scene = mujoco.MjvScene(model, 100)
+        native_scene = mujoco.MjvScene(model, model.ngeom)
+        mujoco.mjv_updateScene(
+            model, data, mujoco.MjvOption(), None, mujoco.MjvCamera(),
+            mujoco.mjtCatBit.mjCAT_ALL, native_scene,
+        )
+        native_data_ids = {
+            int(geom.objid): int(geom.dataid)
+            for geom in native_scene.geoms[:native_scene.ngeom]
+            if int(geom.objtype) == int(mujoco.mjtObj.mjOBJ_GEOM)
+        }
+        self.assertEqual(overlay._frame_index, -1)
         overlay.draw(home_scene, mujoco, home_wrist, 0)
+        self.assertEqual(overlay._frame_index, 0)
         shifted_wrist = home_wrist.copy()
         shifted_wrist[0] += 0.1
         overlay.draw(shifted_scene, mujoco, shifted_wrist, 0)
         overlay.draw(next_frame_scene, mujoco, home_wrist, 1)
+        self.assertEqual(overlay._frame_index, 1)
 
-        self.assertEqual(home_scene.ngeom, 22)
-        self.assertEqual(shifted_scene.ngeom, 22)
-        home_positions = np.stack([home_scene.geoms[i].pos for i in range(22)])
-        shifted_positions = np.stack([shifted_scene.geoms[i].pos for i in range(22)])
+        self.assertEqual(home_scene.ngeom, 21)
+        self.assertEqual(shifted_scene.ngeom, 21)
+        self.assertEqual(
+            [int(home_scene.geoms[i].dataid) for i in range(21)],
+            [native_data_ids[geom_id] for geom_id in overlay._geom_ids],
+        )
+        home_positions = np.stack([home_scene.geoms[i].pos for i in range(21)])
+        shifted_positions = np.stack([shifted_scene.geoms[i].pos for i in range(21)])
         np.testing.assert_allclose(
             shifted_positions - home_positions,
-            np.tile([0.1, 0.0, 0.0], (22, 1)),
+            np.tile([0.1, 0.0, 0.0], (21, 1)),
             atol=1e-7,
         )
         next_positions = np.stack(
-            [next_frame_scene.geoms[i].pos for i in range(22)]
+            [next_frame_scene.geoms[i].pos for i in range(21)]
         )
         self.assertGreater(
             float(np.max(np.linalg.norm(next_positions - home_positions, axis=1))),
             0.001,
         )
 
-    def test_policy_frame_tracker_holds_frame0_until_running(self) -> None:
+    def test_policy_frame_tracker_holds_selected_start_until_running(self) -> None:
         scope = runpy.run_path(
             Path(__file__).resolve().parents[1] / "scripts/regrind_live_infer.py",
             run_name="regrind_policy_frame_tracker_check",
@@ -186,6 +326,7 @@ class RegrindRealPreflightTest(unittest.TestCase):
             router_zid="router",
             source_instance="source-instance",
             frame_count=342,
+            start_frame=5,
         )
 
         def status(phase: str, frame_index: int, sequence: int = 1):
@@ -206,7 +347,7 @@ class RegrindRealPreflightTest(unittest.TestCase):
             ).to_dict()
 
         self.assertTrue(tracker.on_status(status("ready", 17)))
-        self.assertEqual(tracker.current(), ("ready", 0))
+        self.assertEqual(tracker.current(), ("ready", 5))
         self.assertTrue(tracker.on_status(status("running", 17, 2)))
         self.assertEqual(tracker.current(), ("running", 16))
         foreign = status("running", 30, 3)
@@ -266,15 +407,16 @@ class RegrindRealPreflightTest(unittest.TestCase):
         self.assertAlmostEqual(position_error, 0.0)
         self.assertAlmostEqual(orientation_error, 0.0)
 
-    def test_frame0_approach_then_i_checks_hammer_before_inference(self) -> None:
+    def test_selected_start_approach_then_i_checks_hammer_before_inference(self) -> None:
         node = RegrindPolicyNode.__new__(RegrindPolicyNode)
         node._reference = SimpleNamespace(
-            wrist_pos=np.asarray([[0.0, 0.0, 0.0]]),
-            wrist_quat_wxyz=np.asarray([[1.0, 0.0, 0.0, 0.0]]),
-            object_pos=np.asarray([[0.0, 0.0, 0.0]]),
-            object_quat_wxyz=np.asarray([[1.0, 0.0, 0.0, 0.0]]),
-            joints=np.asarray([[0.02] * 20]),
+            wrist_pos=np.zeros((6, 3)),
+            wrist_quat_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (6, 1)),
+            object_pos=np.zeros((6, 3)),
+            object_quat_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (6, 1)),
+            joints=np.tile([0.02] * 20, (6, 1)),
         )
+        node._start_frame = 5
         node._robot_from_training = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
         node._wrist_to_tcp = node._robot_from_training.copy()
         node._conditioner = SimpleNamespace(condition=lambda pos, quat: (pos, quat, None))
@@ -296,11 +438,15 @@ class RegrindRealPreflightTest(unittest.TestCase):
         )
         node._training_from_motive = node._robot_from_training.copy()
 
-        self.assertFalse(node._approach_frame_zero(sample, np.zeros(20)))
+        arm_wrist_far = np.asarray([0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        arm_wrist_at_target = node._robot_from_training.copy()
+        self.assertFalse(node._approach_start_frame(arm_wrist_far, np.zeros(20)))
         np.testing.assert_allclose(node._cached_joints, 0.01)
-        self.assertFalse(node._approach_frame_zero(sample, np.asarray([0.02] * 20)))
-        sample.wrist_xyzw = node._robot_from_training.copy()
-        self.assertTrue(node._approach_frame_zero(sample, np.asarray([0.02] * 20)))
+        self.assertTrue(
+            node._approach_start_frame(
+                arm_wrist_at_target, np.asarray([0.02] * 20)
+            )
+        )
 
         joints = np.asarray([0.02] * 20)
         node._phase = "ready"
@@ -316,8 +462,34 @@ class RegrindRealPreflightTest(unittest.TestCase):
         sample.hammer_xyzw = node._robot_from_training.copy()
         node._request_inference()
         self.assertEqual(node._phase, "running")
-        self.assertEqual(node._frame_index, 0)
+        self.assertEqual(node._frame_index, 5)
         np.testing.assert_allclose(node._last_action, 0.0)
+
+    def test_hand_approach_target_accumulates_with_static_feedback(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        node._reference = SimpleNamespace(joints=np.asarray([[0.05] * 20]))
+        node._start_frame = 0
+        node._training_from_motive = np.asarray(
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        )
+        node._reference_start_tcp = lambda: node._training_from_motive.copy()
+        node._reference_start_wrist_robot = lambda: node._training_from_motive.copy()
+        node._conditioner = SimpleNamespace(condition=lambda pos, quat: (pos, quat, None))
+        node._hand_config = SimpleNamespace(
+            lower_limits_rad=np.asarray([-1.0] * 20),
+            upper_limits_rad=np.asarray([1.0] * 20),
+        )
+        node._params = {
+            "hand_maximum_step_rad": 0.01,
+            "wrist_frame0_position_tolerance_m": 0.01,
+            "wrist_frame0_orientation_tolerance_deg": 5.0,
+        }
+        node._last_hand_target = None
+
+        for _ in range(3):
+            node._approach_start_frame(node._training_from_motive, np.zeros(20))
+
+        np.testing.assert_allclose(node._cached_joints, 0.03)
 
 
 if __name__ == "__main__":
