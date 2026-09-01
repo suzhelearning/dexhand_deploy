@@ -9,6 +9,8 @@ NEW_IK="${STAGING_BIN}/arm_ik_producer"
 NEW_PROBE="${STAGING_BIN}/tianji_official_ik_probe"
 NEW_WORKER="${STAGING_BIN}/tianji_official_ik_worker"
 NEW_BRIDGE="${STAGING_BIN}/wuji_hand2_bridge"
+NEW_MARVIN_NATIVE="${BUNDLE_ROOT}/staging/ik/lib/libmarvin_native_driver.so"
+RUNTIME_LIB="${BUNDLE_ROOT}/runtime/tianji_teleop/lib"
 RUNTIME_PROGRAMS=(
   mocap_live
   mocap_h5_replay
@@ -41,7 +43,7 @@ RUNTIME_PYTHON="${BUNDLE_ROOT}/runtime/tianji_teleop/lib/python3.10/site-package
 STAGING_PYTHON="${BUNDLE_ROOT}/staging/ik/lib/python3.10/site-packages/tianji_teleop"
 STRIP_TOOL="${IK_STRIP_TOOL:-/usr/bin/strip}"
 
-for binary in "${NEW_IK}" "${NEW_PROBE}" "${NEW_WORKER}" "${NEW_BRIDGE}"; do
+for binary in "${NEW_IK}" "${NEW_PROBE}" "${NEW_WORKER}" "${NEW_BRIDGE}" "${NEW_MARVIN_NATIVE}"; do
   if [[ ! -x "${binary}" ]]; then
     printf '错误：请先执行 pixi run -e ik-build build-ik；缺少 %s\n' \
       "${binary}" >&2
@@ -76,7 +78,7 @@ for cleanup_root in "${RUNTIME_BIN}" "${STAGING_BIN}"; do
   for stale in "${cleanup_root}"/*; do
     stale_name="$(basename -- "${stale}")"
     keep=false
-    for allowed in "${RUNTIME_PROGRAMS[@]}" arm_ik_producer tianji_official_ik_probe tianji_official_ik_worker wuji_hand2_bridge; do
+    for allowed in "${RUNTIME_PROGRAMS[@]}" arm_ik_producer tianji_official_ik_probe tianji_official_ik_worker wuji_hand2_bridge test; do
       if [[ "${stale_name}" == "${allowed}" || "${stale_name}" == "${allowed}.bin" ]]; then
         keep=true
         break
@@ -95,6 +97,7 @@ for path in \
   "${RUNTIME_BIN}/tianji_official_ik_worker.bin" \
   "${RUNTIME_BIN}/wuji_hand2_bridge" \
   "${RUNTIME_BIN}/wuji_hand2_bridge.bin" \
+  "${RUNTIME_LIB}/libmarvin_native_driver.so" \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK/libKine.so" \
   "${SDK_RUNTIME_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
 do
@@ -119,6 +122,7 @@ mkdir -p \
   "${SDK_RUNTIME_ROOT}/kinematicsSDK" \
   "${SDK_RUNTIME_ROOT}/CommonConfig" \
   "${RUNTIME_BIN}" \
+  "${RUNTIME_LIB}" \
   "${RUNTIME_CONFIG}" \
   "${RUNTIME_ASSETS}"
 mkdir -p "${RUNTIME_PYTHON}" "${STAGING_PYTHON}"
@@ -145,6 +149,7 @@ install -m 0755 "${NEW_IK}" "${RUNTIME_BIN}/arm_ik_producer.bin.new"
 install -m 0755 "${NEW_PROBE}" "${RUNTIME_BIN}/tianji_official_ik_probe.bin.new"
 install -m 0755 "${NEW_WORKER}" "${RUNTIME_BIN}/tianji_official_ik_worker.bin.new"
 install -m 0755 "${NEW_BRIDGE}" "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new"
+install -m 0755 "${NEW_MARVIN_NATIVE}" "${RUNTIME_LIB}/libmarvin_native_driver.so.new"
 # staging 保留 RelWithDebInfo 完整调试符号；runtime 只部署去除
 # DWARF 调试段的运行版，避免将数十 MB 的调试信息提交到 Git。
 "${STRIP_TOOL}" --strip-debug \
@@ -155,6 +160,8 @@ install -m 0755 "${NEW_BRIDGE}" "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new"
   "${RUNTIME_BIN}/tianji_official_ik_worker.bin.new"
 "${STRIP_TOOL}" --strip-debug \
   "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new"
+"${STRIP_TOOL}" --strip-debug \
+  "${RUNTIME_LIB}/libmarvin_native_driver.so.new"
 mv -f -- \
   "${RUNTIME_BIN}/arm_ik_producer.bin.new" \
   "${RUNTIME_BIN}/arm_ik_producer.bin"
@@ -167,6 +174,9 @@ mv -f -- \
 mv -f -- \
   "${RUNTIME_BIN}/wuji_hand2_bridge.bin.new" \
   "${RUNTIME_BIN}/wuji_hand2_bridge.bin"
+mv -f -- \
+  "${RUNTIME_LIB}/libmarvin_native_driver.so.new" \
+  "${RUNTIME_LIB}/libmarvin_native_driver.so"
 install -m 0755 \
   "${BUNDLE_ROOT}/scripts/runtime_arm_ik_producer.sh" \
   "${RUNTIME_BIN}/arm_ik_producer"
@@ -227,5 +237,6 @@ printf '%s\n' \
   "官方 probe：${RUNTIME_BIN}/tianji_official_ik_probe" \
   "官方 SDK：${SDK_RUNTIME_ROOT}" \
   "wuji2 手桥：${RUNTIME_BIN}/wuji_hand2_bridge" \
+  "Marvin 200 Hz 原生驱动：${RUNTIME_LIB}/libmarvin_native_driver.so" \
   "配置已同步：${SOURCE_CONFIG} -> ${RUNTIME_CONFIG}" \
   "资产已同步：${SOURCE_ASSETS} -> ${RUNTIME_ASSETS}"

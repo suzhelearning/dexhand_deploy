@@ -30,13 +30,17 @@ worker_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/tianji_official_ik_wo
 qp_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/pinocchio_qp_ik_probe"
 trajectory_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/joint_trajectory_limiter_probe"
 wuji_bridge_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/wuji_hand2_bridge"
+marvin_native_library="${BUNDLE_ROOT}/staging/ik/lib/libmarvin_native_driver.so"
+marvin_probe_binary="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/test/marvin_native_driver_probe"
+marvin_fake_sdk="${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/test/libmarvin_native_fake_sdk.so"
 for binary in \
   "${ik_binary}" \
   "${probe_binary}" \
   "${worker_binary}" \
   "${qp_probe_binary}" \
   "${trajectory_probe_binary}" \
-  "${wuji_bridge_binary}"
+  "${wuji_bridge_binary}" \
+  "${marvin_probe_binary}"
 do
   if [[ ! -x "${binary}" ]]; then
     printf '错误：编译产物不存在：%s\n' "${binary}" >&2
@@ -47,9 +51,17 @@ do
     exit 1
   fi
 done
+for library in "${marvin_native_library}" "${marvin_fake_sdk}"; do
+  if [[ ! -f "${library}" || "$(file -b "${library}")" != *"ELF 64-bit"* ]]; then
+    printf '错误：原生 Marvin 库无效：%s\n' "${library}" >&2
+    exit 1
+  fi
+done
 
 "${trajectory_probe_binary}" \
   "${BUNDLE_ROOT}/src/tianji_teleop/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
+LD_LIBRARY_PATH="${BUNDLE_ROOT}/staging/ik/lib:${LD_LIBRARY_PATH:-}" \
+  "${marvin_probe_binary}" "${marvin_fake_sdk}"
 
 # 便携层 ABI 检查：新二进制（系统 GCC/glibc 编译）必须能被
 # runtime/abi 的 glibc 2.35 + libstdc++ 加载。
@@ -74,7 +86,8 @@ for binary in \
   "${ik_binary}" \
   "${probe_binary}" \
   "${worker_binary}" \
-  "${wuji_bridge_binary}"; do
+  "${wuji_bridge_binary}" \
+  "${marvin_native_library}"; do
   needed_glibc="$(
     objdump -T "${binary}" |
       grep '\*UND\*' |

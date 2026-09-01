@@ -34,6 +34,50 @@ from tianji_teleop.sources.regrind_policy_node import (
 
 
 class RegrindRealPreflightTest(unittest.TestCase):
+    def test_approach_toggle_continues_after_enter_release(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        identity = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        sample = SimpleNamespace(wrist_xyzw=identity)
+        approached = []
+        node._lock = threading.RLock()
+        node._phase = "approaching"
+        node._hold_enter = False
+        node._approach_enabled = False
+        node._deadman_pressed = False
+        node._inference_enabled = False
+        node._enter_edge_pending = False
+        node._deadman_error = None
+        node._last_error = None
+        node._approach_stable_ticks = 0
+        node._required_approach_ticks = 5
+        node._last_approach_log_at = 1.0
+        node._session_client = SimpleNamespace(
+            poll=lambda: None,
+            start_authorized=True,
+        )
+        node._real_admitted = lambda: (True, None)
+        node._fresh_inputs = lambda _now: (sample, np.zeros(20), None)
+        node._check_hand_tracking = lambda _joints, _now: None
+        node._read_deadman = lambda: False
+        node._fresh_arm_wrist = lambda _now: (identity, None)
+        node._approach_start_frame = (
+            lambda _wrist, _joints: approached.append(True) or False
+        )
+        node._publish_cached = lambda: None
+
+        node._on_key("\n")
+        self.assertTrue(node._tick(1.0))
+        self.assertEqual(approached, [True])
+
+        approached.clear()
+        node._hold_enter = True
+        node._read_deadman = lambda: False
+        self.assertTrue(node._tick(1.02))
+        self.assertEqual(approached, [])
+        node._read_deadman = lambda: True
+        self.assertTrue(node._tick(1.04))
+        self.assertEqual(approached, [True])
+
     def test_arm_feedback_reports_missing_and_stale_separately(self) -> None:
         node = RegrindPolicyNode.__new__(RegrindPolicyNode)
         node._lock = threading.RLock()
@@ -52,7 +96,7 @@ class RegrindRealPreflightTest(unittest.TestCase):
         self.assertIsNone(wrist)
         self.assertIn("200 ms", error)
 
-    def test_reference_phase_waits_for_arm_tracking_and_ik_recovery(self) -> None:
+    def test_reference_phase_reports_arm_tracking_but_only_waits_for_ik_recovery(self) -> None:
         node = RegrindPolicyNode.__new__(RegrindPolicyNode)
         node._lock = threading.RLock()
         node._router_zid = "router"
@@ -63,8 +107,6 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._arm_producer_input_error = None
         node._params = {
             "arm_stale_s": 0.15,
-            "phase_tracking_position_tolerance_m": 0.01,
-            "phase_tracking_orientation_tolerance_deg": 5.0,
         }
         node._wrist_to_tcp = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
         node._cached_tcp = node._wrist_to_tcp.copy()
@@ -108,8 +150,8 @@ class RegrindRealPreflightTest(unittest.TestCase):
         actual_wrist = node._cached_tcp.copy()
         actual_wrist[0] = 0.02
         ready, reason = node._reference_phase_ready(time.monotonic(), actual_wrist)
-        self.assertFalse(ready)
-        self.assertIn("tracking", reason)
+        self.assertTrue(ready, reason)
+        self.assertAlmostEqual(node._phase_tracking_errors[0], 0.02)
 
     def test_running_tick_holds_policy_until_reference_governor_is_ready(self) -> None:
         node = RegrindPolicyNode.__new__(RegrindPolicyNode)

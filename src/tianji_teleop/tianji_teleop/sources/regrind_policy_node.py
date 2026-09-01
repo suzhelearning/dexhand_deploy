@@ -78,8 +78,6 @@ DEFAULT_PARAMETERS = {
     "maximum_input_skew_s": 0.02,
     "wrist_frame0_position_tolerance_m": 0.01,
     "wrist_frame0_orientation_tolerance_deg": 5.0,
-    "phase_tracking_position_tolerance_m": 0.01,
-    "phase_tracking_orientation_tolerance_deg": 5.0,
     "hammer_start_position_tolerance_m": 0.01,
     "hammer_start_orientation_tolerance_deg": 5.0,
     "hand_maximum_step_rad": 0.01,
@@ -301,6 +299,7 @@ class RegrindPolicyNode:
             round(self._rate * float(params["hand_tracking_error_duration_s"])),
         )
         self._deadman_pressed = False
+        self._approach_enabled = False
         self._inference_enabled = False
         self._hold_enter = bool(params.get("hold_enter", False))
         self._enter_edge_pending = False
@@ -319,12 +318,14 @@ class RegrindPolicyNode:
         self._keyboard_thread.start()
         _LOG.warning(
             "REAL Regrind loaded: checkpoint iteration=%s, frames=%s. "
-            "Press s, then hold Enter to reach frame %s; release Enter and align the hammer in the viewer; "
+            "Press s, then %s to reach frame %s; %s and align the hammer in the viewer; "
             "%s; "
             "s returns Home; q returns and exits.",
             iteration,
             self._reference.frame_count,
+            "hold Enter" if self._hold_enter else "press Enter once",
             self._start_frame,
+            "release Enter" if self._hold_enter else "wait for completion",
             "press i, then press Enter once to infer automatically; press Enter again to pause"
             if not self._hold_enter
             else "press i, then hold Enter to infer; release to hold",
@@ -448,17 +449,6 @@ class RegrindPolicyNode:
         actual_tcp = compose_pose(actual_wrist_robot, self._wrist_to_tcp)
         position_error, orientation_error = _pose_error(actual_tcp, self._cached_tcp)
         self._phase_tracking_errors = position_error, orientation_error
-        if (
-            position_error > float(self._params["phase_tracking_position_tolerance_m"])
-            or orientation_error > float(
-                self._params["phase_tracking_orientation_tolerance_deg"]
-            )
-        ):
-            return (
-                False,
-                f"arm tracking {position_error * 1000.0:.1f} mm / "
-                f"{orientation_error:.1f} deg",
-            )
         return True, None
 
     def _on_hand_state(self, payload: Any) -> None:
@@ -543,8 +533,15 @@ class RegrindPolicyNode:
             return
         if key in ("\r", "\n"):
             with self._lock:
-                if self._phase == "running" and not getattr(self, "_hold_enter", False):
-                    self._enter_edge_pending = True
+                if not getattr(self, "_hold_enter", False):
+                    if self._phase == "approaching":
+                        self._approach_enabled = not self._approach_enabled
+                        _LOG.warning(
+                            "approach %s (Enter toggle)",
+                            "started" if self._approach_enabled else "paused",
+                        )
+                    elif self._phase == "running":
+                        self._enter_edge_pending = True
             return
         if key != "s":
             return
@@ -590,6 +587,7 @@ class RegrindPolicyNode:
         self._last_phase_hold_log_at = 0.0
         self._last_approach_log_at = 0.0
         self._frame_index = self._start_frame
+        self._approach_enabled = False
         self._inference_enabled = False
         self._enter_edge_pending = False
         self._last_error = None
@@ -601,10 +599,11 @@ class RegrindPolicyNode:
         position_error, orientation_error = _pose_error(start_tcp, self._home_tcp)
         _LOG.warning(
             "start requested; frame %s is %.1f mm / %.1f deg from Home. "
-            "Hold Enter after authorization to approach it.",
+            "%s after authorization to approach it.",
             self._start_frame,
             position_error * 1000.0,
             orientation_error,
+            "Hold Enter" if self._hold_enter else "Press Enter once",
         )
 
     def _calibrate_world(self, live_home_wrist: np.ndarray) -> None:
@@ -686,6 +685,7 @@ class RegrindPolicyNode:
         self._tracking_error_since = None
         self._last_action.fill(0.0)
         self._frame_index = self._start_frame
+        self._approach_enabled = False
         self._inference_enabled = False
         self._enter_edge_pending = False
         self._phase = "running"
@@ -706,6 +706,7 @@ class RegrindPolicyNode:
             return
         self._cached_tcp = None
         self._cached_joints = None
+        self._approach_enabled = False
         self._inference_enabled = False
         self._enter_edge_pending = False
         self._exit_after_return = exit_after_return
@@ -950,7 +951,8 @@ class RegrindPolicyNode:
                 self._phase = "approaching"
                 self._phase_started = now
                 _LOG.warning(
-                    "start authorized; hold Enter to reach reference frame %s",
+                    "start authorized; %s to reach reference frame %s",
+                    "hold Enter" if self._hold_enter else "press Enter once",
                     self._start_frame,
                 )
             elif self._session_client.pending_intent_sequence is None:
@@ -1003,7 +1005,10 @@ class RegrindPolicyNode:
                 self._last_error = arm_error
                 self._begin_return(arm_error or "arm feedback lost", exit_after_return=True)
                 return True
-            if pressed:
+            approach_enabled = (
+                pressed if self._hold_enter else self._approach_enabled
+            )
+            if approach_enabled:
                 if self._approach_start_frame(actual_wrist_robot, joints):
                     self._approach_stable_ticks += 1
                 else:
@@ -1019,11 +1024,13 @@ class RegrindPolicyNode:
                         self._frame0_errors[2],
                     )
                 if self._approach_stable_ticks >= self._required_approach_ticks:
+                    self._approach_enabled = False
                     self._phase = "ready"
                     self._phase_started = now
                     _LOG.warning(
-                        "frame %s reached; release Enter, align the live hammer to the green target, then press i",
+                        "frame %s reached; %s, align the live hammer to the green target, then press i",
                         self._start_frame,
+                        "release Enter" if self._hold_enter else "motion stopped",
                     )
             self._publish_cached()
             return True
@@ -1153,7 +1160,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--hold-enter",
         action="store_true",
-        help="使用按住 Enter 才推理的模式；默认按一次 Enter 后自动推理",
+        help="靠近起始帧和推理都使用按住 Enter 才运动；默认按一次 Enter 自动运动",
     )
     args = parser.parse_args(argv)
     if not args.model.is_file() or not args.reference.is_file():

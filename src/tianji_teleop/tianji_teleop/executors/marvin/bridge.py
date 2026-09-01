@@ -58,6 +58,11 @@ def _create_official_session() -> MarvinHardwareSession:
     return create_official_marvin_session()
 
 
+def _create_native_session(params: Mapping[str, Any]) -> MarvinHardwareSession:
+    from .native_session import create_native_marvin_session
+    return create_native_marvin_session(params)
+
+
 def _apply_speed_overrides(params: dict[str, Any]) -> None:
     """Apply explicit real-arm speed overrides; connect validates 1..100."""
     for env_name, parameter in (
@@ -117,15 +122,42 @@ class MarvinExecutor:
             "feedback_hard_limit_padding_deg": 5.0,
             "robot_ip": "",
             "connection_wait_s": 1.0,
+            "hardware_driver": "python_sdk",
+            "control_mode": "position",
+            "controlled_sides": ["left", "right"],
             "hardware_factory": _create_official_session,
         }
         if params:
             options.update(params)
         self.params = options
+        controlled_sides = options["controlled_sides"]
+        if (
+            not isinstance(controlled_sides, (list, tuple))
+            or not controlled_sides
+            or any(side not in {"left", "right"} for side in controlled_sides)
+            or len(set(controlled_sides)) != len(controlled_sides)
+        ):
+            raise ValueError("controlled_sides must contain left and/or right")
+        self._controlled_sides = frozenset(controlled_sides)
         self._rate_hz = float(options["rate_hz"])
         if self._rate_hz <= 0.0:
             raise ValueError("rate must be positive")
-        self._session_factory = options["hardware_factory"]
+        driver = str(options["hardware_driver"])
+        mode = str(options["control_mode"])
+        if driver == "native_cpp":
+            if mode != "joint_impedance":
+                raise ValueError("native_cpp Marvin driver requires joint_impedance")
+            self._required_arm_state = 3
+            self._session_factory = (
+                options["hardware_factory"]
+                if params and "hardware_factory" in params
+                else lambda: _create_native_session(options)
+            )
+        elif driver == "python_sdk" and mode == "position":
+            self._required_arm_state = 1
+            self._session_factory = options["hardware_factory"]
+        else:
+            raise ValueError(f"unsupported Marvin driver/mode: {driver}/{mode}")
         self._hardware = hardware_session
         self._readiness = MarvinReadiness(
             robot_config=self.robot,
@@ -144,11 +176,14 @@ class MarvinExecutor:
                 command_timeout_s=float(options["command_timeout_s"]),
                 state_timeout_s=float(options["state_timeout_s"]),
                 feedback_timeout_s=float(options["feedback_timeout_s"]),
+                maximum_pair_skew_s=float(options.get("maximum_pair_skew_s", 0.03)),
                 maximum_output_step_deg=float(options["maximum_output_step_deg"]),
                 maximum_tracking_error_deg=float(options["maximum_tracking_error_deg"]),
                 return_minimum_duration_s=float(options["return_minimum_duration_s"]),
                 return_max_speed_deg_s=float(options["return_max_speed_deg_s"]),
                 home_tolerance_deg=float(np.degrees(options["home_tolerance_rad"])),
+                feedback_hard_limit_padding_deg=float(options["feedback_hard_limit_padding_deg"]),
+                required_arm_state=self._required_arm_state,
             ),
         )
         self._phase = "waiting_for_connection"
@@ -159,6 +194,7 @@ class MarvinExecutor:
         self._feedback: MarvinFeedback | None = None
         self._feedback_received_ns: int | None = None
         self._last_output_deg: np.ndarray | None = None
+        self._inactive_hold_deg: np.ndarray | None = None
         self._last_error: str | None = None
         self._last_action = "none"
         self._command_count = 0
@@ -378,6 +414,9 @@ class MarvinExecutor:
             )
             self._feedback = feedback
             self._feedback_received_ns = int(self.clock())
+            self._inactive_hold_deg = np.concatenate(
+                [feedback.left_joints_deg, feedback.right_joints_deg]
+            )
             latest_state = self._session_state.state if self._session_state is not None else None
             # Re-check immediately before any home motion: a fault that won
             # the race during connect must dominate the older state captured
@@ -385,8 +424,14 @@ class MarvinExecutor:
             if latest_state == "fault":
                 fault_reconnect = True
             if not fault_reconnect and latest_state != "returning":
+                left_home = np.degrees(self.robot.left_home_rad)
+                right_home = np.degrees(self.robot.right_home_rad)
+                if "left" not in self._controlled_sides:
+                    left_home = self._inactive_hold_deg[:7]
+                if "right" not in self._controlled_sides:
+                    right_home = self._inactive_hold_deg[7:]
                 self._hardware.move_to_home(
-                    np.degrees(self.robot.left_home_rad), np.degrees(self.robot.right_home_rad),
+                    left_home, right_home,
                     rate_hz=self._rate_hz,
                     minimum_duration_s=float(self.params["return_minimum_duration_s"]),
                     max_speed_deg_s=float(self.params["return_max_speed_deg_s"]),
@@ -395,6 +440,7 @@ class MarvinExecutor:
                     lower_limits_deg=np.degrees(self.robot.lower_limits_rad),
                     upper_limits_deg=np.degrees(self.robot.upper_limits_rad),
                     hard_limit_padding_deg=float(self.params["feedback_hard_limit_padding_deg"]),
+                    required_state=self._required_arm_state,
                 )
             # Consult the latest state again so a fault callback cannot be
             # overwritten by the stale pre-connect state.
@@ -410,6 +456,7 @@ class MarvinExecutor:
             self._last_error = f"startup_error: {exc}"
             self._phase = "failed"
             self._release_hardware(soft_stop=True)
+            self._publish_status()
             return False
 
     def _release_hardware(self, *, soft_stop: bool = False) -> None:
@@ -449,9 +496,22 @@ class MarvinExecutor:
             np.asarray(left.position_rad, dtype=np.float64),
             np.asarray(right.position_rad, dtype=np.float64),
         ])
+        if self._inactive_hold_deg is not None:
+            if "left" not in self._controlled_sides:
+                output[:7] = np.radians(self._inactive_hold_deg[:7])
+            if "right" not in self._controlled_sides:
+                output[7:] = np.radians(self._inactive_hold_deg[7:])
         lower = np.tile(np.asarray(self.robot.lower_limits_rad, dtype=np.float64), 2)
         upper = np.tile(np.asarray(self.robot.upper_limits_rad, dtype=np.float64), 2)
-        if not np.isfinite(output).all() or np.any(output < lower) or np.any(output > upper):
+        controlled = np.concatenate([
+            np.full(7, "left" in self._controlled_sides),
+            np.full(7, "right" in self._controlled_sides),
+        ])
+        if (
+            not np.isfinite(output).all()
+            or np.any((output < lower) & controlled)
+            or np.any((output > upper) & controlled)
+        ):
             self._trip_soft_stop("command exceeds robot hard limits")
             return
         output_deg = np.degrees(output)
@@ -468,6 +528,13 @@ class MarvinExecutor:
             return
         if decision.left_joints_deg is not None and decision.right_joints_deg is not None:
             output_deg = np.concatenate([decision.left_joints_deg, decision.right_joints_deg])
+        if self._inactive_hold_deg is not None:
+            if "left" not in self._controlled_sides:
+                output_deg[:7] = self._inactive_hold_deg[:7]
+                self._hardware_safety._last_output[:7] = output_deg[:7]
+            if "right" not in self._controlled_sides:
+                output_deg[7:] = self._inactive_hold_deg[7:]
+                self._hardware_safety._last_output[7:] = output_deg[7:]
         self._hardware.send_joint_targets(output_deg[:7], output_deg[7:])
         self._last_output_deg = output_deg
         self._command_count += 1
@@ -507,7 +574,8 @@ class MarvinExecutor:
             return f"arm_error:{feedback.error_codes}"
         if feedback.servo_error_reports != ("None", "None"):
             return f"servo_error:{feedback.servo_error_reports}"
-        if feedback.arm_states != (1, 1) or not command_states_compatible(feedback.command_states, 1):
+        required_state = self._required_arm_state
+        if feedback.arm_states != (required_state, required_state) or not command_states_compatible(feedback.command_states, required_state):
             return f"invalid_arm_state:{feedback.arm_states}/{feedback.command_states}"
         lower = np.tile(np.degrees(self.robot.lower_limits_rad), 2)
         upper = np.tile(np.degrees(self.robot.upper_limits_rad), 2)
@@ -601,10 +669,19 @@ class MarvinExecutor:
 
     def _make_status(self, ready: bool, healthy: bool, phase: str) -> ComponentStatus:
         self._status_sequence += 1
+        diagnostics = {
+            "safety_locked": self._safety_locked,
+            "commands_sent": self._command_count,
+            "rad_boundary": "sdk_only",
+            "hardware_driver": self.params["hardware_driver"],
+            "control_mode": self.params["control_mode"],
+        }
+        if self._hardware is not None:
+            diagnostics.update(getattr(self._hardware, "diagnostics", {}))
         return ComponentStatus(
             1, self._status_sequence, int(self.clock()), "executor_arm", "marvin",
             phase, ready, healthy, ["real"], self._last_error,
-            {"safety_locked": self._safety_locked, "commands_sent": self._command_count, "rad_boundary": "sdk_only"},
+            diagnostics,
             self.publisher_instance_id, self.router_zid,
         )
 
@@ -699,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
         if not node.connect():
             _LOG.error(
                 "Marvin startup failed: %s",
-                node.readiness.last_error or node.status.error or node.phase,
+                node.status.error or node.readiness.last_error or node.phase,
             )
             return 1
         node.run()

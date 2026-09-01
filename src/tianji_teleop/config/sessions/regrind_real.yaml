@@ -1,6 +1,6 @@
 source_config: sources/regrind_policy.yaml
 arm_producer_config: producers/ik.yaml
-arm_executor_config: executors/marvin.yaml
+arm_executor_config: executors/marvin_impedance.yaml
 coordinator_config: coordinator/arm.yaml
 required_capability: real
 active_sides: [right]

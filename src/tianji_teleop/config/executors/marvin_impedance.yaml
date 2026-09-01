@@ -1,0 +1,29 @@
+hardware_driver: native_cpp
+control_mode: joint_impedance
+controlled_sides: [right]
+robot_ip: ""
+connection_wait_s: 10.0
+rate_hz: 200.0
+velocity_ratio: 100
+acceleration_ratio: 100
+velocity_estimation_step_ms: 5
+# 已在现有 Tianji/Wuji 真机控制中使用的厂商 SDK 关节阻抗参数。
+joint_stiffness: [2, 2, 2, 1.6, 1, 1, 1]
+joint_damping: [0.3, 0.3, 0.3, 0.2, 0.2, 0.2, 0.2]
+# Wuji Hand：质量 kg；质心/惯量采用厂商 SDK 的 mm、kg·mm² 约定。
+tool_kinematics: [0, 0, 0, 0, 0, 0]
+tool_dynamics:
+  left: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  right: [0.95, 0, 0, 90, 0, 0, 0, 0, 0, 0]
+host_status_timeout_s: 1.0
+command_timeout_s: 0.15
+state_timeout_s: 1.0
+feedback_timeout_s: 0.15
+maximum_pair_skew_s: 0.03
+maximum_output_step_deg: 0.342
+maximum_teleop_speed_deg_s: 72.0
+maximum_tracking_error_deg: 8.0
+return_minimum_duration_s: 2.0
+return_max_speed_deg_s: 10.0
+home_tolerance_deg: 1.0
+feedback_hard_limit_padding_deg: 5.0

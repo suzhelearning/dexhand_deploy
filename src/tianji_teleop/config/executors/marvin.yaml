@@ -13,7 +13,10 @@ maximum_output_step_deg: 0.342
 maximum_teleop_speed_deg_s: 72.0
 maximum_tracking_error_deg: 8.0
 return_minimum_duration_s: 2.0
-return_max_speed_deg_s: 10.0
+return_max_speed_deg_s: 5.0
 home_tolerance_deg: 1.0
-feedback_hard_limit_padding_deg: 5.0
+# Marvin M6 左右臂物理限位是镜像关系；顺序为 left J1..J7, right J1..J7。
+feedback_hard_lower_limits_deg: [-90, -120, -178, -145, -178, -60, -90, -178, -120, 0, -145, -178, -60, -90]
+feedback_hard_upper_limits_deg: [178, 120, 0, 0, 178, 60, 90, 90, 120, 178, 0, 178, 60, 90]
+feedback_hard_limit_padding_deg: 1.0
 arm_config: robot/arm.yaml

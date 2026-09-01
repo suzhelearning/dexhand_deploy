@@ -582,14 +582,25 @@ class MarvinHardwareSession:
         lower_arm = np.asarray(lower_limits_deg, dtype=np.float64)
         upper_arm = np.asarray(upper_limits_deg, dtype=np.float64)
         if (
-            lower_arm.shape != (7,)
-            or upper_arm.shape != (7,)
+            lower_arm.shape not in {(7,), (14,)}
+            or upper_arm.shape != lower_arm.shape
             or not np.isfinite(lower_arm).all()
             or not np.isfinite(upper_arm).all()
         ):
-            raise ValueError("joint limits must contain seven finite values")
-        lower = np.tile(lower_arm, 2)
-        upper = np.tile(upper_arm, 2)
+            raise ValueError(
+                "joint limits must contain seven shared or fourteen "
+                "side-specific finite values"
+            )
+        lower = (
+            np.tile(lower_arm, 2)
+            if lower_arm.shape == (7,)
+            else lower_arm.copy()
+        )
+        upper = (
+            np.tile(upper_arm, 2)
+            if upper_arm.shape == (7,)
+            else upper_arm.copy()
+        )
         if np.any(lower >= upper):
             raise ValueError("lower joint limits must be below upper limits")
         padding = float(hard_limit_padding_deg)
@@ -606,9 +617,19 @@ class MarvinHardwareSession:
             [feedback.left_joints_deg, feedback.right_joints_deg]
         )
         lower, upper = hard_limits
-        if np.any(measured < lower) or np.any(measured > upper):
+        outside = (measured < lower) | (measured > upper)
+        if np.any(outside):
+            details = []
+            for flat_index in np.flatnonzero(outside):
+                side, joint = divmod(int(flat_index), 7)
+                details.append(
+                    f"{'left' if side == 0 else 'right'} J{joint + 1}="
+                    f"{measured[flat_index]:.3f} deg outside "
+                    f"[{lower[flat_index]:.3f}, {upper[flat_index]:.3f}]"
+                )
             raise MarvinHardwareError(
-                "measured joints exceed physical hard joint limits"
+                "measured joints exceed physical hard joint limits: "
+                + "; ".join(details)
             )
 
     @staticmethod

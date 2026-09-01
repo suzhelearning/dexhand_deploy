@@ -384,11 +384,12 @@ def _run_alignment_viewer(
                         mujoco.mjtGridPos.mjGRID_TOPLEFT,
                         "READ-ONLY  Solid robot: LIVE state\n"
                         "Orange hammer: LIVE  Green hammer/hand: EXPECTED reference\n"
-                        f"Control terminal: s + hold Enter -> frame {start_frame}\n"
+                        f"Control terminal: s + "
+                        f"{'hold Enter' if hold_enter else 'Enter once'} -> frame {start_frame}\n"
                         + (
                             "Then release, align hammer, press i; hold Enter -> infer\n"
                             if hold_enter
-                            else "Then release, align hammer, press i; Enter once -> infer, again -> pause\n"
+                            else "Then align hammer, press i; Enter once -> infer, again -> pause\n"
                         )
                         + "Yellow arrow: move live hammer toward target\n"
                         "Robot/Zenoh: +X forward(red), +Y left(green), +Z up(blue)\n"

@@ -34,6 +34,7 @@ if(NOT EXISTS "${WUJI_SDK_ROOT}/lib/libwuji_sdk_c.so")
 endif()
 
 find_package(Eigen3 REQUIRED)
+find_package(Threads REQUIRED)
 
 # 与 TJ_arm_control 保持同一版本；静态链接，部署时无需额外共享库。
 include(FetchContent)
@@ -95,6 +96,28 @@ target_include_directories(
 target_link_libraries(
   arm_ik PUBLIC Eigen3::Eigen pinocchio::pinocchio ruckig::ruckig ${CMAKE_DL_LIBS}
 )
+
+# Marvin SDK I/O stays in one dedicated 200 Hz native loop.  The Python
+# executor remains the protocol/safety boundary and calls this small C ABI.
+add_library(marvin_native_driver SHARED src/marvin/native_driver.cpp)
+target_compile_features(marvin_native_driver PUBLIC cxx_std_17)
+target_compile_options(marvin_native_driver PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(
+  marvin_native_driver PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(marvin_native_driver PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+
+add_library(marvin_native_fake_sdk SHARED src/marvin/native_driver_fake_sdk.cpp)
+target_compile_features(marvin_native_fake_sdk PUBLIC cxx_std_17)
+target_compile_options(marvin_native_fake_sdk PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(marvin_native_driver_probe src/marvin/native_driver_probe.cpp)
+target_compile_features(marvin_native_driver_probe PUBLIC cxx_std_17)
+target_compile_options(marvin_native_driver_probe PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(marvin_native_driver_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(marvin_native_driver_probe PRIVATE marvin_native_driver Threads::Threads)
 
 # 厂商 libKine 与 Pinocchio 的依赖闭包不能安全共存。native 库只链接
 # Eigen/dl，供独立 worker 和 probe 使用；主节点内使用 IPC proxy。
@@ -237,6 +260,7 @@ target_link_options(
 install(
   TARGETS
     arm_ik
+    marvin_native_driver
     tianji_official_native
     arm_ik_producer
     tianji_official_ik_probe
@@ -248,6 +272,11 @@ install(
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+install(
+  TARGETS marvin_native_fake_sdk marvin_native_driver_probe
+  LIBRARY DESTINATION lib/${PROJECT_NAME}/test
+  RUNTIME DESTINATION lib/${PROJECT_NAME}/test
 )
 install(DIRECTORY include/ DESTINATION include)
 install(

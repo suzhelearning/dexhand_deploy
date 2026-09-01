@@ -36,6 +36,7 @@ class Task8ConfigTreeTest(unittest.TestCase):
             "coordinator/arm.yaml",
             "executors/mujoco.yaml",
             "executors/marvin.yaml",
+            "executors/marvin_impedance.yaml",
             "executors/wuji_hand2.yaml",
             "recording/session.yaml",
             "replay/target.yaml",
@@ -101,7 +102,7 @@ class Task8ConfigTreeTest(unittest.TestCase):
         profile = yaml.safe_load((CONFIG / "sessions/regrind_real.yaml").read_text())
         self.assertEqual(profile["required_capability"], "real")
         self.assertEqual(profile["arm_producer_config"], "producers/ik.yaml")
-        self.assertEqual(profile["arm_executor_config"], "executors/marvin.yaml")
+        self.assertEqual(profile["arm_executor_config"], "executors/marvin_impedance.yaml")
         self.assertEqual(profile["hand_mode"], "direct")
         self.assertEqual(profile["hand_executor"], "wuji_hand2")
         launcher = (SCRIPTS / "run_session.sh").read_text(encoding="utf-8")

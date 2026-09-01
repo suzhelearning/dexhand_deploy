@@ -935,7 +935,7 @@ def _authority_contract(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
         add("producer_arm", producer_logical, ids.get("producer_arm"), None, ["tianji/producer/status", "tianji/proposal/arm/{side}", "tianji/producer/arm/{side}/solved_pose"], "producer/arm")
     add("coordinator_arm", "arm", ids.get("coordinator_arm"), None, ["tianji/coordinator/status", "tianji/session/state", "tianji/coordinator/at_home", "tianji/coordinator/return_complete", "tianji/command/arm/{side}"], "coordinator/arm")
     executor_config = _profile_config(profile).get("arm_executor_config", "")
-    executor_logical = "marvin" if str(executor_config).endswith("marvin.yaml") else "mujoco"
+    executor_logical = "mujoco" if str(executor_config).endswith("mujoco.yaml") else "marvin"
     add("executor_arm", executor_logical, ids.get("executor_arm"), None, ["tianji/executor/status", "tianji/state/arm"], "executor/arm")
     hand_producers = _instance_map(manifest, "hand_producer_instances")
     hand_executors = _instance_map(manifest, "hand_executor_instances")

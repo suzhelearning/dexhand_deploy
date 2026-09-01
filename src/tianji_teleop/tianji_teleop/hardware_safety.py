@@ -23,6 +23,7 @@ class HardwareSafetySettings:
     return_max_speed_deg_s: float = 10.0
     home_tolerance_deg: float = 1.0
     feedback_hard_limit_padding_deg: float = 5.0
+    required_arm_state: int = 1
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,8 @@ class HardwareSafetyController:
             or self.settings.feedback_hard_limit_padding_deg < 0.0
         ):
             raise ValueError("hardware safety tolerances are invalid")
+        if self.settings.required_arm_state not in {1, 3}:
+            raise ValueError("required_arm_state must be position(1) or impedance(3)")
         self._home = np.concatenate(
             [
                 self._arm_vector(left_home_deg, "left_home_deg"),
@@ -359,11 +362,12 @@ class HardwareSafetyController:
             return "arm_error"
         if self._feedback.servo_error_reports != ("None", "None"):
             return "servo_error"
-        if self._feedback.arm_states != (1, 1):
+        required_state = self.settings.required_arm_state
+        if self._feedback.arm_states != (required_state, required_state):
             return "arm_state_invalid"
         if not command_states_compatible(
             self._feedback.command_states,
-            1,
+            required_state,
         ):
             return "command_state_invalid"
         return None

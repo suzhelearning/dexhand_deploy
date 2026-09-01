@@ -17,11 +17,12 @@ required_configs=(
   sources/mocap_live.yaml sources/h5_replay.yaml
   producers/ik.yaml producers/policy_hold.yaml
   coordinator/arm.yaml
-  executors/mujoco.yaml executors/marvin.yaml executors/wuji_hand2.yaml
+  executors/mujoco.yaml executors/marvin.yaml executors/marvin_impedance.yaml executors/wuji_hand2.yaml
   recording/session.yaml replay/target.yaml replay/joint.yaml
   diagnostics/mocap_calibration.yaml
   sessions/mocap_live_sim.yaml sessions/mocap_live_real.yaml
   sessions/h5_sim.yaml sessions/h5_real.yaml
+  sessions/regrind_real.yaml
   sessions/target_replay_sim.yaml sessions/joint_replay_sim.yaml
   sessions/diagnostic_mocap_calibration_sim.yaml
 )

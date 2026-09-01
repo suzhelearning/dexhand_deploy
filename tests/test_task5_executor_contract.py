@@ -16,7 +16,7 @@ from tianji_teleop.executors.marvin.readiness import MarvinReadiness
 from tianji_teleop.executors.mujoco.node import MujocoExecutor
 from tianji_teleop.executors.wuji_hand2.node import WujiHandExecutor
 from tianji_teleop.executors.wuji_hand2.config import WujiHandConfig
-from tianji_teleop.marvin_hardware import MarvinFeedback
+from tianji_teleop.marvin_hardware import MarvinFeedback, MarvinHardwareSession
 from tianji_teleop.protocol.messages import (
     ARM_JOINT_NAMES,
     ArmJointCommand,
@@ -628,6 +628,7 @@ class _ConnectableMarvinHardware(_FakeMarvinHardware):
     def __init__(self) -> None:
         super().__init__()
         self.home_calls = 0
+        self.home_args = None
 
     def connect_and_prepare(self, *args, **kwargs):
         self.connect_calls += 1
@@ -635,10 +636,55 @@ class _ConnectableMarvinHardware(_FakeMarvinHardware):
 
     def move_to_home(self, *args, **kwargs):
         self.home_calls += 1
+        self.home_args = args
 
 
 
 class MarvinExecutorSafetyTest(unittest.TestCase):
+    def test_marvin_feedback_hard_limits_are_side_specific(self):
+        lower = np.asarray(
+            [-90, -120, -178, -145, -178, -60, -90,
+             -178, -120, 0, -145, -178, -60, -90],
+            dtype=np.float64,
+        )
+        upper = np.asarray(
+            [178, 120, 0, 0, 178, 60, 90,
+             90, 120, 178, 0, 178, 60, 90],
+            dtype=np.float64,
+        )
+        bounds = MarvinHardwareSession._hard_limit_bounds(
+            lower, upper, 0.0
+        )
+        feedback = MarvinFeedback(
+            np.asarray([175, 0, -70, -60, 60, 0, 0]),
+            np.asarray([-175, 0, 70, -60, -60, 0, 0]),
+            (1, 1), (1, 1), (0, 0), (1, 1),
+            (10, 10), (10, 10), ("None", "None"),
+        )
+        MarvinHardwareSession._require_feedback_within_hard_limits(
+            feedback, bounds
+        )
+
+        config_path = (
+            Path(__file__).resolve().parents[1]
+            / "src/tianji_teleop/config/executors/marvin.yaml"
+        )
+        recovery = yaml.safe_load(config_path.read_text())
+        recovery_bounds = MarvinHardwareSession._hard_limit_bounds(
+            recovery["feedback_hard_lower_limits_deg"],
+            recovery["feedback_hard_upper_limits_deg"],
+            recovery["feedback_hard_limit_padding_deg"],
+        )
+        edge_feedback = MarvinFeedback(
+            np.asarray([55, -65, -70, -145.506, 60, 0, 0]),
+            np.asarray([-55, -65, 70, -60, -60, 0, 0]),
+            (1, 1), (1, 1), (0, 0), (1, 1),
+            (10, 10), (10, 10), ("None", "None"),
+        )
+        MarvinHardwareSession._require_feedback_within_hard_limits(
+            edge_feedback, recovery_bounds
+        )
+
     def test_explicit_marvin_speed_overrides_are_applied(self):
         params = {"velocity_ratio": 10, "acceleration_ratio": 10}
         with patch.dict(
@@ -667,6 +713,72 @@ class MarvinExecutorSafetyTest(unittest.TestCase):
             params={"rate_hz": 200.0},
         )
         self.assertEqual(executor._rate_hz, 200.0)
+
+    def test_marvin_real_uses_native_200hz_joint_impedance_driver(self):
+        config_root = Path(__file__).resolve().parents[1] / "src/tianji_teleop/config"
+        profile = yaml.safe_load((config_root / "sessions/regrind_real.yaml").read_text())
+        config = yaml.safe_load((config_root / profile["arm_executor_config"]).read_text())
+        self.assertEqual(config["hardware_driver"], "native_cpp")
+        self.assertEqual(float(config["rate_hz"]), 200.0)
+        self.assertEqual(config["control_mode"], "joint_impedance")
+        self.assertEqual(config["velocity_ratio"], 100)
+        self.assertEqual(config["acceleration_ratio"], 100)
+        self.assertEqual(config["velocity_estimation_step_ms"], 5)
+        self.assertEqual(config["joint_stiffness"], [2, 2, 2, 1.6, 1, 1, 1])
+        self.assertEqual(config["joint_damping"], [0.3, 0.3, 0.3, 0.2, 0.2, 0.2, 0.2])
+        self.assertEqual(config["tool_kinematics"], [0, 0, 0, 0, 0, 0])
+        self.assertEqual(config["tool_dynamics"]["left"], [0] * 10)
+        self.assertEqual(config["tool_dynamics"]["right"], [0.95, 0, 0, 90, 0, 0, 0, 0, 0, 0])
+        self.assertEqual(config["controlled_sides"], ["right"])
+
+        executor = MarvinExecutor(
+            hardware_session=_FakeMarvinHardware(), publisher_instance_id="marvin",
+            router_zid="router", coordinator_instance_id="coord",
+            params={**config, "hardware_factory": _FakeMarvinHardware},
+        )
+        self.assertEqual(executor._required_arm_state, 3)
+        self.assertEqual(executor._hardware_safety.settings.required_arm_state, 3)
+
+    def test_right_only_control_holds_left_at_startup_feedback(self):
+        hardware = _ConnectableMarvinHardware()
+        robot = MarvinExecutor(
+            hardware_session=hardware,
+            publisher_instance_id="marvin",
+            router_zid="router",
+            coordinator_instance_id="coord",
+        ).robot
+        home = np.asarray(robot.home_all)
+        left_hold = np.degrees(home[:7])
+        left_hold[0] += 2.0
+        hardware.feedback = MarvinFeedback(
+            left_hold, np.degrees(home[7:]), (1, 1), (1, 1),
+            (0, 0), (1, 1), (10, 10), (10, 10), ("None", "None"),
+        )
+        executor = MarvinExecutor(
+            hardware_session=hardware,
+            publisher_instance_id="marvin",
+            router_zid="router",
+            coordinator_instance_id="coord",
+            real_capability=RealCapabilityInput(0.1, 0.0, True, True),
+            clock=lambda: 100,
+            params={"controlled_sides": ["right"], "connection_wait_s": 0.01},
+        )
+        executor._readiness.connection_ready = lambda now_ns: True
+        self.assertTrue(executor.connect())
+        np.testing.assert_allclose(hardware.home_args[0], left_hold)
+        np.testing.assert_allclose(hardware.home_args[1], np.degrees(home[7:]))
+
+        executor.on_session_state(SessionState(
+            1, 1, 100, "teleop", "accepted", "coordinator", 1,
+            "coord", "router",
+        ))
+        executor._check_feedback(hardware.feedback, 100)
+        executor._send_commands(
+            self._command("left", value=0.1, mode="teleop"),
+            self._command("right", value=0.001, mode="teleop"),
+        )
+        np.testing.assert_allclose(hardware.sent[-1][0], left_hold)
+        self.assertGreater(np.max(np.abs(hardware.sent[-1][1])), 0.0)
 
     def test_real_output_slew_does_not_underrun_coordinator_step(self):
         config_root = Path(__file__).resolve().parents[1] / "src" / "tianji_teleop" / "config"

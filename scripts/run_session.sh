@@ -331,7 +331,7 @@ import json
 import sys
 
 source, source_instance, arm_producer, arm_producer_instance, arm_executor_config, arm_executor_instance, coordinator, router, rows = sys.argv[1:]
-arm_executor_logical_id = "marvin" if arm_executor_config == "marvin.yaml" else "mujoco"
+arm_executor_logical_id = "mujoco" if arm_executor_config == "mujoco.yaml" else "marvin"
 disabled = {"logical_id": "disabled", "publisher_instance_id": "disabled", "router_zid": router, "enabled": False}
 hand_producers = {"left": dict(disabled), "right": dict(disabled)}
 hand_executors = {"left": dict(disabled), "right": dict(disabled)}
