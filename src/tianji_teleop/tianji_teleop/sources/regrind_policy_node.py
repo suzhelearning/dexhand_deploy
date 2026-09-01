@@ -580,6 +580,9 @@ class RegrindPolicyNode:
         self._previous_wrist_pos = wrist[:3].copy()
         self._previous_wrist_quat = np.roll(wrist[3:], 1)
         self._previous_joints = joints.copy()
+        self._cached_joints = joints.copy()
+        self._last_hand_target = joints.copy()
+        self._tracking_error_since = None
         self._last_action.fill(0.0)
         self._frame_index = self._start_frame
         self._phase = "running"
@@ -608,6 +611,9 @@ class RegrindPolicyNode:
         _LOG.warning("bounded return requested: %s", reason)
 
     def _check_hand_tracking(self, joints: np.ndarray, now: float) -> str | None:
+        if self._phase != "running":
+            self._tracking_error_since = None
+            return None
         if self._last_hand_target is None:
             return None
         error = float(np.max(np.abs(joints - self._last_hand_target)))
@@ -651,7 +657,6 @@ class RegrindPolicyNode:
         return (
             position_error <= float(self._params["wrist_frame0_position_tolerance_m"])
             and orientation_error <= float(self._params["wrist_frame0_orientation_tolerance_deg"])
-            and joint_error <= maximum_step
         )
 
     def _hold_measured_target(self, sample: RegrindMotiveSample, joints: np.ndarray) -> None:

@@ -444,11 +444,12 @@ class RegrindRealPreflightTest(unittest.TestCase):
         np.testing.assert_allclose(node._cached_joints, 0.01)
         self.assertTrue(
             node._approach_start_frame(
-                arm_wrist_at_target, np.asarray([0.02] * 20)
+                arm_wrist_at_target, np.zeros(20)
             )
         )
+        np.testing.assert_allclose(node._cached_joints, 0.02)
 
-        joints = np.asarray([0.02] * 20)
+        joints = np.asarray([-0.01] * 20)
         node._phase = "ready"
         node._read_deadman = lambda: False
         node._real_admitted = lambda: (True, None)
@@ -464,6 +465,8 @@ class RegrindRealPreflightTest(unittest.TestCase):
         self.assertEqual(node._phase, "running")
         self.assertEqual(node._frame_index, 5)
         np.testing.assert_allclose(node._last_action, 0.0)
+        np.testing.assert_allclose(node._cached_joints, joints)
+        np.testing.assert_allclose(node._last_hand_target, joints)
 
     def test_hand_approach_target_accumulates_with_static_feedback(self) -> None:
         node = RegrindPolicyNode.__new__(RegrindPolicyNode)
@@ -490,6 +493,26 @@ class RegrindRealPreflightTest(unittest.TestCase):
             node._approach_start_frame(node._training_from_motive, np.zeros(20))
 
         np.testing.assert_allclose(node._cached_joints, 0.03)
+
+    def test_hand_tracking_guard_only_applies_during_policy_inference(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        node._params = {
+            "hand_instant_error_rad": 0.5,
+            "hand_tracking_error_rad": 0.25,
+            "hand_tracking_error_duration_s": 0.1,
+        }
+        node._last_hand_target = np.asarray([0.3] * 20)
+        node._tracking_error_since = 1.0
+
+        node._phase = "approaching"
+        self.assertIsNone(node._check_hand_tracking(np.zeros(20), 1.2))
+
+        node._phase = "running"
+        self.assertIsNone(node._check_hand_tracking(np.zeros(20), 1.2))
+        self.assertIn(
+            "sustained tracking error",
+            node._check_hand_tracking(np.zeros(20), 1.4),
+        )
 
 
 if __name__ == "__main__":
