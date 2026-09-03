@@ -168,11 +168,21 @@ add_executable(
   joint_trajectory_limiter_probe
   src/control/joint_trajectory_limiter_probe.cpp
 )
+add_executable(
+  wuji_hand2_interpolation_probe
+  src/wuji_hand2/wuji_hand2_interpolation_probe.cpp
+)
+add_executable(
+  wuji_hand2_control_probe
+  src/wuji_hand2/wuji_hand2_control_probe.cpp
+)
 target_compile_features(arm_ik_producer PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_probe PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_worker PUBLIC cxx_std_17)
 target_compile_features(pinocchio_qp_ik_probe PUBLIC cxx_std_17)
 target_compile_features(joint_trajectory_limiter_probe PUBLIC cxx_std_17)
+target_compile_features(wuji_hand2_interpolation_probe PUBLIC cxx_std_17)
+target_compile_features(wuji_hand2_control_probe PUBLIC cxx_std_17)
 target_compile_options(
   arm_ik_producer PRIVATE -Wall -Wextra -Wpedantic
 )
@@ -188,6 +198,21 @@ target_compile_options(
 target_compile_options(
   joint_trajectory_limiter_probe PRIVATE -Wall -Wextra -Wpedantic
 )
+target_compile_options(
+  wuji_hand2_interpolation_probe PRIVATE -Wall -Wextra -Wpedantic
+)
+target_compile_options(
+  wuji_hand2_control_probe PRIVATE -Wall -Wextra -Wpedantic
+)
+target_include_directories(
+  wuji_hand2_interpolation_probe PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_include_directories(
+  wuji_hand2_control_probe PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${WUJI_SDK_ROOT}/include"
+)
 target_include_directories(
   arm_ik_producer PRIVATE
     "${ZENOH_CPP_ROOT}/include"
@@ -199,6 +224,12 @@ target_link_libraries(tianji_official_ik_probe tianji_official_native)
 target_link_libraries(tianji_official_ik_worker tianji_official_native)
 target_link_libraries(pinocchio_qp_ik_probe arm_ik)
 target_link_libraries(joint_trajectory_limiter_probe arm_ik)
+target_link_libraries(
+  wuji_hand2_control_probe PRIVATE
+  "${WUJI_SDK_ROOT}/lib/libwuji_sdk_c.so"
+  ${CMAKE_DL_LIBS}
+  Threads::Threads
+)
 # 便携 runtime 层为 glibc 2.35：把 glibc 2.38 的 __isoc23_strtol
 # 引用改接到 shim（见 glibc_isoc23_strtol_shim.cpp）。
 target_sources(arm_ik_producer PRIVATE src/tianji_official/glibc_isoc23_strtol_shim.cpp)

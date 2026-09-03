@@ -13,14 +13,15 @@ reference_sha256:
   - afb1f894c6ac458488d85262d619ab9022c7c67c1a83ab258dc19423fe34eeb4
   - 86234219c6872ed973a0d8573245b0a200ef3e8c000abbaedc89d0b6d6753662
   - 7f423dd07f7040801c9c5a3ed6f676eeb4f7f59b1890f65c686f89a885b117f1
-motive_stale_s: 0.04
+motive_stale_s: 0.12
 arm_stale_s: 0.15
 hand_stale_s: 0.04
 maximum_input_skew_s: 0.02
 wrist_frame0_position_tolerance_m: 0.01
 wrist_frame0_orientation_tolerance_deg: 5.0
-hammer_start_position_tolerance_m: 0.01
-hammer_start_orientation_tolerance_deg: 5.0
+# 锤子起始位置允许最多 20 mm 误差；姿态门禁允许最多 10 deg。
+hammer_start_position_tolerance_m: 0.02
+hammer_start_orientation_tolerance_deg: 10.0
 hand_maximum_step_rad: 0.01
 hand_tracking_error_rad: 0.25
 hand_tracking_error_duration_s: 0.1
@@ -36,8 +37,8 @@ right_tcp_to_mount_translation_m: [0.0, 0.0, 0.008]
 right_tcp_to_mount_quaternion_xyzw: [0.7071067811865476, 0.7071067811865476, 0.0, 0.0]
 workspace_relative_radii_m: [0.42, 0.38, 0.38]
 workspace_soft_zone_ratio: 0.90
-maximum_linear_speed_m_s: 0.036
-maximum_angular_speed_rad_s: 0.155
-maximum_linear_acceleration_m_s2: 0.35
-maximum_angular_acceleration_rad_s2: 0.9
+maximum_linear_speed_m_s: 0.09
+maximum_angular_speed_rad_s: 0.3875
+maximum_linear_acceleration_m_s2: 0.875
+maximum_angular_acceleration_rad_s2: 2.25
 right_default_elbow_direction: [0.45638698, 0.74604902, -0.48489358]

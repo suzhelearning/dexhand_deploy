@@ -86,14 +86,6 @@ class HardwareSafetyController:
         if any(value <= 0.0 for value in positive_settings):
             raise ValueError("hardware safety settings must be positive")
         if (
-            self.settings.maximum_tracking_error_deg
-            <= self.settings.maximum_output_step_deg
-        ):
-            raise ValueError(
-                "maximum_tracking_error_deg must exceed "
-                "maximum_output_step_deg"
-            )
-        if (
             self.settings.maximum_pair_skew_s < 0.0
             or self.settings.feedback_hard_limit_padding_deg < 0.0
         ):
@@ -272,18 +264,25 @@ class HardwareSafetyController:
                     self.settings.maximum_output_step_deg / max_delta
                 )
             output = self._last_output + delta
-            command_lead_deg = (
-                self.settings.maximum_tracking_error_deg
-                - self.settings.maximum_output_step_deg
-            )
-            lead_limited_output = np.clip(
-                output,
-                self._feedback.joints_deg - command_lead_deg,
-                self._feedback.joints_deg + command_lead_deg,
-            )
-            tracking_lead_limited = not np.array_equal(
-                lead_limited_output, output
-            )
+            if (
+                self.settings.maximum_output_step_deg
+                < self.settings.maximum_tracking_error_deg
+            ):
+                command_lead_deg = (
+                    self.settings.maximum_tracking_error_deg
+                    - self.settings.maximum_output_step_deg
+                )
+                lead_limited_output = np.clip(
+                    output,
+                    self._feedback.joints_deg - command_lead_deg,
+                    self._feedback.joints_deg + command_lead_deg,
+                )
+                tracking_lead_limited = not np.array_equal(
+                    lead_limited_output, output
+                )
+            else:
+                lead_limited_output = output
+                tracking_lead_limited = False
             self._last_output = lead_limited_output
             return self._split_decision(
                 "send",

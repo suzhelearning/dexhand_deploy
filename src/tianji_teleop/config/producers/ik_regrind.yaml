@@ -1,0 +1,68 @@
+ik_backend: pinocchio_qp
+arm_config: robot/arm.yaml
+rate_hz: 200.0
+freshness_timeout_s: 0.5
+solver_reject_grace_s: 0.15
+ruckig_max_velocity_rad_s: [0.8, 0.8, 1.0, 1.0, 1.2, 1.2, 1.2]
+ruckig_max_acceleration_rad_s2: [7.854, 7.854, 15.708, 15.708, 15.708, 15.708, 15.708]
+ruckig_max_jerk_rad_s3: [600.0, 600.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0]
+ruckig_validation_tolerance: 0.00000001
+max_iterations: 24
+position_tolerance_m: 0.001
+orientation_tolerance_rad: 0.0104719755
+minimum_damping: 0.001
+maximum_damping: 0.15
+singular_value_threshold: 0.05
+maximum_iteration_step_rad: 0.08
+maximum_joint_step_rad: 1000.0
+joint_limit_margin_rad: 0.0872664626
+arm_angle_gain: 0.0
+arm_angle_tolerance_rad: 0.0349065850
+arm_angle_finite_difference_rad: 0.0001
+arm_angle_merit_weight: 0.001
+nullspace_damping: 0.001
+joint_center_gain: 0.0
+joint_center_activation_margin_rad: 0.2617993878
+joint_center_merit_weight: 0.001
+singularity_avoidance_gain: 0.0
+singularity_finite_difference_rad: 0.0001
+singularity_merit_weight: 0.01
+control_period_s: 0.005
+qp_position_time_constant_s: 0.02
+qp_orientation_time_constant_s: 0.03
+qp_max_linear_speed_m_s: 0.25
+qp_max_angular_speed_rad_s: 1.0
+qp_joint_velocity_limits_rad_s: [0.9599310886, 0.9599310886, 0.9599310886, 0.9599310886, 0.9599310886, 0.9599310886, 0.9599310886]
+qp_position_weight: 1.0
+qp_orientation_weight: 0.45
+qp_velocity_regularization_weight: 0.02
+qp_continuity_weight: 0.06
+qp_posture_weight: 0.008
+qp_posture_time_constant_s: 2.5
+qp_left_nominal_rad: [0, 0, 0, 0, 0, 0, 0]
+qp_right_nominal_rad: [0, 0, 0, 0, 0, 0, 0]
+qp_joint_limit_activation_margin_rad: 0.2617993878
+qp_joint_limit_velocity_damper_gain: 4.0
+qp_singularity_critical_threshold: 0.015
+qp_singularity_orientation_scale: 0.15
+qp_singularity_posture_multiplier: 8.0
+qp_singularity_velocity_multiplier: 4.0
+qp_singularity_escape_weight: 0.03
+qp_singularity_escape_speed_rad_s: 0.15
+qp_max_active_set_iterations: 48
+qp_active_set_tolerance: 0.000000001
+official_use_zsp: false
+official_dgr1: 0.05
+official_dgr2: 0.05
+official_dgr3: 0.0
+official_joint_limit_soft_margin_rad: 0.0872664626
+official_candidate_continuity_weight: 1.0
+official_candidate_limit_weight: 0.20
+official_candidate_posture_weight: 0.02
+official_left_nominal_rad: [0, 0, 0, 0, 0, 0, 0]
+official_right_nominal_rad: [0, 0, 0, 0, 0, 0, 0]
+official_orientation_relaxation_steps: 3
+official_workspace_backoff_iterations: 8
+worker_timeout_ms: 25
+worker_restart_attempts: 1
+capabilities: [simulation, real]

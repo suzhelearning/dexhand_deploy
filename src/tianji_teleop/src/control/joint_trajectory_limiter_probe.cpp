@@ -83,6 +83,29 @@ int main(int argc, char ** argv)
     std::cerr << "qp_ruckig_position_error_m=" << position_error << '\n';
     require(position_error < 0.002,
       "200 Hz QP/Ruckig cascade did not track reachable target");
+
+    PinocchioQpArmIk moving_solver(argv[1], settings);
+    require(cascade.reset(initial), "moving-target cascade reset failed");
+    target_pose = moving_solver.forward(ArmSide::kLeft, home);
+    for (int tick = 0; tick < 400; ++tick) {
+      target_pose.translation().x() += 0.036 * settings.control_period_s;
+      const auto ik = moving_solver.solve(
+        ArmSide::kLeft, target_pose, cascade.state().position,
+        Eigen::Vector3d::UnitZ());
+      require(ik.accepted, "QP rejected moving target");
+      result = cascade.update(
+        (ik.joints_rad - cascade.state().position) /
+        settings.control_period_s);
+      require(result.accepted, "Ruckig rejected moving-target QP output");
+    }
+    const Eigen::Isometry3d moving_achieved = moving_solver.forward(
+      ArmSide::kLeft, cascade.state().position);
+    const double moving_error =
+      (moving_achieved.translation() - target_pose.translation()).norm();
+    std::cerr << "qp_ruckig_moving_error_m=" << moving_error << '\n';
+    require(moving_error < 0.005,
+      "200 Hz QP/Ruckig cascade lags the Regrind moving target");
+
   }
 
   std::cout << "joint trajectory limiter probe passed\n";

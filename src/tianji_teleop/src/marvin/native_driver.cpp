@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -20,6 +21,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::size_t kJoints = TIANJI_MARVIN_JOINTS;
 constexpr std::size_t kArms = TIANJI_MARVIN_ARMS;
+constexpr int kClearSetAttempts = 3;
+constexpr auto kPositionModeRetryPeriod = std::chrono::milliseconds(100);
 
 struct StateCtr {
   int current;
@@ -132,6 +135,14 @@ public:
       set_tool_ = symbol<SetToolFn>(library_, "SetTool");
       set_impedance_ = symbol<SetImpedanceFn>(library_, "SetImpJointMode");
       set_position_ = symbol<SetPositionFn>(library_, "SetJointPostionCmd");
+      clear_set_ = symbol<ClearSetFn>(library_, "OnClearSet");
+      set_joint_position_[0] = symbol<SetJointPositionFn>(library_, "OnSetJointCmdPos_A");
+      set_joint_position_[1] = symbol<SetJointPositionFn>(library_, "OnSetJointCmdPos_B");
+      set_joint_limit_[0] = symbol<SetJointLimitFn>(library_, "OnSetJointLmt_A");
+      set_joint_limit_[1] = symbol<SetJointLimitFn>(library_, "OnSetJointLmt_B");
+      set_target_state_[0] = symbol<SetTargetStateFn>(library_, "OnSetTargetState_A");
+      set_target_state_[1] = symbol<SetTargetStateFn>(library_, "OnSetTargetState_B");
+      send_ = symbol<SendFn>(library_, "OnSetSend");
       set_velocity_step_ = symbol<SetVelocityStepFn>(library_, "FX_OnSetVelEstStep");
       emergency_stop_ = symbol<EmergencyStopFn>(library_, "EStop");
       disable_ = symbol<DisableFn>(library_, "Disable");
@@ -193,11 +204,68 @@ public:
         target_updated_ = Clock::now();
         have_target_ = true;
       }
-      running_ = true;
-      worker_ = std::thread([this] { run(); });
+      start_worker();
     } catch (...) {
       soft_stop("native driver prepare failed");
       shutdown();
+      throw;
+    }
+  }
+
+  void set_position_mode() {
+    if (!connected_) throw std::runtime_error("Marvin native driver is not connected");
+    if (soft_stopped_) throw std::runtime_error("Marvin native driver is soft-stopped");
+    stop_worker();
+    if (soft_stopped_) throw std::runtime_error("Marvin native driver is soft-stopped");
+    expected_control_state_.store(1);
+    try {
+      Dcss current{};
+      wait_for_feedback(current, 1.0);
+      require_safe_feedback(current, false);
+      const auto left = feedback_joints(current, 0);
+      const auto right = feedback_joints(current, 1);
+      send_position_mode_batch(left, right);
+      Dcss ready{};
+      wait_for_position(ready, left, right, 5.0);
+      update_feedback(ready, true);
+      refresh_target(feedback_joints(ready, 0), feedback_joints(ready, 1));
+      start_worker();
+    } catch (...) {
+      soft_stop("native position-mode transition failed");
+      throw;
+    }
+  }
+  void set_impedance_mode() {
+    if (!connected_) throw std::runtime_error("Marvin native driver is not connected");
+    if (soft_stopped_) throw std::runtime_error("Marvin native driver is soft-stopped");
+    stop_worker();
+    if (soft_stopped_) throw std::runtime_error("Marvin native driver is soft-stopped");
+    expected_control_state_.store(3);
+    try {
+      Dcss current{};
+      wait_for_feedback(current, 1.0);
+      require_safe_feedback(current, false);
+      const auto left = feedback_joints(current, 0);
+      const auto right = feedback_joints(current, 1);
+      require(set_position_('A', left.data()), "seed impedance command(A)");
+      require(set_position_('B', right.data()), "seed impedance command(B)");
+      require(set_impedance_('A', config_.velocity_ratio, config_.acceleration_ratio,
+                             config_.joint_stiffness, config_.joint_damping),
+              "SetImpJointMode(A)");
+      require(set_impedance_('B', config_.velocity_ratio, config_.acceleration_ratio,
+                             config_.joint_stiffness, config_.joint_damping),
+              "SetImpJointMode(B)");
+      require(set_velocity_step_('A', config_.velocity_estimation_step_ms),
+              "FX_OnSetVelEstStep(A)");
+      require(set_velocity_step_('B', config_.velocity_estimation_step_ms),
+              "FX_OnSetVelEstStep(B)");
+      Dcss ready{};
+      wait_for_impedance(ready, left, right, 5.0);
+      update_feedback(ready, true);
+      refresh_target(feedback_joints(ready, 0), feedback_joints(ready, 1));
+      start_worker();
+    } catch (...) {
+      soft_stop("native impedance-mode transition failed");
       throw;
     }
   }
@@ -247,6 +315,11 @@ private:
   using SetToolFn = bool (*)(char, const double *, const double *);
   using SetImpedanceFn = bool (*)(char, int, int, const double *, const double *);
   using SetPositionFn = bool (*)(char, const double *);
+  using ClearSetFn = bool (*)();
+  using SetJointPositionFn = bool (*)(const double *);
+  using SetJointLimitFn = bool (*)(int, int);
+  using SetTargetStateFn = bool (*)(int);
+  using SendFn = bool (*)();
   using SetVelocityStepFn = bool (*)(char, long);
   using EmergencyStopFn = void (*)(const char *);
   using DisableFn = bool (*)(char);
@@ -301,6 +374,96 @@ private:
     if (!value) throw std::runtime_error(std::string("Marvin SDK call failed: ") + operation);
   }
 
+  [[noreturn]] static void throw_mode_timeout(
+      const char *mode, const Dcss &last) {
+    char message[512]{};
+    std::snprintf(
+      message, sizeof(message),
+      "Marvin arms did not enter verified joint %s mode: "
+      "A{current=%d,command=%d,error=%d,velocity=%d,acceleration=%d,"
+      "frame_serial=%d,impedance_type=%d} "
+      "B{current=%d,command=%d,error=%d,velocity=%d,acceleration=%d,"
+      "frame_serial=%d,impedance_type=%d}",
+      mode,
+      last.state[0].current, last.state[0].command, last.state[0].error,
+      last.input[0].joint_velocity_ratio,
+      last.input[0].joint_acceleration_ratio,
+      last.output[0].output_frame_serial, last.input[0].impedance_type,
+      last.state[1].current, last.state[1].command, last.state[1].error,
+      last.input[1].joint_velocity_ratio,
+      last.input[1].joint_acceleration_ratio,
+      last.output[1].output_frame_serial, last.input[1].impedance_type);
+    throw std::runtime_error(message);
+  }
+
+  void clear_batch() {
+    bool cleared = false;
+    for (int attempt = 0; attempt < kClearSetAttempts; ++attempt) {
+      if (clear_set_()) {
+        cleared = true;
+        break;
+      }
+      if (attempt + 1 < kClearSetAttempts) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+    }
+    require(cleared, "OnClearSet");
+  }
+
+  void stage_joint_positions(
+      const std::array<double, kJoints> &left,
+      const std::array<double, kJoints> &right) {
+    clear_batch();
+    require(set_joint_position_[0](left.data()), "OnSetJointCmdPos_A");
+    require(set_joint_position_[1](right.data()), "OnSetJointCmdPos_B");
+  }
+
+  void stage_position_mode(std::size_t arm) {
+    require(
+      set_joint_limit_[arm](config_.velocity_ratio, config_.acceleration_ratio),
+      arm == 0 ? "OnSetJointLmt_A" : "OnSetJointLmt_B");
+    require(
+      set_target_state_[arm](1),
+      arm == 0 ? "OnSetTargetState_A" : "OnSetTargetState_B");
+  }
+
+  void send_joint_position_batch(
+      const std::array<double, kJoints> &left,
+      const std::array<double, kJoints> &right) {
+    stage_joint_positions(left, right);
+    require(send_(), "OnSetSend");
+  }
+
+  void send_position_hold_batch(
+      const std::array<double, kJoints> &left,
+      const std::array<double, kJoints> &right,
+      const std::array<bool, kArms> &retry_mode) {
+    stage_joint_positions(left, right);
+    for (std::size_t arm = 0; arm < kArms; ++arm) {
+      if (retry_mode[arm]) stage_position_mode(arm);
+    }
+    require(send_(), "OnSetSend");
+  }
+
+  void send_position_mode_batch(
+      const std::array<double, kJoints> &left,
+      const std::array<double, kJoints> &right) {
+    stage_joint_positions(left, right);
+    stage_position_mode(0);
+    stage_position_mode(1);
+    require(send_(), "OnSetSend");
+  }
+
+  bool position_arm_ready(const Dcss &data, std::size_t arm) const {
+    return data.state[arm].current == 1 &&
+      (data.state[arm].command == 1 || data.state[arm].command == -1) &&
+      data.state[arm].error == 0 &&
+      data.input[arm].joint_velocity_ratio >= config_.velocity_ratio - 1 &&
+      data.input[arm].joint_velocity_ratio <= config_.velocity_ratio &&
+      data.input[arm].joint_acceleration_ratio >= config_.acceleration_ratio - 1 &&
+      data.input[arm].joint_acceleration_ratio <= config_.acceleration_ratio;
+  }
+
   void wait_for_feedback(Dcss &result, double timeout_s) {
     const auto deadline = Clock::now() + std::chrono::duration<double>(timeout_s);
     int previous[2] = {-1, -1};
@@ -346,44 +509,117 @@ private:
       Dcss &result, const std::array<double, kJoints> &left,
       const std::array<double, kJoints> &right, double timeout_s) {
     const auto deadline = Clock::now() + std::chrono::duration<double>(timeout_s);
+    Dcss last{};
     while (Clock::now() < deadline) {
       require(set_position_('A', left.data()), "hold SetJointPostionCmd(A)");
       require(set_position_('B', right.data()), "hold SetJointPostionCmd(B)");
-      Dcss current{};
-      require(get_buffer_(&current), "OnGetBuf");
-      require_safe_feedback(current, true);
+      require(get_buffer_(&last), "OnGetBuf");
+      require_safe_feedback(last, true);
       bool ready = true;
       for (std::size_t arm = 0; arm < kArms; ++arm) {
-        ready = ready && current.state[arm].current == 3 &&
-          (current.state[arm].command == 3 || current.state[arm].command == -1) &&
-          current.input[arm].impedance_type == 1 &&
-          current.input[arm].joint_velocity_ratio >= config_.velocity_ratio - 1 &&
-          current.input[arm].joint_velocity_ratio <= config_.velocity_ratio &&
-          current.input[arm].joint_acceleration_ratio >= config_.acceleration_ratio - 1 &&
-          current.input[arm].joint_acceleration_ratio <= config_.acceleration_ratio;
+        ready = ready && last.state[arm].current == 3 &&
+          (last.state[arm].command == 3 || last.state[arm].command == -1) &&
+          last.input[arm].impedance_type == 1 &&
+          last.input[arm].joint_velocity_ratio >= config_.velocity_ratio - 1 &&
+          last.input[arm].joint_velocity_ratio <= config_.velocity_ratio &&
+          last.input[arm].joint_acceleration_ratio >= config_.acceleration_ratio - 1 &&
+          last.input[arm].joint_acceleration_ratio <= config_.acceleration_ratio;
         for (std::size_t joint = 0; joint < kJoints; ++joint) {
-          ready = ready && std::abs(current.input[arm].joint_stiffness[joint] - config_.joint_stiffness[joint]) <= 1e-3 &&
-            std::abs(current.input[arm].joint_damping[joint] - config_.joint_damping[joint]) <= 1e-3;
+          ready = ready && std::abs(last.input[arm].joint_stiffness[joint] - config_.joint_stiffness[joint]) <= 1e-3 &&
+            std::abs(last.input[arm].joint_damping[joint] - config_.joint_damping[joint]) <= 1e-3;
         }
       }
       if (ready) {
-        result = current;
+        result = last;
         return;
       }
       std::this_thread::sleep_for(period_);
     }
-    throw std::runtime_error("Marvin arms did not enter verified joint impedance mode");
+    throw_mode_timeout("impedance", last);
+  }
+
+  void wait_for_position(
+      Dcss &result, const std::array<double, kJoints> &left,
+      const std::array<double, kJoints> &right, double timeout_s) {
+    const auto started = Clock::now();
+    const auto deadline = started + std::chrono::duration<double>(timeout_s);
+    std::array<Clock::time_point, kArms> next_mode_retry{};
+    next_mode_retry.fill(started + kPositionModeRetryPeriod);
+    std::array<bool, kArms> mode_confirmed{};
+    bool have_feedback = false;
+    Dcss last{};
+    while (Clock::now() < deadline) {
+      const auto now = Clock::now();
+      std::array<bool, kArms> retry_mode{};
+      for (std::size_t arm = 0; arm < kArms; ++arm) {
+        retry_mode[arm] =
+          have_feedback && !mode_confirmed[arm] &&
+          now >= next_mode_retry[arm];
+      }
+      send_position_hold_batch(left, right, retry_mode);
+      for (std::size_t arm = 0; arm < kArms; ++arm) {
+        if (retry_mode[arm]) {
+          next_mode_retry[arm] = Clock::now() + kPositionModeRetryPeriod;
+        }
+      }
+      require(get_buffer_(&last), "OnGetBuf");
+      require_safe_feedback(last, true);
+      bool ready = true;
+      for (std::size_t arm = 0; arm < kArms; ++arm) {
+        const bool arm_ready = position_arm_ready(last, arm);
+        mode_confirmed[arm] = mode_confirmed[arm] || arm_ready;
+        ready = ready && arm_ready;
+      }
+      have_feedback = true;
+      if (ready) {
+        result = last;
+        return;
+      }
+      std::this_thread::sleep_for(period_);
+    }
+    throw_mode_timeout("position", last);
+  }
+
+  static std::array<double, kJoints> feedback_joints(const Dcss &data, std::size_t arm) {
+    std::array<double, kJoints> joints{};
+    for (std::size_t joint = 0; joint < kJoints; ++joint) {
+      joints[joint] = data.output[arm].feedback_joint_position[joint];
+    }
+    return joints;
+  }
+
+  void refresh_target(const std::array<double, kJoints> &left,
+                     const std::array<double, kJoints> &right) {
+    std::lock_guard<std::mutex> guard(target_mutex_);
+    targets_[0] = left;
+    targets_[1] = right;
+    target_updated_ = Clock::now();
+    have_target_ = true;
+  }
+
+  static bool state_can_still_reach_target(const StateCtr &state) {
+    if (state.error == 0 &&
+        ((state.current >= 0 && state.current <= 3) ||
+         (state.current >= 101 && state.current <= 103))) {
+      return true;
+    }
+    if (state.current >= 101 && state.current <= 103 &&
+        (state.error == 4 || state.error == 6 || state.error == 8)) {
+      return true;
+    }
+    return state.current == 100 && state.error == 6;
   }
 
   void require_safe_feedback(const Dcss &data, bool allow_transition) {
     for (std::size_t arm = 0; arm < kArms; ++arm) {
-      const bool expected_transition = allow_transition &&
-        data.state[arm].current >= 100 && data.state[arm].current <= 103 &&
-        (data.state[arm].error == 4 || data.state[arm].error == 6 || data.state[arm].error == 8);
-      if (data.state[arm].error != 0 && !expected_transition) {
+      if ((allow_transition &&
+           !state_can_still_reach_target(data.state[arm])) ||
+          (!allow_transition && data.state[arm].error != 0)) {
         throw std::runtime_error("Marvin arm error during native prepare");
       }
-      if (!allow_transition && data.state[arm].current == 100) throw std::runtime_error("Marvin arm fault during native prepare");
+      if (!allow_transition && data.state[arm].current == 100) {
+        throw std::runtime_error("Marvin arm fault during native prepare");
+      }
       for (const float joint : data.output[arm].feedback_joint_position) {
         if (!std::isfinite(joint)) throw std::runtime_error("Marvin feedback contains nonfinite joint");
       }
@@ -397,6 +633,7 @@ private:
 
   void update_feedback(const Dcss &data, bool include_servo_errors) {
     TianjiMarvinNativeFeedback next{};
+    const int expected_state = expected_control_state_.load();
     bool healthy = !soft_stopped_;
     for (std::size_t arm = 0; arm < kArms; ++arm) {
       next.arm_states[arm] = data.state[arm].current;
@@ -406,9 +643,12 @@ private:
       next.velocity_ratios[arm] = data.input[arm].joint_velocity_ratio;
       next.acceleration_ratios[arm] = data.input[arm].joint_acceleration_ratio;
       next.impedance_types[arm] = data.input[arm].impedance_type;
-      const bool command_compatible = next.command_states[arm] == 3 || next.command_states[arm] == -1;
-      healthy = healthy && next.arm_states[arm] == 3 && command_compatible &&
-        next.error_codes[arm] == 0 && next.impedance_types[arm] == 1 &&
+      const bool command_compatible = next.command_states[arm] == expected_state ||
+        next.command_states[arm] == -1;
+      const bool mode_matches = next.arm_states[arm] == expected_state &&
+        (expected_state != 3 || next.impedance_types[arm] == 1);
+      healthy = healthy && command_compatible && mode_matches &&
+        next.error_codes[arm] == 0 &&
         next.velocity_ratios[arm] >= config_.velocity_ratio - 1 &&
         next.velocity_ratios[arm] <= config_.velocity_ratio &&
         next.acceleration_ratios[arm] >= config_.acceleration_ratio - 1 &&
@@ -454,8 +694,7 @@ private:
         if (!have_target || Clock::now() - updated > std::chrono::duration<double>(config_.command_timeout_s)) {
           throw std::runtime_error("native command watchdog expired");
         }
-        require(set_position_('A', target[0].data()), "SetJointPostionCmd(A)");
-        require(set_position_('B', target[1].data()), "SetJointPostionCmd(B)");
+        send_joint_position_batch(target[0], target[1]);
         ++ticks_;
         ++cycle;
       } catch (const std::exception &error) {
@@ -473,9 +712,19 @@ private:
     }
   }
 
-  void shutdown() noexcept {
+  void start_worker() {
+    if (worker_.joinable()) throw std::runtime_error("Marvin native worker is already running");
+    running_ = true;
+    worker_ = std::thread([this] { run(); });
+  }
+
+  void stop_worker() noexcept {
     running_ = false;
     if (worker_.joinable()) worker_.join();
+  }
+
+  void shutdown() noexcept {
+    stop_worker();
     if (!connected_) return;
     if (!soft_stopped_) {
       disable_('A');
@@ -493,6 +742,11 @@ private:
   SetToolFn set_tool_{nullptr};
   SetImpedanceFn set_impedance_{nullptr};
   SetPositionFn set_position_{nullptr};
+  ClearSetFn clear_set_{nullptr};
+  SetJointPositionFn set_joint_position_[2]{};
+  SetJointLimitFn set_joint_limit_[2]{};
+  SetTargetStateFn set_target_state_[2]{};
+  SendFn send_{nullptr};
   SetVelocityStepFn set_velocity_step_{nullptr};
   EmergencyStopFn emergency_stop_{nullptr};
   DisableFn disable_{nullptr};
@@ -501,6 +755,7 @@ private:
   std::atomic<bool> connected_{false};
   std::atomic<bool> running_{false};
   std::atomic<bool> soft_stopped_{false};
+  std::atomic<int> expected_control_state_{3};
   std::thread worker_;
   mutable std::mutex target_mutex_;
   std::array<std::array<double, kJoints>, kArms> targets_{};
@@ -548,6 +803,20 @@ extern "C" int tianji_marvin_native_connect(
   return invoke(handle, error, error_size, [robot_ip](NativeDriver &driver) {
     if (robot_ip == nullptr) throw std::invalid_argument("Marvin robot IP is null");
     driver.connect(robot_ip);
+  });
+}
+
+extern "C" int tianji_marvin_native_set_position_mode(
+  void *handle, char *error, std::size_t error_size) {
+  return invoke(handle, error, error_size, [](NativeDriver &driver) {
+    driver.set_position_mode();
+  });
+}
+
+extern "C" int tianji_marvin_native_set_impedance_mode(
+  void *handle, char *error, std::size_t error_size) {
+  return invoke(handle, error, error_size, [](NativeDriver &driver) {
+    driver.set_impedance_mode();
   });
 }
 

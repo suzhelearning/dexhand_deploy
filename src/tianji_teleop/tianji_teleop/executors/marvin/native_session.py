@@ -143,6 +143,15 @@ class NativeMarvinHardwareSession(MarvinHardwareSession):
             ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t,
         ]
         self._library.tianji_marvin_native_connect.restype = ctypes.c_int
+        for name in (
+            "tianji_marvin_native_set_position_mode",
+            "tianji_marvin_native_set_impedance_mode",
+        ):
+            function = getattr(self._library, name)
+            function.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t,
+            ]
+            function.restype = ctypes.c_int
         vector = ctypes.POINTER(ctypes.c_double)
         self._library.tianji_marvin_native_submit.argtypes = [
             ctypes.c_void_p, vector, vector, ctypes.c_char_p, ctypes.c_size_t,
@@ -242,8 +251,14 @@ class NativeMarvinHardwareSession(MarvinHardwareSession):
         }
 
     def move_to_home(self, *args: Any, **kwargs: Any) -> MarvinFeedback:
-        kwargs["required_state"] = self.required_state
-        return super().move_to_home(*args, **kwargs)
+        # Low-stiffness impedance is correct for teleoperation but leaves a
+        # repeatable residual on a large Home traverse.  Home in the SDK's
+        # rigid position mode, then restore impedance before returning.
+        self._call(self._library.tianji_marvin_native_set_position_mode)
+        kwargs["required_state"] = 1
+        super().move_to_home(*args, **kwargs)
+        self._call(self._library.tianji_marvin_native_set_impedance_mode)
+        return self.read_feedback(include_servo_errors=True)
 
     def soft_stop_once(self) -> None:
         if self._soft_stopped or self._handle is None:

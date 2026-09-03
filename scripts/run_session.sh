@@ -93,11 +93,18 @@ arm_executor_config="$(profile_value arm_executor_config)"
 coordinator_config="$(profile_value coordinator_config)"
 required_capability="$(profile_value required_capability)"
 active_sides="$(profile_value active_sides)"
+arm_command_path="$(profile_value arm_command_path)"
 inactive_sides="$(profile_value inactive_sides)"
 hand_mode="$(profile_value hand_mode)"
 active_hand_sides="$(profile_value active_hand_sides)"
 hand_executor="$(profile_value hand_executor)"
+hand_executor_config="$(profile_value hand_executor_config)"
 hand_overlay="$(profile_value hand_overlay)"
+[[ -n "${arm_command_path}" ]] || arm_command_path=coordinator
+if [[ "${arm_command_path}" != coordinator && "${arm_command_path}" != direct ]]; then
+  printf '错误：非法 arm_command_path: %s\n' "${arm_command_path}" >&2
+  exit 2
+fi
 if [[ "${TIANJI_VALIDATION_PRODUCER:-}" == policy_hold && "${TIANJI_VALIDATION_CASE_ID:-}" == policy_hold_sim ]]; then
   arm_producer_config="producers/policy_hold.yaml"
 fi
@@ -109,6 +116,7 @@ fi
 if [[ -n "${forced_hand_mode}" ]]; then hand_mode="${forced_hand_mode}"; fi
 [[ -n "${active_hand_sides}" ]] || active_hand_sides="${active_sides}"
 [[ -n "${hand_executor}" ]] || hand_executor=none
+[[ -n "${hand_executor_config}" ]] || hand_executor_config=executors/wuji_hand2.yaml
 [[ -n "${hand_overlay}" ]] || hand_overlay=none
 [[ -n "${source_config}" && -n "${arm_executor_config}" && -n "${coordinator_config}" ]] || {
   printf '%s\n' '错误：session profile 缺少 source/executor/coordinator config。' >&2
@@ -150,6 +158,24 @@ if [[ "${required_capability}" == real && "${confirm_real}" != true ]]; then
   exit 2
 fi
 if [[ "${required_capability}" == real ]]; then
+  if [[ "${profile}" == regrind_real ]]; then
+    if [[ -n "${playback_speed}" ]]; then
+      if ! pixi run python - "${playback_speed}" <<'PY'
+import math
+import sys
+try:
+    speed = float(sys.argv[1])
+except (TypeError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if math.isfinite(speed) and speed == 1.0 else 1)
+PY
+      then
+        printf '%s\n' '错误：regrind_real 的策略 capability 要求 --speed 1.0；物理动态限制由 profile config 控制。' >&2
+        exit 2
+      fi
+    fi
+    playback_speed=1.0
+  fi
   export TIANJI_REAL_SPEED="${playback_speed:-${TIANJI_REAL_SPEED:-0.25}}"
   export TIANJI_REAL_YAW_DEG="${TIANJI_REAL_YAW_DEG:-0}"
   if [[ -z "${TIANJI_REAL_PREFLIGHT_FD:-}" &&
@@ -234,6 +260,12 @@ if [[ "${source_id}" == joint_replay ]]; then
   arm_producer_id="joint_replay"
 elif [[ -n "${arm_producer_config}" && "${arm_producer_config}" != null ]]; then
   arm_producer_instance="${TIANJI_ARM_PRODUCER_INSTANCE_ID:-$(new_instance_id)}"
+fi
+if [[ "${arm_command_path}" == direct ]]; then
+  [[ "${arm_producer_id}" == arm_ik_producer && -n "${arm_producer_instance}" ]] || {
+    printf '%s\n' '错误：direct arm path 仅允许绑定已配置的 IK producer。' >&2
+    exit 2
+  }
 fi
 arm_executor_instance="${TIANJI_ARM_EXECUTOR_INSTANCE_ID:-$(new_instance_id)}"
 if [[ "${source_id}" == target_replay || "${source_id}" == joint_replay ]]; then
@@ -412,6 +444,13 @@ trap run_session_stop_on_signal INT TERM
 launch() {
   local label="$1"; shift
   local log_path="${TELEOP_RUNTIME_DIR}/${run_id}-${label}.log"
+  local term_timeout_s=5
+  if [[ "${label}" == arm_executor &&
+        "${required_capability}" == real &&
+        "${arm_executor_config}" == executors/marvin_impedance.yaml ]]; then
+    # Allow the real arm's bounded home trajectory to finish before release.
+    term_timeout_s=60
+  fi
   local source_tty_fd=""
   if [[ "${label}" == source && -t 0 ]] &&
      { exec {source_tty_fd}<>/dev/tty; } 2>/dev/null; then
@@ -429,7 +468,7 @@ launch() {
     setsid env "$@" </dev/null >"${log_path}" 2>&1 &
     local pid=$!
   fi
-  if ! register_teleop_process_group "${pid}" "${label}" 5; then
+  if ! register_teleop_process_group "${pid}" "${label}" "${term_timeout_s}"; then
     kill -TERM -- "-${pid}" 2>/dev/null || true
     wait "${pid}" 2>/dev/null || true
     return 1
@@ -444,9 +483,6 @@ launch() {
   child_pids+=("${pid}")
   child_labels+=("${label}")
 }
-declare -a child_pids=()
-declare -a child_labels=()
-session_shutdown_requested=false
 recorder_instance=""
 [[ -n "${record_path}" ]] && recorder_instance="${TIANJI_RECORDER_INSTANCE_ID:-$(new_instance_id)}"
 base_env=(
@@ -465,6 +501,8 @@ base_env=(
   "TIANJI_HAND_INPUT_INSTANCE_ID=${hand_input_instance}"
   "TIANJI_SOURCE_LOGICAL_ID=${source_id}"
   "TIANJI_SOURCE_INSTANCE_ID=${source_instance}"
+  "TIANJI_ARM_COMMAND_PATH=${arm_command_path}"
+  "TIANJI_ARM_PRODUCER_LOGICAL_ID=${arm_producer_id}"
   "TIANJI_ARM_PRODUCER_INSTANCE_ID=${arm_producer_instance}"
   "TIANJI_AUTHORITIES=${TIANJI_AUTHORITIES}"
   "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID=${TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID:-}"
@@ -539,13 +577,13 @@ launch_hand_executor() {
       TIANJI_HAND_PRODUCER_INSTANCE_ID="${hand_producer_instance_array[hand_index]}" \
       TIANJI_HAND_INPUT_INSTANCE_ID="${hand_input_instance}" \
       bash "${SCRIPT_DIR}/run_executor.sh" --executor wuji_hand2 --mode "${hand_mode}" \
-      --side "${hand_side_array[hand_index]}" --config "$(canonical_config executors/wuji_hand2.yaml)"
+      --side "${hand_side_array[hand_index]}" --config "$(canonical_config "${hand_executor_config}")"
   done
 }
 launch_arm_producer() {
   [[ -n "${arm_producer_config}" && "${arm_producer_config}" != null ]] || return 0
   producer_name="$(basename -- "${arm_producer_config}" .yaml)"
-  [[ "${producer_name}" == ik ]] && producer_name=ik
+  [[ "${producer_name}" == ik_regrind ]] && producer_name=ik
   launch arm_producer "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_producer_instance}" bash "${SCRIPT_DIR}/run_producer.sh" --producer "${producer_name}" --config "$(canonical_config "${arm_producer_config}")"
 }
 if [[ "${required_capability}" == real ]]; then

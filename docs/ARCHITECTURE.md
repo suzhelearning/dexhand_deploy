@@ -6,10 +6,11 @@
    `SessionIntent`，等待 coordinator 的匹配 `teleop` state。
 2. **Producer**：IK、policy 或 direct replay 接受 target/current command，发布
    有限的 arm proposal、solved pose 或 hand command；不发布 final arm command。
-3. **Coordinator**：唯一发布 `SessionState`、`LatchedBool` 和双臂
+3. **Coordinator**：标准路径中唯一发布 `SessionState`、`LatchedBool` 和双臂
    `ArmJointCommand`，每个 tick 同序列发送两侧 command，inactive side 保持 Home。
 4. **Executor**：MuJoCo/Marvin/Wuji 只接受授权 identity、正确 sequence、names、
-   frame 和 limits，持续发布 typed state/status。
+   frame 和 limits，持续发布 typed state/status；`regrind_real` 的 Marvin teleop
+   可直接消费同一授权 IK proposal，return/stop 仍只接受 coordinator authority。
 5. **Recorder/Diagnostics**：被动记录 session v1，诊断只观察权威 state/status 或
    发送 intent，不成为 authority。
 
@@ -37,12 +38,11 @@ transform；quaternion 与 elbow direction 必须 finite。Hand target 上 wire 
 hand names 只允许 canonical `l_|r_` 前缀顺序。
 
 ## 配置与运行
-
-`config/robot` 是 names/Home/limits 唯一 authority；session YAML 只引用
-component YAML、capability、active/inactive sides 和 hand mode，IK backend 只在
-`config/producers/ik.yaml`。`run_session.sh` 启动顺序为 recorder、coordinator、
-executor、producer、source；real profile 需要 `--confirm-real`，H5 preflight
-固定 direct/retarget。任一步失败都按反序停止受管 process group 并释放 guard。
+`config/robot` 是 names/Home/limits 唯一 authority；session YAML 引用
+component YAML、capability、active/inactive sides、hand mode 和 arm command path。
+IK backend 只在 `config/producers/ik.yaml`。`run_session.sh` 启动顺序为 recorder、
+coordinator、executor、producer、source；real profile 需要 `--confirm-real`，H5
+preflight 固定 direct/retarget。任一步失败都按反序停止受管 process group 并释放 guard。
 
 ## 记录与诊断
 

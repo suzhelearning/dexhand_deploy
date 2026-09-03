@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from pathlib import Path
 import runpy
 import sys
@@ -27,13 +28,173 @@ from tianji_teleop.protocol.messages import (
 )
 from tianji_teleop.regrind_policy import action_to_targets, quat_wxyz_to_rot6d
 from tianji_teleop.sources.regrind_policy_node import (
+    DEFAULT_PARAMETERS,
     RegrindPolicyNode,
     _pose_error,
     _require_authorized_sha256,
+    main as regrind_main,
 )
 
 
 class RegrindRealPreflightTest(unittest.TestCase):
+    def test_hammer_start_defaults_allow_20_mm_and_10_degrees(self) -> None:
+        self.assertEqual(
+            DEFAULT_PARAMETERS["hammer_start_position_tolerance_m"], 0.02
+        )
+        self.assertEqual(
+            DEFAULT_PARAMETERS["hammer_start_orientation_tolerance_deg"], 10.0
+        )
+
+    def test_reference_speed_parser_rejects_values_outside_finite_unit_interval(self) -> None:
+        for value in ("0", "-0.1", "nan", "inf", "-inf", "1.01"):
+            with self.subTest(value=value), patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                with self.assertRaises(SystemExit):
+                    regrind_main(
+                        [
+                            "--model",
+                            "missing-model.pt",
+                            "--reference",
+                            "missing-reference.npz",
+                            f"--reference-speed={value}",
+                        ]
+                    )
+                self.assertIn(
+                    "--reference-speed must be finite and in (0, 1]",
+                    stderr.getvalue(),
+                )
+
+    def test_rejected_start_explains_that_enter_is_ignored_until_retry(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        node._phase = "start_pending"
+        node._session_client = SimpleNamespace(
+            poll=lambda: None,
+            start_authorized=False,
+            pending_intent_sequence=None,
+            state=SimpleNamespace(
+                state="idle",
+                reason="arm state is not fresh at Home",
+                sequence=3,
+                intent_sequence=1,
+            ),
+        )
+
+        with self.assertLogs(
+            "regrind_policy", level="ERROR"
+        ) as logs:
+            self.assertTrue(node._tick(1.0))
+
+        self.assertEqual(node._phase, "armed")
+        self.assertIn("press s again", logs.output[-1])
+        self.assertIn("Enter is ignored while armed", logs.output[-1])
+    def test_coordinator_return_transition_logs_reason_and_sequences_once(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        node._phase = "returning"
+        node._last_coordinator_transition = None
+        node._session_client = SimpleNamespace(
+            state=SimpleNamespace(
+                state="returning",
+                reason="arm proposal timeout",
+                sequence=31,
+                intent_sequence=7,
+            )
+        )
+
+        with self.assertLogs("regrind_policy", level="WARNING") as logs:
+            node._log_coordinator_transition()
+            node._log_coordinator_transition()
+
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("state=returning", logs.output[0])
+        self.assertIn("reason=arm proposal timeout", logs.output[0])
+        self.assertIn("sequence=31", logs.output[0])
+        self.assertIn("intent_sequence=7", logs.output[0])
+
+    def test_coordinator_fault_reason_is_used_for_bounded_return(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        node._phase = "running"
+        node._last_error = None
+        node._last_coordinator_transition = None
+        node._session_client = SimpleNamespace(
+            poll=lambda: None,
+            start_authorized=False,
+            state=SimpleNamespace(
+                state="fault",
+                reason="hand stale",
+                sequence=32,
+                intent_sequence=7,
+            ),
+        )
+        node._real_admitted = lambda: (True, None)
+        node._fresh_inputs = lambda _now: (SimpleNamespace(), np.zeros(20), None)
+        node._check_hand_tracking = lambda _joints, _now: None
+        returns = []
+        node._begin_return = lambda reason, **kwargs: returns.append(
+            (reason, kwargs["exit_after_return"])
+        )
+
+        with self.assertLogs("regrind_policy", level="WARNING") as logs:
+            self.assertTrue(node._tick(1.0))
+
+        self.assertEqual(returns, [("coordinator fault: hand stale", True)])
+        self.assertIn("state=fault", logs.output[0])
+        self.assertIn("reason=hand stale", logs.output[0])
+
+
+    def _quit_node(
+        self, phase: str, coordinator_state: str
+    ) -> tuple[RegrindPolicyNode, list[tuple[str, bool]]]:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        state = SimpleNamespace(
+            state=coordinator_state,
+            reason="hand stale" if coordinator_state == "fault" else "active",
+            sequence=40,
+            intent_sequence=8,
+        )
+        node._lock = threading.RLock()
+        node._phase = phase
+        node._quit = False
+        node._stop_event = threading.Event()
+        node._last_coordinator_transition = (state.state, state.reason)
+        node._session_client = SimpleNamespace(
+            poll=lambda: None,
+            state=state,
+            at_home=False,
+        )
+        returns = []
+        node._begin_return = lambda reason, **kwargs: returns.append(
+            (reason, kwargs["exit_after_return"])
+        )
+        return node, returns
+
+    def test_q_exits_source_immediately_when_source_is_faulted(self) -> None:
+        node, returns = self._quit_node("fault", "fault")
+
+        with self.assertLogs("regrind_policy", level="ERROR") as logs:
+            node._on_key("q")
+
+        self.assertTrue(node._quit)
+        self.assertTrue(node._stop_event.is_set())
+        self.assertEqual(returns, [])
+        self.assertIn("without forcing Home", logs.output[0])
+        self.assertFalse(node._tick(1.0))
+
+    def test_q_exits_returning_source_when_coordinator_is_faulted(self) -> None:
+        node, returns = self._quit_node("returning", "fault")
+
+        with self.assertLogs("regrind_policy", level="ERROR"):
+            node._on_key("q")
+
+        self.assertTrue(node._quit)
+        self.assertEqual(returns, [])
+
+    def test_q_during_normal_running_still_requests_bounded_return(self) -> None:
+        node, returns = self._quit_node("running", "teleop")
+
+        node._on_key("q")
+
+        self.assertFalse(node._quit)
+        self.assertEqual(returns, [("operator quit", True)])
+
     def test_approach_toggle_continues_after_enter_release(self) -> None:
         node = RegrindPolicyNode.__new__(RegrindPolicyNode)
         identity = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
@@ -54,6 +215,7 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._session_client = SimpleNamespace(
             poll=lambda: None,
             start_authorized=True,
+            state=None,
         )
         node._real_admitted = lambda: (True, None)
         node._fresh_inputs = lambda _now: (sample, np.zeros(20), None)
@@ -96,7 +258,7 @@ class RegrindRealPreflightTest(unittest.TestCase):
         self.assertIsNone(wrist)
         self.assertIn("200 ms", error)
 
-    def test_reference_phase_reports_arm_tracking_but_only_waits_for_ik_recovery(self) -> None:
+    def test_reference_phase_holds_for_arm_tracking_lag_and_resumes_within_tolerance(self) -> None:
         node = RegrindPolicyNode.__new__(RegrindPolicyNode)
         node._lock = threading.RLock()
         node._router_zid = "router"
@@ -107,6 +269,8 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._arm_producer_input_error = None
         node._params = {
             "arm_stale_s": 0.15,
+            "wrist_frame0_position_tolerance_m": 0.01,
+            "wrist_frame0_orientation_tolerance_deg": 5.0,
         }
         node._wrist_to_tcp = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
         node._cached_tcp = node._wrist_to_tcp.copy()
@@ -150,8 +314,20 @@ class RegrindRealPreflightTest(unittest.TestCase):
         actual_wrist = node._cached_tcp.copy()
         actual_wrist[0] = 0.02
         ready, reason = node._reference_phase_ready(time.monotonic(), actual_wrist)
-        self.assertTrue(ready, reason)
+        self.assertFalse(ready)
+        self.assertIn("arm tracking lag", reason)
+        self.assertIn("20.0 mm", reason)
         self.assertAlmostEqual(node._phase_tracking_errors[0], 0.02)
+
+        actual_wrist[0] = 0.009
+        actual_wrist[3:] = Rotation.from_euler("x", 4.0, degrees=True).as_quat()
+        ready, reason = node._reference_phase_ready(time.monotonic(), actual_wrist)
+        self.assertTrue(ready, reason)
+
+        actual_wrist[3:] = Rotation.from_euler("x", 6.0, degrees=True).as_quat()
+        ready, reason = node._reference_phase_ready(time.monotonic(), actual_wrist)
+        self.assertFalse(ready)
+        self.assertIn("6.0 deg", reason)
 
     def test_running_tick_holds_policy_until_reference_governor_is_ready(self) -> None:
         node = RegrindPolicyNode.__new__(RegrindPolicyNode)
@@ -177,24 +353,42 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._session_client = SimpleNamespace(
             poll=lambda: None,
             start_authorized=True,
+            state=None,
         )
         node._real_admitted = lambda: (True, None)
         node._fresh_inputs = lambda _now: (sample, joints, None)
         node._check_hand_tracking = lambda _joints, _now: None
         node._read_deadman = lambda: True
         node._fresh_arm_wrist = lambda _now: (identity, None)
-        node._reference_phase_ready = lambda _now, _wrist: (
-            False,
-            "arm IK producer degraded",
+        node._lock = threading.RLock()
+        node._arm_producer_status = SimpleNamespace(
+            ready=True,
+            healthy=True,
+            error=None,
+            diagnostics={"degraded": False},
         )
+        node._arm_producer_received_at = 1.0
+        node._arm_producer_input_error = None
+        node._params = {
+            "arm_stale_s": 0.15,
+            "wrist_frame0_position_tolerance_m": 0.01,
+            "wrist_frame0_orientation_tolerance_deg": 5.0,
+        }
+        node._wrist_to_tcp = identity.copy()
+        node._cached_tcp = identity.copy()
+        node._cached_tcp[0] = 0.02
+        node._phase_tracking_errors = None
+        node._reference_progress = 3.0
+        node._reference_speed = 1.0
         node._publish_cached = lambda: published.append(node._frame_index)
         node._infer_target = lambda _sample, _joints: inferred.append(node._frame_index)
 
         self.assertTrue(node._tick(1.0))
         self.assertEqual(inferred, [])
         self.assertEqual(published, [3])
+        self.assertEqual(node._reference_progress, 3.0)
 
-        node._reference_phase_ready = lambda _now, _wrist: (True, None)
+        node._cached_tcp = identity.copy()
         self.assertTrue(node._tick(1.02))
         self.assertEqual(inferred, [3])
 
@@ -207,6 +401,8 @@ class RegrindRealPreflightTest(unittest.TestCase):
         inferred = []
         node._phase = "running"
         node._frame_index = 3
+        node._reference_progress = 3.0
+        node._reference_speed = 1.0
         node._reference = SimpleNamespace(frame_count=342)
         node._training_from_motive = identity
         node._previous_wrist_pos = np.zeros(3)
@@ -222,6 +418,7 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._session_client = SimpleNamespace(
             poll=lambda: None,
             start_authorized=True,
+            state=None,
         )
         node._real_admitted = lambda: (True, None)
         node._fresh_inputs = lambda _now: (sample, joints, None)
@@ -325,6 +522,8 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._reference = SimpleNamespace(frame_count=342)
         node._start_frame = 0
         node._frame_index = 0
+        node._reference_progress = 4.5
+        node._reference_speed = 0.5
         node._frame0_errors = None
         node._lock = threading.RLock()
         node._arm_received_at = 0.0
@@ -348,6 +547,8 @@ class RegrindRealPreflightTest(unittest.TestCase):
 
         self.assertTrue(published[0]["ready"])
         self.assertEqual(published[0]["diagnostics"]["input_error"], "waiting for live inputs")
+        self.assertEqual(published[0]["diagnostics"]["reference_speed"], 0.5)
+        self.assertEqual(published[0]["diagnostics"]["reference_progress"], 4.5)
 
     def test_pending_real_admission_publishes_valid_component_status(self) -> None:
         statuses = []
@@ -359,6 +560,8 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._reference = SimpleNamespace(frame_count=342)
         node._start_frame = 0
         node._frame_index = 0
+        node._reference_progress = 0.0
+        node._reference_speed = 1.0
         node._frame0_errors = None
         node._lock = threading.RLock()
         node._arm_received_at = 0.0
@@ -584,7 +787,249 @@ class RegrindRealPreflightTest(unittest.TestCase):
         np.testing.assert_allclose(
             Rotation.from_quat(np.roll(quaternion, -1)).as_rotvec(), [0.0, 0.0, 0.064]
         )
-        np.testing.assert_allclose(joints, 0.0)
+
+    def _running_cursor_node(
+        self, reference_speed: float
+    ) -> tuple[
+        RegrindPolicyNode,
+        SimpleNamespace,
+        np.ndarray,
+        list[tuple[int, float, float]],
+        list[str],
+    ]:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        identity_xyzw = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        joints = np.zeros(20)
+        sample = SimpleNamespace(wrist_xyzw=identity_xyzw, hammer_xyzw=identity_xyzw)
+        node._training_from_motive = identity_xyzw.copy()
+        node._robot_from_training = identity_xyzw.copy()
+        node._wrist_to_tcp = identity_xyzw.copy()
+        node._previous_wrist_pos = np.zeros(3)
+        node._previous_wrist_quat = np.asarray([1.0, 0.0, 0.0, 0.0])
+        node._previous_joints = joints.copy()
+        node._last_action = np.zeros(26)
+        node._frame_index = 0
+        node._reference_progress = 0.0
+        node._reference_speed = reference_speed
+        node._reference = SimpleNamespace(
+            frame_count=4,
+            wrist_pos=np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]),
+            wrist_quat_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (4, 1)),
+            joints=np.zeros((4, 20)),
+        )
+        node._hand_config = SimpleNamespace(
+            lower_limits_rad=np.full(20, -1.0),
+            upper_limits_rad=np.full(20, 1.0),
+        )
+        node._conditioner = SimpleNamespace(
+            condition=lambda position, quaternion: (position, quaternion, None)
+        )
+        node._actor = node._mean = node._variance = None
+        node._phase = "running"
+        node._last_error = None
+        node._deadman_pressed = False
+        node._deadman_error = None
+        node._hold_enter = False
+        node._inference_enabled = True
+        node._enter_edge_pending = False
+        node._phase_hold_reason = None
+        node._last_phase_hold_log_at = 0.0
+        node._session_client = SimpleNamespace(
+            poll=lambda: None,
+            start_authorized=True,
+            state=None,
+        )
+        node._real_admitted = lambda: (True, None)
+        node._fresh_inputs = lambda _now: (sample, joints, None)
+        node._check_hand_tracking = lambda _joints, _now: None
+        node._read_deadman = lambda: False
+        node._fresh_arm_wrist = lambda _now: (identity_xyzw, None)
+        node._reference_phase_ready = lambda _now, _wrist: (True, None)
+        published: list[tuple[int, float, float]] = []
+        node._publish_cached = lambda: published.append(
+            (
+                node._frame_index,
+                node._reference_progress,
+                float(node._cached_tcp[0]),
+            )
+        )
+        returns: list[str] = []
+        node._begin_return = lambda reason, **_kwargs: returns.append(reason)
+        return node, sample, joints, published, returns
+
+    def test_default_reference_speed_advances_one_frame_each_policy_tick(self) -> None:
+        node, _sample, _joints, published, returns = self._running_cursor_node(1.0)
+        bases = []
+
+        with patch(
+            "tianji_teleop.sources.regrind_policy_node.build_observation",
+            side_effect=lambda **values: bases.append(
+                (values["phase"], float(values["base_wrist_pos"][0]))
+            )
+            or np.zeros(1),
+        ), patch(
+            "tianji_teleop.sources.regrind_policy_node.infer",
+            return_value=np.zeros(26),
+        ):
+            self.assertTrue(node._tick(1.00))
+            self.assertTrue(node._tick(1.02))
+
+        self.assertEqual(bases, [(0.0, 0.0), (1.0 / 3.0, 1.0)])
+        self.assertEqual(returns, [])
+
+        self.assertEqual(published, [(1, 1.0, 0.0), (2, 2.0, 1.0)])
+    def test_half_reference_speed_repeats_each_frame_and_doubles_completion_ticks(self) -> None:
+        node, _sample, _joints, published, returns = self._running_cursor_node(0.5)
+        bases = []
+
+        with patch(
+            "tianji_teleop.sources.regrind_policy_node.build_observation",
+            side_effect=lambda **values: bases.append(
+                (values["phase"], float(values["base_wrist_pos"][0]))
+            )
+            or np.zeros(1),
+        ), patch(
+            "tianji_teleop.sources.regrind_policy_node.infer",
+            return_value=np.zeros(26),
+        ):
+            for tick in range(6):
+                self.assertTrue(node._tick(1.0 + tick * 0.02))
+            self.assertEqual(returns, [])
+            self.assertTrue(node._tick(1.12))
+
+        self.assertEqual(
+            bases,
+            [
+                (0.0, 0.0),
+                (0.0, 0.0),
+                (1.0 / 3.0, 1.0),
+                (1.0 / 3.0, 1.0),
+                (2.0 / 3.0, 2.0),
+                (2.0 / 3.0, 2.0),
+            ],
+        )
+        self.assertEqual(
+            published,
+            [
+                (1, 0.5, 0.0),
+                (1, 1.0, 0.0),
+                (2, 1.5, 1.0),
+                (2, 2.0, 1.0),
+                (3, 2.5, 2.0),
+                (3, 3.0, 2.0),
+            ],
+        )
+        self.assertEqual(returns, ["Regrind reference complete"])
+    def test_reference_completion_returns_home_without_exiting_process(self) -> None:
+        node, _sample, _joints, _published, _returns = self._running_cursor_node(
+            0.5
+        )
+        node._reference_progress = 3.0
+        node._frame_index = 3
+        returns = []
+        node._begin_return = lambda reason, **kwargs: returns.append(
+            (reason, kwargs["exit_after_return"])
+        )
+
+        self.assertTrue(node._tick(1.0))
+
+        self.assertEqual(returns, [("Regrind reference complete", False)])
+
+    def test_completed_return_rearms_for_an_explicit_operator_restart(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        node._phase = "returning"
+        node._phase_started = 0.0
+        node._exit_after_return = False
+        node._last_error = "old run state"
+        node._training_from_motive = np.ones(7)
+        node._robot_from_training = np.ones(7)
+        node._last_coordinator_transition = None
+        node._lock = threading.RLock()
+        node._session_client = SimpleNamespace(
+            poll=lambda: None,
+            return_completion_fresh=True,
+            state=SimpleNamespace(
+                state="idle",
+                reason="return complete",
+                sequence=33,
+                intent_sequence=7,
+            ),
+        )
+        starts = []
+        node._request_start = lambda: starts.append(True)
+
+        with self.assertLogs("regrind_policy", level="WARNING") as logs:
+            self.assertTrue(node._tick(2.0))
+
+        self.assertEqual(node._phase, "armed")
+        self.assertIsNone(node._last_error)
+        self.assertIsNone(node._training_from_motive)
+        self.assertIsNone(node._robot_from_training)
+        self.assertEqual(starts, [])
+        self.assertIn("press s", logs.output[-1].lower())
+
+        node._on_key("s")
+        self.assertEqual(starts, [True])
+
+
+    def test_inference_hand_target_uses_policy_output_without_measured_joint_step(self) -> None:
+        node = RegrindPolicyNode.__new__(RegrindPolicyNode)
+        identity_xyzw = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        node._training_from_motive = identity_xyzw.copy()
+        node._robot_from_training = identity_xyzw.copy()
+        node._wrist_to_tcp = identity_xyzw.copy()
+        node._previous_wrist_pos = np.zeros(3)
+        node._previous_wrist_quat = np.asarray([1.0, 0.0, 0.0, 0.0])
+        measured_joints = np.asarray([-0.8] * 20)
+        node._previous_joints = measured_joints.copy()
+        node._last_action = np.zeros(26)
+        node._frame_index = 0
+        node._reference_progress = 0.0
+        node._reference_speed = 1.0
+        reference_joints = np.linspace(-0.2, 0.2, 20)
+        node._reference = SimpleNamespace(
+            frame_count=2,
+            wrist_pos=np.zeros((2, 3)),
+            wrist_quat_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)),
+            joints=np.tile(reference_joints, (2, 1)),
+        )
+        lower_limits = np.asarray([-0.22] * 20)
+        upper_limits = np.asarray([0.22] * 20)
+        node._hand_config = SimpleNamespace(
+            lower_limits_rad=lower_limits,
+            upper_limits_rad=upper_limits,
+        )
+        node._conditioner = SimpleNamespace(
+            condition=lambda position, quaternion: (position, quaternion, None)
+        )
+        node._actor = node._mean = node._variance = None
+        node._params = {"hand_maximum_step_rad": 0.01}
+        sample = SimpleNamespace(
+            wrist_xyzw=identity_xyzw,
+            hammer_xyzw=identity_xyzw,
+        )
+        raw_action = np.concatenate((np.zeros(6), np.linspace(-2.0, 2.0, 20)))
+        expected = np.clip(
+            reference_joints + 0.064 * np.clip(raw_action[6:], -1.0, 1.0),
+            lower_limits,
+            upper_limits,
+        )
+
+        with patch(
+            "tianji_teleop.sources.regrind_policy_node.infer",
+            return_value=raw_action,
+        ):
+            node._infer_target(sample, measured_joints)
+
+        np.testing.assert_allclose(node._cached_joints, expected)
+        np.testing.assert_allclose(node._last_hand_target, expected)
+        self.assertFalse(
+            np.allclose(
+                node._cached_joints,
+                measured_joints
+                + np.clip(expected - measured_joints, -0.01, 0.01),
+            )
+        )
 
     def test_one_wrist_alignment_preserves_hammer_relative_pose(self) -> None:
         live_wrist = np.asarray([0.5, -0.2, 0.3, 0.0, 0.0, 0.0, 1.0])
@@ -653,6 +1098,8 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._session_client = SimpleNamespace(start_authorized=True)
         node._last_action = np.ones(26)
         node._frame_index = 12
+        node._reference_progress = 12.5
+        node._reference_speed = 0.5
 
         node._request_inference()
         self.assertEqual(node._phase, "ready")
@@ -660,6 +1107,7 @@ class RegrindRealPreflightTest(unittest.TestCase):
         node._request_inference()
         self.assertEqual(node._phase, "running")
         self.assertEqual(node._frame_index, 5)
+        self.assertEqual(node._reference_progress, 5.0)
         np.testing.assert_allclose(node._last_action, 0.0)
         np.testing.assert_allclose(node._cached_joints, joints)
         np.testing.assert_allclose(node._last_hand_target, joints)

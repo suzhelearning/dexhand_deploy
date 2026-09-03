@@ -15,9 +15,10 @@ CONFIG_ROOT="${BUNDLE_ROOT}/src/tianji_teleop/config"
 required_configs=(
   robot/arm.yaml robot/wuji_hand2.yaml robot/devices.yaml
   sources/mocap_live.yaml sources/h5_replay.yaml
-  producers/ik.yaml producers/policy_hold.yaml
-  coordinator/arm.yaml
-  executors/mujoco.yaml executors/marvin.yaml executors/marvin_impedance.yaml executors/wuji_hand2.yaml
+  producers/ik.yaml producers/ik_regrind.yaml producers/policy_hold.yaml
+  coordinator/arm.yaml coordinator/arm_regrind.yaml
+  executors/mujoco.yaml executors/marvin.yaml executors/marvin_impedance.yaml
+  executors/wuji_hand2.yaml executors/wuji_hand2_regrind.yaml
   recording/session.yaml replay/target.yaml replay/joint.yaml
   diagnostics/mocap_calibration.yaml
   sessions/mocap_live_sim.yaml sessions/mocap_live_real.yaml
@@ -46,15 +47,28 @@ from tianji_teleop.executors.wuji_hand2.config import WujiHandConfig
 root = Path(sys.argv[1])
 arm = ArmRobotConfig.load(root / "robot/arm.yaml")
 hand = WujiHandConfig.load(root / "robot/wuji_hand2.yaml")
+shared_executor = yaml.safe_load((root / "executors/wuji_hand2.yaml").read_text(encoding="utf-8")) or {}
+regrind_executor = yaml.safe_load((root / "executors/wuji_hand2_regrind.yaml").read_text(encoding="utf-8")) or {}
+assert float(shared_executor["rate_hz"]) == 60.0
+assert shared_executor.get("linear_interpolation") is False
+assert float(regrind_executor["rate_hz"]) == 100.0
+assert regrind_executor.get("linear_interpolation") is True
+shared_coordinator = yaml.safe_load((root / "coordinator/arm.yaml").read_text(encoding="utf-8")) or {}
+regrind_coordinator = yaml.safe_load((root / "coordinator/arm_regrind.yaml").read_text(encoding="utf-8")) or {}
+regrind_profile = yaml.safe_load((root / "sessions/regrind_real.yaml").read_text(encoding="utf-8")) or {}
+assert float(shared_coordinator["maximum_command_step_rad"]) == 0.00596902599
+assert float(regrind_coordinator["maximum_command_step_rad"]) == 1000.0
+assert regrind_profile["coordinator_config"] == "coordinator/arm_regrind.yaml"
 assert len(arm.left_joint_names) == len(arm.right_joint_names) == 7
 assert len(hand.joint_names) == 20
 for path in root.glob("sessions/*.yaml"):
     value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if "router_endpoint" in value or "ik_backend" in value:
         raise ValueError(f"session contains forbidden authority field: {path}")
-ik = load_component_config(root / "producers/ik.yaml", required_keys={"ik_backend", "arm_config"})
-if ik["ik_backend"] not in {"pinocchio_cpp", "pinocchio_qp", "tianji_official"}:
-    raise ValueError("unsupported IK backend")
+for name in ("ik.yaml", "ik_regrind.yaml"):
+    ik = load_component_config(root / "producers" / name, required_keys={"ik_backend", "arm_config"})
+    if ik["ik_backend"] not in {"pinocchio_cpp", "pinocchio_qp", "tianji_official"}:
+        raise ValueError("unsupported IK backend")
 print("canonical config schema passed")
 PY
 

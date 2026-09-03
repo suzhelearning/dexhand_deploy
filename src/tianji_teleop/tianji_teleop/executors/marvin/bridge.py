@@ -8,6 +8,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 from typing import Any, Mapping
 import time
 
@@ -22,6 +23,7 @@ from ...protocol.messages import (
     ALL_ARM_JOINT_NAMES,
     ARM_JOINT_NAMES,
     ArmJointCommand,
+    ArmJointProposal,
     ArmJointState,
     ComponentStatus,
     ProtocolEnvelope,
@@ -36,6 +38,14 @@ from ...zenoh_util import open_session, require_single_router, declare_component
 from .readiness import MarvinReadiness
 
 _LOG = logging.getLogger(__name__)
+
+
+class _ShutdownRequested(BaseException):
+    """让受管 SIGTERM 经过 executor 的 finally 清理路径。"""
+
+
+def _handle_shutdown(signum: int, _frame: Any) -> None:
+    raise _ShutdownRequested(f"signal {signum}")
 
 
 def _put(publisher: Any, payload: Mapping[str, Any]) -> None:
@@ -125,6 +135,11 @@ class MarvinExecutor:
             "hardware_driver": "python_sdk",
             "control_mode": "position",
             "controlled_sides": ["left", "right"],
+            "arm_command_path": "coordinator",
+            "direct_producer_id": "",
+            "direct_producer_instance_id": "",
+            "direct_sides": None,
+            "return_home_on_exit": False,
             "hardware_factory": _create_official_session,
         }
         if params:
@@ -139,6 +154,26 @@ class MarvinExecutor:
         ):
             raise ValueError("controlled_sides must contain left and/or right")
         self._controlled_sides = frozenset(controlled_sides)
+        self._arm_command_path = str(options["arm_command_path"])
+        if self._arm_command_path not in {"coordinator", "direct"}:
+            raise ValueError("arm_command_path must be coordinator or direct")
+        direct_sides = options["direct_sides"]
+        if direct_sides is None:
+            direct_sides = controlled_sides
+        if (
+            not isinstance(direct_sides, (list, tuple))
+            or not direct_sides
+            or any(side not in self._controlled_sides for side in direct_sides)
+            or len(set(direct_sides)) != len(direct_sides)
+        ):
+            raise ValueError("direct_sides must be a subset of controlled_sides")
+        self._direct_sides = frozenset(direct_sides)
+        self._direct_producer_id = str(options["direct_producer_id"]).strip()
+        self._direct_producer_instance_id = str(options["direct_producer_instance_id"]).strip()
+        if self._arm_command_path == "direct" and (
+            not self._direct_producer_id or not self._direct_producer_instance_id
+        ):
+            raise ValueError("direct path requires producer id and instance id")
         self._rate_hz = float(options["rate_hz"])
         if self._rate_hz <= 0.0:
             raise ValueError("rate must be positive")
@@ -191,6 +226,9 @@ class MarvinExecutor:
         self._session_state_received_ns: int | None = None
         self._commands: dict[str, ArmJointCommand] = {}
         self._command_received_ns: dict[str, int] = {}
+        self._direct_command_baseline: dict[str, tuple[str, int]] = {}
+        self._direct_teleop_enabled = False
+        self._direct_blocked_session_sequence: int | None = None
         self._feedback: MarvinFeedback | None = None
         self._feedback_received_ns: int | None = None
         self._last_output_deg: np.ndarray | None = None
@@ -254,14 +292,20 @@ class MarvinExecutor:
         if self.session is None:
             return
         # Subscriber declaration precedes ready status publication.
-        self._subscriptions.extend([
+        subscriptions = [
             self.session.declare_subscriber(topics.arm_command("left"), self.on_arm_command),
             self.session.declare_subscriber(topics.arm_command("right"), self.on_arm_command),
             self.session.declare_subscriber(topics.SESSION_STATE, self.on_session_state),
             self.session.declare_subscriber(topics.SOURCE_STATUS, lambda value: self.on_component_status(value)),
             self.session.declare_subscriber(topics.PRODUCER_STATUS, lambda value: self.on_component_status(value)),
             self.session.declare_subscriber(topics.SAFETY_STOP, self.on_safety_stop),
-        ])
+        ]
+        if self._arm_command_path == "direct":
+            subscriptions.extend(
+                self.session.declare_subscriber(topics.arm_proposal(side), self.on_arm_proposal)
+                for side in self._direct_sides
+            )
+        self._subscriptions.extend(subscriptions)
         self._publishers = {
             "state": self.session.declare_publisher(topics.ARM_STATE),
             "status": self.session.declare_publisher(topics.EXECUTOR_STATUS),
@@ -287,6 +331,15 @@ class MarvinExecutor:
                 raise ProtocolError("session state sequence rollback")
             self._session_state = state
             self._session_state_received_ns = received_ns
+            if self._arm_command_path == "direct":
+                if state.state == "teleop":
+                    blocked = self._direct_blocked_session_sequence
+                    if blocked is None or state.sequence > blocked:
+                        self._direct_teleop_enabled = True
+                        self._direct_blocked_session_sequence = None
+                else:
+                    self._direct_teleop_enabled = False
+                    self._direct_blocked_session_sequence = state.sequence
             self._readiness.observe_session_state(state, received_ns=received_ns)
             # fault is a latched coordinator decision.  A later returning or
             # idle snapshot may not downgrade it and accidentally re-enable
@@ -308,14 +361,77 @@ class MarvinExecutor:
             command = value if isinstance(value, ArmJointCommand) else ArmJointCommand.from_dict(_payload(value))
             if command.router_zid != self.router_zid or command.producer != "coordinator" or command.publisher_instance_id != self.coordinator_instance_id:
                 raise ProtocolError("arm command coordinator identity mismatch")
+            if (
+                self._arm_command_path == "direct"
+                and command.mode == "teleop"
+                and command.side in self._direct_sides
+            ):
+                return True
             received = int(self.clock())
             if not self._readiness.observe_command(command, received_ns=received):
                 raise ProtocolError(self._readiness.last_error or "arm command rejected")
             self._commands[command.side] = command
             self._command_received_ns[command.side] = received
+            if self._arm_command_path == "direct" and command.mode != "teleop":
+                self._direct_teleop_enabled = False
+                current_sequence = (
+                    -1 if self._session_state is None else self._session_state.sequence
+                )
+                self._direct_blocked_session_sequence = max(command.sequence, current_sequence)
             return True
         except (ProtocolError, TypeError, ValueError) as exc:
             self._last_error = f"invalid arm command: {exc}"
+            return False
+
+    def on_arm_proposal(self, value: ArmJointProposal | Mapping[str, Any] | Any) -> bool:
+        """Consume only the authorized IK proposal on the configured direct path."""
+        try:
+            if self._arm_command_path != "direct":
+                raise ProtocolError("direct arm proposal path is disabled")
+            proposal = value if isinstance(value, ArmJointProposal) else ArmJointProposal.from_dict(_payload(value))
+            if (
+                proposal.router_zid != self.router_zid
+                or proposal.producer != self._direct_producer_id
+                or proposal.publisher_instance_id != self._direct_producer_instance_id
+            ):
+                raise ProtocolError("arm proposal producer identity mismatch")
+            if proposal.side not in self._direct_sides:
+                raise ProtocolError("arm proposal side is not controlled directly")
+            if (
+                self._session_state is None
+                or self._session_state.state != "teleop"
+                or not self._direct_teleop_enabled
+            ):
+                return True
+            received = int(self.clock())
+            if proposal.timestamp_ns > received or received - proposal.timestamp_ns > int(self.params["command_timeout_s"] * 1e9):
+                raise ProtocolError("arm proposal is stale")
+            baseline = self._direct_command_baseline.get(proposal.side)
+            if baseline is not None and proposal.sequence <= baseline[1]:
+                raise ProtocolError("arm proposal sequence rollback")
+            command = ArmJointCommand(
+                1,
+                proposal.sequence,
+                proposal.timestamp_ns,
+                proposal.producer,
+                proposal.side,
+                "teleop",
+                proposal.sequence,
+                proposal.target_sequence,
+                proposal.names,
+                proposal.position_rad,
+                proposal.publisher_instance_id,
+                proposal.router_zid,
+            )
+            self._direct_command_baseline[proposal.side] = (
+                proposal.publisher_instance_id,
+                proposal.sequence,
+            )
+            self._commands[proposal.side] = command
+            self._command_received_ns[proposal.side] = received
+            return True
+        except (ProtocolError, TypeError, ValueError) as exc:
+            self._last_error = f"invalid arm proposal: {exc}"
             return False
 
     def on_safety_stop(self, value: SafetyStopRequest | Mapping[str, Any] | Any) -> bool:
@@ -412,10 +528,19 @@ class MarvinExecutor:
                 upper_limits_deg=np.degrees(self.robot.upper_limits_rad),
                 hard_limit_padding_deg=float(self.params["feedback_hard_limit_padding_deg"]),
             )
+            # Native impedance starts its watchdog worker before this method
+            # returns.  Refresh the measured hold target immediately so the
+            # worker cannot expire while the coordinator snapshot is wired.
+            self._hardware.send_joint_targets(
+                feedback.left_joints_deg, feedback.right_joints_deg
+            )
             self._feedback = feedback
             self._feedback_received_ns = int(self.clock())
-            self._inactive_hold_deg = np.concatenate(
-                [feedback.left_joints_deg, feedback.right_joints_deg]
+            # Inactive arms are still part of the coordinator's canonical
+            # Home gate.  Hold their canonical Home pose, not an arbitrary
+            # pose left by the previous process.
+            self._inactive_hold_deg = np.degrees(
+                np.asarray(self.robot.home_all, dtype=np.float64)
             )
             latest_state = self._session_state.state if self._session_state is not None else None
             # Re-check immediately before any home motion: a fault that won
@@ -426,11 +551,7 @@ class MarvinExecutor:
             if not fault_reconnect and latest_state != "returning":
                 left_home = np.degrees(self.robot.left_home_rad)
                 right_home = np.degrees(self.robot.right_home_rad)
-                if "left" not in self._controlled_sides:
-                    left_home = self._inactive_hold_deg[:7]
-                if "right" not in self._controlled_sides:
-                    right_home = self._inactive_hold_deg[7:]
-                self._hardware.move_to_home(
+                home_feedback = self._hardware.move_to_home(
                     left_home, right_home,
                     rate_hz=self._rate_hz,
                     minimum_duration_s=float(self.params["return_minimum_duration_s"]),
@@ -442,6 +563,9 @@ class MarvinExecutor:
                     hard_limit_padding_deg=float(self.params["feedback_hard_limit_padding_deg"]),
                     required_state=self._required_arm_state,
                 )
+                if home_feedback is not None:
+                    self._feedback = home_feedback
+                    self._feedback_received_ns = int(self.clock())
             # Consult the latest state again so a fault callback cannot be
             # overwritten by the stale pre-connect state.
             latest_state = self._session_state.state if self._session_state is not None else None
@@ -452,6 +576,8 @@ class MarvinExecutor:
             else:
                 self._phase = "armed_idle"
             return True
+        except _ShutdownRequested:
+            raise
         except BaseException as exc:
             self._last_error = f"startup_error: {exc}"
             self._phase = "failed"
@@ -619,6 +745,11 @@ class MarvinExecutor:
         self._send_commands(left, right)
 
     def _trip_soft_stop(self, reason: str) -> None:
+        if not self._safety_locked:
+            _LOG.error(
+                "Marvin soft stop: reason=%s phase=%s arm_command_path=%s",
+                reason, self._phase, self._arm_command_path,
+            )
         self._last_error = reason
         self._phase = "soft_stopped"
         self._safety_locked = True
@@ -659,6 +790,8 @@ class MarvinExecutor:
                 self._phase = "teleop"
                 self._send_commands(self._commands["left"], self._commands["right"])
             self._publish_state()
+        except _ShutdownRequested:
+            raise
         except BaseException as exc:
             self._trip_soft_stop(f"runtime_error: {exc}")
 
@@ -675,6 +808,7 @@ class MarvinExecutor:
             "rad_boundary": "sdk_only",
             "hardware_driver": self.params["hardware_driver"],
             "control_mode": self.params["control_mode"],
+            "arm_command_path": self._arm_command_path,
         }
         if self._hardware is not None:
             diagnostics.update(getattr(self._hardware, "diagnostics", {}))
@@ -702,7 +836,95 @@ class MarvinExecutor:
             self.tick()
             self._publish_status()
             time.sleep(max(0.0, next_tick - time.monotonic()))
+
+    def _shutdown_return_authorized(self, now_ns: int | None = None) -> bool:
+        """Allow shutdown Home only for a fresh coordinator return command."""
+        if self._session_state is None or self._session_state.state != "returning":
+            return False
+        if self._phase != "returning":
+            return False
+        now = int(self.clock()) if now_ns is None else int(now_ns)
+        state_received = self._session_state_received_ns
+        if (
+            state_received is None
+            or now < state_received
+            or now - state_received > int(self.params["state_timeout_s"] * 1e9)
+        ):
+            return False
+        if not all(side in self._commands for side in ("left", "right")):
+            return False
+        if not self._command_pair_fresh(now):
+            return False
+        return all(
+            self._commands[side].mode == "returning"
+            and self._commands[side].producer == "coordinator"
+            and self._commands[side].publisher_instance_id == self.coordinator_instance_id
+            and self._commands[side].router_zid == self.router_zid
+            for side in ("left", "right")
+        )
+
+    def _return_home_before_close(self) -> None:
+        hardware = self._hardware
+        if (
+            hardware is None
+            or not self.params.get("return_home_on_exit", False)
+            or self._safety_locked
+            or not self._shutdown_return_authorized()
+        ):
+            return
+        try:
+            feedback = hardware.read_feedback(include_servo_errors=True)
+            current_deg = np.concatenate(
+                [feedback.left_joints_deg, feedback.right_joints_deg]
+            )
+            target_deg = np.degrees(self.robot.home_all).copy()
+            # Refresh the native driver's command watchdog before doing any
+            # teardown work.  A SIGTERM can arrive just after the last
+            # control tick; without this hold command the 150 ms watchdog may
+            # soft-stop the worker before the bounded home trajectory starts.
+            hardware.send_joint_targets(current_deg[:7], current_deg[7:])
+            label = "双臂"
+            print(
+                f"Marvin 已连接；{label}距目标最大关节误差 "
+                f"{np.max(np.abs(current_deg - target_deg), initial=0.0):.2f} deg，"
+                "开始平滑回零。",
+                flush=True,
+            )
+            final_feedback = hardware.move_to_home(
+                target_deg[:7],
+                target_deg[7:],
+                rate_hz=self._rate_hz,
+                minimum_duration_s=float(self.params["return_minimum_duration_s"]),
+                max_speed_deg_s=float(self.params["return_max_speed_deg_s"]),
+                maximum_tracking_error_deg=float(self.params["maximum_tracking_error_deg"]),
+                home_tolerance_deg=float(np.degrees(self.params["home_tolerance_rad"])),
+                lower_limits_deg=np.degrees(self.robot.lower_limits_rad),
+                upper_limits_deg=np.degrees(self.robot.upper_limits_rad),
+                hard_limit_padding_deg=float(self.params["feedback_hard_limit_padding_deg"]),
+                required_state=self._required_arm_state,
+                return_authority=self._shutdown_return_authorized,
+            )
+            if final_feedback is None:
+                final_feedback = hardware.read_feedback(include_servo_errors=True)
+            final_deg = np.concatenate(
+                [final_feedback.left_joints_deg, final_feedback.right_joints_deg]
+            )
+            print(
+                f"完成：{label}已平滑回到目标；最大关节误差 "
+                f"{np.max(np.abs(final_deg - target_deg), initial=0.0):.2f} deg。",
+                flush=True,
+            )
+        except BaseException as exc:
+            self._last_error = f"shutdown return-home failed: {exc}"
+            _LOG.error("%s", self._last_error, exc_info=True)
+            print(f"错误：{self._last_error}", flush=True)
+            try:
+                hardware.soft_stop_once()
+            except Exception:
+                pass
+
     def close(self) -> None:
+        self._return_home_before_close()
         self._release_hardware()
         if self._liveliness_token is not None:
             try:
@@ -761,7 +983,24 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("Marvin executor config must be a mapping")
         configured.update(params)
         params = configured
+    params["arm_command_path"] = os.environ.get(
+        "TIANJI_ARM_COMMAND_PATH",
+        params.get("arm_command_path", "coordinator"),
+    )
+    if params["arm_command_path"] == "direct":
+        for env_name, parameter in (
+            ("TIANJI_ARM_PRODUCER_LOGICAL_ID", "direct_producer_id"),
+            ("TIANJI_ARM_PRODUCER_INSTANCE_ID", "direct_producer_instance_id"),
+        ):
+            value = os.environ.get(env_name)
+            if value:
+                params[parameter] = value
+        active_sides = os.environ.get("TIANJI_ACTIVE_SIDES")
+        if active_sides:
+            params["direct_sides"] = [side for side in active_sides.split(",") if side]
     _apply_speed_overrides(params)
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGINT, _handle_shutdown)
     session = open_session()
     node = None
     try:
@@ -780,6 +1019,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         node.run()
+    except _ShutdownRequested:
+        return 0
     finally:
         if node is not None:
             node.close()

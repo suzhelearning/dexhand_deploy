@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 
 namespace tianji_teleop
 {
@@ -21,6 +23,45 @@ constexpr float kPi = 3.14159265358979323846F;
 /* OD 0x6001 ext_state (status_word & 0x3): 0=Init 1=Ready 2=Enabled 3=Stopped。 */
 constexpr uint32_t kExtStateEnabled = 2U;
 constexpr uint32_t kExtStateMask = 0x3U;
+/* 真机 callback NID 为 1-based；每指 4 个 motor 后留一个 tactile slot。 */
+constexpr std::array<int8_t, 25> kDenseIndexByNid{
+  -1, 0, 1, 2, 3, -1, 4, 5, 6, 7, -1, 8, 9, 10, 11,
+  -1, 12, 13, 14, 15, -1, 16, 17, 18, 19};
+constexpr uint32_t kAllMotorMask = (1U << kWujiJointCount) - 1U;
+
+template<typename Entry>
+bool map_motor_entries(
+  const Entry * entries, size_t entries_len, std::array<uint8_t, kWujiJointCount> & dense_indices)
+{
+  if (entries == nullptr || entries_len != kWujiJointCount) {
+    return false;
+  }
+  uint32_t seen = 0;
+  for (size_t i = 0; i < entries_len; ++i) {
+    const uint8_t nid = entries[i].nid;
+    if (nid >= kDenseIndexByNid.size() || kDenseIndexByNid[nid] < 0) {
+      return false;
+    }
+    const uint8_t dense = static_cast<uint8_t>(kDenseIndexByNid[nid]);
+    const uint32_t bit = 1U << dense;
+    if ((seen & bit) != 0U) {
+      return false;
+    }
+    seen |= bit;
+    dense_indices[i] = dense;
+  }
+  return seen == kAllMotorMask;
+}
+
+uint8_t count_online(uint32_t mask)
+{
+  uint8_t count = 0;
+  while (mask != 0U) {
+    count = static_cast<uint8_t>(count + (mask & 1U));
+    mask >>= 1U;
+  }
+  return count;
+}
 
 bool status_ok(WujiStatus status)
 {
@@ -72,7 +113,57 @@ struct EnableCtx
 {
   std::atomic<bool> enabled{false};
   std::atomic<uint32_t> online{0};
+  mutable std::mutex diagnostics_mu;
+  bool saw_ok_frame = false;
+  std::string latest_diagnostics_summary;
+  std::string latest_diagnostics_reason;
 };
+
+/* enabled 是成功帧 latch；关闭订阅后 SDK 可能回调 END，不能清除成功状态。 */
+
+std::string diagnostics_summary(
+  WujiFrameKind kind, const WujiJointDiagnosticsFrame * frame)
+{
+  std::ostringstream out;
+  out << "kind=" << static_cast<unsigned int>(kind);
+  if (frame == nullptr) {
+    out << " frame=null";
+    return out.str();
+  }
+  out << " num_joints=" << static_cast<unsigned int>(frame->num_joints)
+      << " joints_len=" << frame->joints_len;
+  if (frame->joints == nullptr) {
+    out << " joints=null";
+    return out.str();
+  }
+  for (size_t i = 0; i < frame->joints_len; ++i) {
+    const WujiJointDiagnosticsEntry & entry = frame->joints[i];
+    out << " [" << i
+        << " nid=" << static_cast<unsigned int>(entry.nid)
+        << " status_word=0x" << std::hex << entry.status_word << std::dec
+        << " status_word&3=" << (entry.status_word & kExtStateMask)
+        << " ext_state=" << (entry.status_word & kExtStateMask)
+        << " vbus_v_fb=" << entry.vbus_v_fb
+        << " error_code_current=0x" << std::hex
+        << entry.error_code_current << std::dec << "]";
+  }
+  return out.str();
+}
+
+std::string enable_timeout_detail(const EnableCtx & ctx)
+{
+  std::lock_guard<std::mutex> guard(ctx.diagnostics_mu);
+  std::string detail = ctx.latest_diagnostics_reason;
+  if (!ctx.saw_ok_frame) {
+    detail = "诊断未收到 OK frame";
+  } else if (detail.empty()) {
+    detail = "诊断未满足 20/20 Enabled";
+  }
+  if (!ctx.latest_diagnostics_summary.empty()) {
+    detail += "；最近 raw diagnostics: " + ctx.latest_diagnostics_summary;
+  }
+  return detail;
+}
 
 }  // namespace
 
@@ -270,9 +361,9 @@ bool WujiHand2Device::enable_and_wait(std::string * error)
     }
     return false;
   }
-  if (online == 0) {
+  if (online != kWujiJointCount) {
     if (error != nullptr) {
-      *error = "Wuji Hand 2 在线关节为 0（检查供电/网络）";
+      *error = "Wuji Hand 2 在线关节不足 20/20（检查供电/网络）";
     }
     return false;
   }
@@ -306,7 +397,7 @@ bool WujiHand2Device::enable_and_wait(std::string * error)
   }
 
   /* 订阅 joint_diagnostics，等待全部在线关节 ext_state=Enabled。
-   * 过滤 vbus_v_fb > 0.5（存在连接但逆变器未上电的关节）。 */
+   * diagnostics 是在线关节的 variable-length frame；vbus 仅记录诊断。 */
   EnableCtx ctx;
   if (!status_ok(wuji_hand_2_subscribe_joint_diagnostics(
           dev_, &WujiHand2Device::on_diagnostics, &ctx, &diagnostics_sub_))) {
@@ -327,14 +418,16 @@ bool WujiHand2Device::enable_and_wait(std::string * error)
   if (!ctx.enabled.load(std::memory_order_relaxed)) {
     if (error != nullptr) {
       *error =
-        "电机使能超时（在线关节未全部进入 Enabled，检查供电/急停/网线）";
+        "电机使能超时（在线关节未全部进入 Enabled）；" + enable_timeout_detail(ctx);
     }
     (void)wuji_hand_2_disable(dev_, nullptr);
     return false;
   }
   {
+    const uint32_t online_mask = ctx.online.load(std::memory_order_relaxed);
     std::lock_guard<std::mutex> guard(mu_);
-    online_mask_ = ctx.online.load(std::memory_order_relaxed);
+    online_mask_ = online_mask;
+    online_count_ = count_online(online_mask);
   }
   return true;
 }
@@ -439,33 +532,60 @@ void WujiHand2Device::close()
 void WujiHand2Device::on_diagnostics(
   WujiFrameKind kind, const WujiJointDiagnosticsFrame * frame, void * user)
 {
-  if (kind != WUJI_FRAME_KIND_OK || frame == nullptr || frame->joints == nullptr) {
+  EnableCtx * ctx = static_cast<EnableCtx *>(user);
+  if (ctx == nullptr) {
     return;
   }
-  if (frame->joints_len == 0) {
+
+  std::lock_guard<std::mutex> guard(ctx->diagnostics_mu);
+  if (kind != WUJI_FRAME_KIND_OK) {
+    ctx->latest_diagnostics_reason =
+      "诊断回调未收到 OK frame（kind=" +
+      std::to_string(static_cast<unsigned int>(kind)) + "）";
+    if (!ctx->enabled.load(std::memory_order_relaxed)) {
+      ctx->online.store(0, std::memory_order_relaxed);
+    }
     return;
   }
+  const std::string summary = diagnostics_summary(kind, frame);
+  ctx->latest_diagnostics_summary = summary;
+  ctx->saw_ok_frame = true;
+  if (frame == nullptr || frame->joints == nullptr) {
+    ctx->latest_diagnostics_reason =
+      "最近 OK diagnostics frame 非法（缺少 joints）";
+    if (!ctx->enabled.load(std::memory_order_relaxed)) {
+      ctx->online.store(0, std::memory_order_relaxed);
+    }
+    return;
+  }
+  std::array<uint8_t, kWujiJointCount> dense_indices{};
+
+  if (!map_motor_entries(frame->joints, frame->joints_len, dense_indices)) {
+    ctx->latest_diagnostics_reason =
+      "最近 OK diagnostics frame 非法（需要恰好 20 个唯一合法 motor NID）";
+    if (!ctx->enabled.load(std::memory_order_relaxed)) {
+      ctx->online.store(0, std::memory_order_relaxed);
+    }
+    return;
+  }
+
   uint32_t online = 0;
   bool all_enabled = true;
   for (size_t i = 0; i < frame->joints_len; ++i) {
     const WujiJointDiagnosticsEntry & entry = frame->joints[i];
-    if (entry.vbus_v_fb > 0.5F) {
-      if (entry.nid < 20) {
-        online |= (1U << entry.nid);
-      }
-      if ((entry.status_word & kExtStateMask) != kExtStateEnabled) {
-        all_enabled = false;
-      }
+    const uint32_t bit = 1U << dense_indices[i];
+    online |= bit;
+    if ((entry.status_word & kExtStateMask) != kExtStateEnabled) {
+      all_enabled = false;
     }
   }
-  if (online == 0) {
-    return;
-  }
-  EnableCtx * ctx = static_cast<EnableCtx *>(user);
   ctx->online.store(online, std::memory_order_relaxed);
-  if (all_enabled) {
+  if (online == kAllMotorMask && all_enabled) {
     ctx->enabled.store(true, std::memory_order_relaxed);
   }
+  ctx->latest_diagnostics_reason = all_enabled
+    ? "最近 OK diagnostics frame 已满足 20/20 Enabled"
+    : "最近 OK diagnostics frame 未满足 20/20 Enabled（存在 ext_state != 2）";
 }
 
 void WujiHand2Device::on_joint_states(
@@ -474,21 +594,20 @@ void WujiHand2Device::on_joint_states(
   if (kind != WUJI_FRAME_KIND_OK || frame == nullptr || frame->joints == nullptr) {
     return;
   }
+  std::array<uint8_t, kWujiJointCount> dense_indices{};
+  if (!map_motor_entries(frame->joints, frame->joints_len, dense_indices)) {
+    return;
+  }
   WujiHand2Device * self = static_cast<WujiHand2Device *>(user);
   float position[20];
   float velocity[20];
   float effort[20];
-  std::fill(position, position + 20, 0.0F);
-  std::fill(velocity, velocity + 20, 0.0F);
-  std::fill(effort, effort + 20, 0.0F);
   for (size_t i = 0; i < frame->joints_len; ++i) {
     const WujiJointStateEntry & entry = frame->joints[i];
-    if (entry.nid >= 20) {
-      continue;
-    }
-    position[entry.nid] = entry.position;
-    velocity[entry.nid] = entry.velocity;
-    effort[entry.nid] = entry.effort;
+    const size_t dense = dense_indices[i];
+    position[dense] = entry.position;
+    velocity[dense] = entry.velocity;
+    effort[dense] = entry.effort;
   }
   std::lock_guard<std::mutex> guard(self->mu_);
   std::memcpy(self->last_position_, position, sizeof(position));
@@ -498,5 +617,6 @@ void WujiHand2Device::on_joint_states(
   ++self->states_serial_;
   self->have_states_ = true;
 }
+
 
 }  // namespace tianji_teleop

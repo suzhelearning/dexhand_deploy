@@ -33,6 +33,29 @@ from tianji_teleop.sources.mocap.regrind import RegrindMotiveTracker
 from tianji_teleop.zenoh_util import open_session, require_single_router
 
 
+_HAMMER_START_POSITION_TOLERANCE_M = 0.02
+_HAMMER_START_ORIENTATION_TOLERANCE_DEG = 10.0
+
+
+def _reference_speed(value: str) -> float:
+    speed = float(value)
+    if not 0.0 < speed <= 1.0:
+        raise argparse.ArgumentTypeError(
+            "--reference-speed must be finite and in (0, 1]"
+        )
+    return speed
+
+
+def _hammer_pose_is_aligned(
+    position_error_m: float,
+    orientation_error_deg: float,
+) -> bool:
+    return (
+        position_error_m <= _HAMMER_START_POSITION_TOLERANCE_M
+        and orientation_error_deg <= _HAMMER_START_ORIENTATION_TOLERANCE_DEG
+    )
+
+
 def _alignment_scene_poses(
     scene_wrist: np.ndarray,
     live_home_wrist: np.ndarray,
@@ -350,7 +373,10 @@ def _run_alignment_viewer(
                         * Rotation.from_quat(current_hammer[3:])
                     ).as_rotvec())))
                     fresh = age_s <= stale_s
-                    last_passed = fresh and position_error_mm <= 10.0 and orientation_error_deg <= 5.0
+                    last_passed = fresh and _hammer_pose_is_aligned(
+                        position_error_mm / 1000.0,
+                        orientation_error_deg,
+                    )
                     with viewer.lock():
                         mirror.apply()
                         set_pose("expected_hammer", expected_hammer)
@@ -544,6 +570,12 @@ def main() -> int:
     parser.add_argument("--wrist-name", default="tianji_wrist")
     parser.add_argument("--hammer-name", default="hammer")
     parser.add_argument("--rate", type=float, default=50.0)
+    parser.add_argument(
+        "--reference-speed",
+        type=_reference_speed,
+        default=1.0,
+        help="reference playback ratio in (0, 1]; accepted by the read-only viewer for shared session arguments",
+    )
     parser.add_argument("--stale-s", type=float, default=0.25)
     parser.add_argument("--wait-s", type=float, default=10.0)
     parser.add_argument("--print-every", type=int, default=1)
@@ -608,7 +640,10 @@ def main() -> int:
             Rotation.from_quat(reference_hammer_zero[3:]).inv()
             * Rotation.from_quat(aligned_hammer_zero[3:])
         ).as_rotvec())))
-        pose_preflight_passed = hammer_position_error_m <= 0.01 and hammer_rotation_error_deg <= 5.0
+        pose_preflight_passed = _hammer_pose_is_aligned(
+            hammer_position_error_m,
+            hammer_rotation_error_deg,
+        )
         previous_wrist = compose_pose(training_from_motive, wrist_zero)
         previous_wrist_pos = previous_wrist[:3].copy()
         previous_wrist_quat = np.roll(previous_wrist[3:], 1)
@@ -623,6 +658,7 @@ def main() -> int:
             "publishes_control": False,
             "checkpoint_iteration": iteration,
             "rate_hz": args.rate,
+            "reference_speed": args.reference_speed,
             "frames": reference.frame_count - args.start_frame - 1,
             "start_frame": args.start_frame,
             "hand_joint_observation": "previous_policy_target_assuming_perfect_tracking",

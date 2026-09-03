@@ -78,8 +78,8 @@ DEFAULT_PARAMETERS = {
     "maximum_input_skew_s": 0.02,
     "wrist_frame0_position_tolerance_m": 0.01,
     "wrist_frame0_orientation_tolerance_deg": 5.0,
-    "hammer_start_position_tolerance_m": 0.01,
-    "hammer_start_orientation_tolerance_deg": 5.0,
+    "hammer_start_position_tolerance_m": 0.02,
+    "hammer_start_orientation_tolerance_deg": 10.0,
     "hand_maximum_step_rad": 0.01,
     "hand_tracking_error_rad": 0.25,
     "hand_tracking_error_duration_s": 0.1,
@@ -93,15 +93,29 @@ DEFAULT_PARAMETERS = {
     "right_marker_to_mount_quaternion_xyzw": MARKER_TO_MOUNT[3:].tolist(),
     "right_tcp_to_mount_translation_m": [0.0, 0.0, 0.008],
     "right_tcp_to_mount_quaternion_xyzw": [0.7071067811865476, 0.7071067811865476, 0.0, 0.0],
-    # First real pass: 10% of the established H5 workspace dynamics.
+    # First real pass: 25% of the established H5 workspace dynamics.
     "workspace_relative_radii_m": [0.42, 0.38, 0.38],
     "workspace_soft_zone_ratio": 0.90,
-    "maximum_linear_speed_m_s": 0.036,
-    "maximum_angular_speed_rad_s": 0.155,
-    "maximum_linear_acceleration_m_s2": 0.35,
-    "maximum_angular_acceleration_rad_s2": 0.9,
+    "maximum_linear_speed_m_s": 0.09,
+    "maximum_angular_speed_rad_s": 0.3875,
+    "maximum_linear_acceleration_m_s2": 0.875,
+    "maximum_angular_acceleration_rad_s2": 2.25,
     "right_default_elbow_direction": [0.45638698, 0.74604902, -0.48489358],
 }
+
+
+def _parse_reference_speed(value: str) -> float:
+    try:
+        speed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--reference-speed must be finite and in (0, 1]"
+        ) from exc
+    if not np.isfinite(speed) or not 0.0 < speed <= 1.0:
+        raise argparse.ArgumentTypeError(
+            "--reference-speed must be finite and in (0, 1]"
+        )
+    return speed
 
 
 def _configured_pose(params: dict[str, Any], prefix: str) -> np.ndarray:
@@ -150,6 +164,9 @@ class RegrindPolicyNode:
     ) -> None:
         self._params = params
         self._rate = float(params["rate"])
+        self._reference_speed = float(params["reference_speed"])
+        if not np.isfinite(self._reference_speed) or not 0.0 < self._reference_speed <= 1.0:
+            raise ValueError("reference_speed must be finite and in (0, 1]")
         if not np.isclose(self._rate, 50.0):
             raise ValueError("Regrind policy rate must remain training-exact at 50 Hz")
         capability = parse_real_capability(real_capability)
@@ -252,6 +269,7 @@ class RegrindPolicyNode:
             allocator=allocator,
         )
         self._session_client.start()
+        self._last_coordinator_transition: tuple[str, str] | None = None
         self._lock = threading.RLock()
         self._arm_wrist_robot: np.ndarray | None = None
         self._arm_received_at = 0.0
@@ -279,6 +297,7 @@ class RegrindPolicyNode:
         self._quit = False
         self._last_error: str | None = None
         self._frame_index = self._start_frame
+        self._reference_progress = float(self._start_frame)
         self._training_from_motive: np.ndarray | None = None
         self._previous_wrist_pos: np.ndarray | None = None
         self._previous_wrist_quat: np.ndarray | None = None
@@ -317,12 +336,15 @@ class RegrindPolicyNode:
         )
         self._keyboard_thread.start()
         _LOG.warning(
-            "REAL Regrind loaded: checkpoint iteration=%s, frames=%s. "
+            "REAL Regrind loaded: checkpoint iteration=%s, frames=%s, "
+            "reference_speed=%.3f, reference_progress=%.3f. "
             "Press s, then %s to reach frame %s; %s and align the hammer in the viewer; "
             "%s; "
             "s returns Home; q returns and exits.",
             iteration,
             self._reference.frame_count,
+            self._reference_speed,
+            self._reference_progress,
             "hold Enter" if self._hold_enter else "press Enter once",
             self._start_frame,
             "release Enter" if self._hold_enter else "wait for completion",
@@ -449,6 +471,18 @@ class RegrindPolicyNode:
         actual_tcp = compose_pose(actual_wrist_robot, self._wrist_to_tcp)
         position_error, orientation_error = _pose_error(actual_tcp, self._cached_tcp)
         self._phase_tracking_errors = position_error, orientation_error
+        if (
+            position_error
+            > float(self._params["wrist_frame0_position_tolerance_m"])
+            or orientation_error
+            > float(self._params["wrist_frame0_orientation_tolerance_deg"])
+        ):
+            return (
+                False,
+                "arm tracking lag: "
+                f"{position_error * 1000.0:.1f} mm / "
+                f"{orientation_error:.1f} deg",
+            )
         return True, None
 
     def _on_hand_state(self, payload: Any) -> None:
@@ -521,7 +555,19 @@ class RegrindPolicyNode:
     def _on_key(self, key: str) -> None:
         if key in ("q", "\x03"):
             with self._lock:
-                if self._phase == "armed" and self._session_client.at_home:
+                coordinator_state = self._session_client.state
+                faulted = self._phase == "fault" or (
+                    self._phase == "returning"
+                    and coordinator_state is not None
+                    and coordinator_state.state == "fault"
+                )
+                if faulted:
+                    self._quit = True
+                    self._stop_event.set()
+                    _LOG.error(
+                        "faulted Regrind source exiting without forcing Home"
+                    )
+                elif self._phase == "armed" and self._session_client.at_home:
                     self._quit = True
                     self._stop_event.set()
                 else:
@@ -587,6 +633,7 @@ class RegrindPolicyNode:
         self._last_phase_hold_log_at = 0.0
         self._last_approach_log_at = 0.0
         self._frame_index = self._start_frame
+        self._reference_progress = float(self._start_frame)
         self._approach_enabled = False
         self._inference_enabled = False
         self._enter_edge_pending = False
@@ -685,6 +732,7 @@ class RegrindPolicyNode:
         self._tracking_error_since = None
         self._last_action.fill(0.0)
         self._frame_index = self._start_frame
+        self._reference_progress = float(self._start_frame)
         self._approach_enabled = False
         self._inference_enabled = False
         self._enter_edge_pending = False
@@ -784,7 +832,7 @@ class RegrindPolicyNode:
         assert self._previous_wrist_pos is not None
         assert self._previous_wrist_quat is not None
         assert self._previous_joints is not None
-        index = self._frame_index
+        index = int(self._reference_progress)
         wrist = compose_pose(self._training_from_motive, sample.wrist_xyzw)
         hammer = compose_pose(self._training_from_motive, sample.hammer_xyzw)
         wrist_quat = np.roll(wrist[3:], 1)
@@ -812,8 +860,6 @@ class RegrindPolicyNode:
             self._reference.joints[index],
         )
         target_joints = np.clip(target_joints, self._hand_config.lower_limits_rad, self._hand_config.upper_limits_rad)
-        maximum_step = float(self._params["hand_maximum_step_rad"])
-        target_joints = joints + np.clip(target_joints - joints, -maximum_step, maximum_step)
         wrist_training = np.concatenate((target_pos, np.roll(target_quat, -1)))
         tcp_robot = compose_pose(compose_pose(self._robot_from_training, wrist_training), self._wrist_to_tcp)
         tcp_position, tcp_quaternion, _ = self._conditioner.condition(tcp_robot[:3], tcp_robot[3:])
@@ -824,7 +870,11 @@ class RegrindPolicyNode:
         self._previous_wrist_pos = wrist[:3].copy()
         self._previous_wrist_quat = wrist_quat.copy()
         self._previous_joints = joints.copy()
-        self._frame_index += 1
+        self._frame_index = index + 1
+        self._reference_progress = min(
+            float(self._reference.frame_count - 1),
+            self._reference_progress + self._reference_speed,
+        )
 
     def _publish_cached(self) -> None:
         if self._cached_tcp is None or self._cached_joints is None:
@@ -868,6 +918,8 @@ class RegrindPolicyNode:
             "frame_index": self._frame_index,
             "frame_count": self._reference.frame_count,
             "start_frame": self._start_frame,
+            "reference_speed": self._reference_speed,
+            "reference_progress": self._reference_progress,
             "deadman_pressed": self._deadman_pressed,
             "inference_enabled": getattr(self, "_inference_enabled", False),
             "enter_mode": "hold" if getattr(self, "_hold_enter", False) else "toggle",
@@ -941,8 +993,28 @@ class RegrindPolicyNode:
         )
         self._hand_status_pub.put_json(hand_status.to_dict())
 
+    def _log_coordinator_transition(self) -> None:
+        state = self._session_client.state
+        if state is None:
+            return
+        transition = (state.state, state.reason)
+        if transition == getattr(self, "_last_coordinator_transition", None):
+            return
+        self._last_coordinator_transition = transition
+        _LOG.warning(
+            "coordinator transition: state=%s, reason=%s, sequence=%s, "
+            "intent_sequence=%s",
+            state.state,
+            state.reason,
+            state.sequence,
+            state.intent_sequence,
+        )
+
     def _tick(self, now: float) -> bool:
         self._session_client.poll()
+        self._log_coordinator_transition()
+        if getattr(self, "_quit", False):
+            return False
         if self._phase == "armed":
             self._read_deadman()
             return not self._quit
@@ -957,7 +1029,13 @@ class RegrindPolicyNode:
                 )
             elif self._session_client.pending_intent_sequence is None:
                 self._phase = "armed"
-                _LOG.error("coordinator rejected start: %s", self._session_client.state.reason if self._session_client.state else "unknown")
+                _LOG.error(
+                    "coordinator rejected start: %s; wait for fresh Home, "
+                    "then press s again (Enter is ignored while armed)",
+                    self._session_client.state.reason
+                    if self._session_client.state
+                    else "unknown",
+                )
             return True
         if self._phase == "returning":
             if self._session_client.return_completion_fresh:
@@ -967,7 +1045,9 @@ class RegrindPolicyNode:
                 self._last_error = None
                 self._training_from_motive = None
                 self._robot_from_training = None
-                _LOG.warning("arm Home and Wuji zero confirmed")
+                _LOG.warning(
+                    "arm Home and Wuji zero confirmed; press s to start another run"
+                )
             elif now >= self._return_deadline:
                 self._last_error = "return completion timeout"
                 self._phase = "fault"
@@ -987,7 +1067,13 @@ class RegrindPolicyNode:
             self._begin_return(tracking_error, exit_after_return=True)
             return True
         if not self._session_client.start_authorized:
-            self._begin_return("coordinator left teleop", exit_after_return=True)
+            state = self._session_client.state
+            return_reason = (
+                "coordinator left teleop"
+                if state is None
+                else f"coordinator {state.state}: {state.reason}"
+            )
+            self._begin_return(return_reason, exit_after_return=True)
             return True
         was_pressed = self._deadman_pressed
         was_inference_enabled = self._inference_enabled
@@ -1061,7 +1147,8 @@ class RegrindPolicyNode:
                 if now - self._last_phase_hold_log_at >= 1.0:
                     self._last_phase_hold_log_at = now
                     _LOG.warning(
-                        "reference phase holding at frame %s: %s",
+                        "reference phase holding at progress %.3f (frame_index=%s): %s",
+                        self._reference_progress,
                         self._frame_index,
                         hold_reason,
                     )
@@ -1072,8 +1159,8 @@ class RegrindPolicyNode:
                 self._publish_cached()
                 return True
             self._phase_hold_reason = None
-            if self._frame_index >= self._reference.frame_count - 1:
-                self._begin_return("Regrind reference complete", exit_after_return=True)
+            if self._reference_progress >= self._reference.frame_count - 1:
+                self._begin_return("Regrind reference complete", exit_after_return=False)
                 return True
             self._infer_target(sample, joints)
         else:
@@ -1156,6 +1243,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--start-frame", type=int, default=0)
+    parser.add_argument(
+        "--reference-speed",
+        type=_parse_reference_speed,
+        default=1.0,
+        help="reference progress per 50 Hz policy tick; finite and in (0, 1]",
+    )
     parser.add_argument("--config", default="")
     parser.add_argument(
         "--hold-enter",
@@ -1170,6 +1263,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     params = load_node_config(args.config, "regrind_policy", DEFAULT_PARAMETERS, {})
     params["hold_enter"] = args.hold_enter
+    params["reference_speed"] = args.reference_speed
     from ..executors.marvin.preflight import trusted_real_capability
 
     session = open_session(os.environ.get("TIANJI_ROUTER_ENDPOINT"))

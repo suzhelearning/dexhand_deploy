@@ -49,6 +49,16 @@ int tianji_marvin_native_connect(
   char *error,
   size_t error_size);
 
+int tianji_marvin_native_set_position_mode(
+  void *handle,
+  char *error,
+  size_t error_size);
+
+int tianji_marvin_native_set_impedance_mode(
+  void *handle,
+  char *error,
+  size_t error_size);
+
 int tianji_marvin_native_submit(
   void *handle,
   const double left_deg[TIANJI_MARVIN_JOINTS],

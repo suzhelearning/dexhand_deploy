@@ -465,6 +465,8 @@ class MarvinHardwareSession:
         hard_limit_padding_deg: float = 5.0,
         required_state: int = 1,
         feedback_timeout_s: float = 0.15,
+        return_authority: Callable[[], bool] | None = None,
+        require_monotonic_home_progress: bool = False,
     ) -> MarvinFeedback:
         if rate_hz <= 0.0:
             raise ValueError("rate_hz must be positive")
@@ -514,13 +516,21 @@ class MarvinHardwareSession:
         period = 1.0 / float(rate_hz)
         last_frame_serials = feedback.frame_serials
         frame_advanced_at = [self._monotonic(), self._monotonic()]
+        settle_deadline = None
+        best_home_error = np.abs(home - start)
         while True:
+            if return_authority is not None and not return_authority():
+                self.soft_stop_once()
+                raise MarvinHardwareError("return-home authorization revoked")
             sample = trajectory.sample(self._monotonic())
             self.send_joint_targets(
                 sample.joints[:7], sample.joints[7:]
             )
             self._sleep(period)
             feedback = self.read_feedback()
+            if return_authority is not None and not return_authority():
+                self.soft_stop_once()
+                raise MarvinHardwareError("return-home authorization revoked")
             feedback_now = self._monotonic()
             for index, serial in enumerate(feedback.frame_serials):
                 if serial != last_frame_serials[index]:
@@ -546,6 +556,16 @@ class MarvinHardwareSession:
                     feedback.right_joints_deg,
                 ]
             )
+            if require_monotonic_home_progress:
+                home_error_by_joint = np.abs(home - measured)
+                if np.any(home_error_by_joint > best_home_error + 0.25):
+                    self.soft_stop_once()
+                    raise MarvinHardwareError(
+                        "return-home recovery moved away from Home"
+                    )
+                best_home_error = np.minimum(
+                    best_home_error, home_error_by_joint
+                )
             tracking_error = float(
                 np.max(np.abs(sample.joints - measured), initial=0.0)
             )
@@ -555,7 +575,22 @@ class MarvinHardwareSession:
                     "return-home tracking error exceeded safety limit"
                 )
             if sample.complete:
-                break
+                home_error = float(
+                    np.max(np.abs(home - measured), initial=0.0)
+                )
+                if home_error <= home_tolerance_deg:
+                    break
+                # Native impedance feedback can lag the final command by a
+                # few frames. Keep sending the exact Home target briefly so
+                # the bounded return validates measured convergence, not just
+                # the last command sample.
+                if settle_deadline is None:
+                    settle_deadline = feedback_now + feedback_timeout_s
+                elif feedback_now >= settle_deadline:
+                    self.soft_stop_once()
+                    raise MarvinHardwareError(
+                        "robot did not reach safe home tolerance"
+                    )
 
         home_error = float(
             np.max(np.abs(home - measured), initial=0.0)
