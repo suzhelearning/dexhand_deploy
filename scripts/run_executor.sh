@@ -142,11 +142,21 @@ value = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
 print(value.get("rate_hz", 100))
 PY
     )"
+    linear_interpolation="$(
+      pixi run python - "${config}" <<'PY'
+import sys
+import yaml
+value = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+print("true" if value.get("linear_interpolation") is True else "false")
+PY
+    )"
     args=(--mode "${mode}" --side "${side}" --rate "${rate}")
     if [[ "${required_capability}" == real && "${side}" == right ]]; then
       wuji_serial="${TIANJI_WUJI_SERIAL:-$(device_config_value wuji_hand2 right serial)}"
       args+=(--serial "${wuji_serial}")
     fi
+    native_args=("${args[@]}")
+    [[ "${linear_interpolation}" == true ]] && native_args+=(--linear-interpolation)
     native=""
     for candidate in \
       "${BUNDLE_ROOT}/staging/ik/lib/tianji_teleop/wuji_hand2_bridge" \
@@ -156,7 +166,7 @@ PY
     done
     if [[ "${required_capability}" == simulation ]]; then
       if [[ -n "${native}" ]]; then
-        exec "${native}" "${args[@]}" --dry-run "$@"
+        exec "${native}" "${native_args[@]}" --dry-run "$@"
       fi
       exec python "${entry}" "${args[@]}" --dry-run "$@"
     fi
@@ -164,6 +174,6 @@ PY
       printf '%s\n' '错误：real Wuji executor requires the native wuji_hand2_bridge with SDK support; refusing Python no-op fallback.' >&2
       exit 1
     fi
-    exec "${native}" "${args[@]}" "$@"
+    exec "${native}" "${native_args[@]}" "$@"
     ;;
 esac

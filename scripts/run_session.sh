@@ -39,7 +39,7 @@ while (($#)); do
       printf '%s\n' \
         '用法: run_session.sh --profile PROFILE [--record PATH] [--confirm-real] [--h5 PATH] [--speed RATE] [--viewer|--headless]' \
         '显示模式：h5_sim 默认打开 MuJoCo viewer；追加 --headless 可显式启用无窗口模式。' \
-        '其他 profile 保持 executor config 默认；--viewer 只允许 simulation + MuJoCo executor。'
+        'regrind_real 可用 --viewer 打开只读 frame0 对齐窗口；其他 profile 保持 executor config 默认。'
       exit 0 ;;
     --) shift; extra_args+=("$@"); break ;;
     *)
@@ -52,7 +52,7 @@ if [[ -z "${profile}" ]]; then
   exit 2
 fi
 case "${profile}" in
-  mocap_live_sim|mocap_live_real|h5_sim|h5_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim) ;;
+  mocap_live_sim|mocap_live_real|h5_sim|h5_real|regrind_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim) ;;
   *) printf '错误：未知 session profile: %s\n' "${profile}" >&2; exit 2 ;;
 esac
 if [[ "${profile}" == target_replay_sim || "${profile}" == joint_replay_sim || "${profile}" == wuji_direct_real ]]; then
@@ -63,6 +63,10 @@ if [[ "${profile}" == target_replay_sim || "${profile}" == joint_replay_sim || "
 fi
 if [[ "${profile}" == diagnostic_mocap_calibration_sim && -n "${record_path}" ]]; then
   printf '%s\n' 'diagnostic profile cannot be recorded: no session raw schema' >&2
+  exit 2
+fi
+if [[ "${profile}" == regrind_real && -n "${record_path}" ]]; then
+  printf '%s\n' 'regrind_real recording is not implemented yet' >&2
   exit 2
 fi
 profile_config="$(canonical_config "sessions/${profile}.yaml")"
@@ -89,11 +93,18 @@ arm_executor_config="$(profile_value arm_executor_config)"
 coordinator_config="$(profile_value coordinator_config)"
 required_capability="$(profile_value required_capability)"
 active_sides="$(profile_value active_sides)"
+arm_command_path="$(profile_value arm_command_path)"
 inactive_sides="$(profile_value inactive_sides)"
 hand_mode="$(profile_value hand_mode)"
 active_hand_sides="$(profile_value active_hand_sides)"
 hand_executor="$(profile_value hand_executor)"
+hand_executor_config="$(profile_value hand_executor_config)"
 hand_overlay="$(profile_value hand_overlay)"
+[[ -n "${arm_command_path}" ]] || arm_command_path=coordinator
+if [[ "${arm_command_path}" != coordinator && "${arm_command_path}" != direct ]]; then
+  printf '错误：非法 arm_command_path: %s\n' "${arm_command_path}" >&2
+  exit 2
+fi
 if [[ "${TIANJI_VALIDATION_PRODUCER:-}" == policy_hold && "${TIANJI_VALIDATION_CASE_ID:-}" == policy_hold_sim ]]; then
   arm_producer_config="producers/policy_hold.yaml"
 fi
@@ -105,6 +116,7 @@ fi
 if [[ -n "${forced_hand_mode}" ]]; then hand_mode="${forced_hand_mode}"; fi
 [[ -n "${active_hand_sides}" ]] || active_hand_sides="${active_sides}"
 [[ -n "${hand_executor}" ]] || hand_executor=none
+[[ -n "${hand_executor_config}" ]] || hand_executor_config=executors/wuji_hand2.yaml
 [[ -n "${hand_overlay}" ]] || hand_overlay=none
 [[ -n "${source_config}" && -n "${arm_executor_config}" && -n "${coordinator_config}" ]] || {
   printf '%s\n' '错误：session profile 缺少 source/executor/coordinator config。' >&2
@@ -117,16 +129,19 @@ if [[ -z "${display_mode}" ]]; then
     display_mode=config
   fi
 fi
-if [[ "${display_mode}" != config && "${arm_executor_config}" != executors/mujoco.yaml ]]; then
+regrind_alignment_viewer=false
+if [[ "${profile}" == regrind_real && "${display_mode}" == viewer ]]; then
+  regrind_alignment_viewer=true
+elif [[ "${display_mode}" != config && "${arm_executor_config}" != executors/mujoco.yaml ]]; then
   printf '%s\n' '错误：--viewer/--headless 仅适用于 MuJoCo executor。' >&2
   exit 2
 fi
-if [[ "${display_mode}" == viewer && "${required_capability}" != simulation ]]; then
+if [[ "${display_mode}" == viewer && "${required_capability}" != simulation && "${regrind_alignment_viewer}" != true ]]; then
   printf '%s\n' '错误：--viewer 只允许 simulation + MuJoCo executor。' >&2
   exit 2
 fi
 arm_display_args=()
-if [[ "${display_mode}" == viewer ]]; then
+if [[ "${display_mode}" == viewer && "${regrind_alignment_viewer}" != true ]]; then
   arm_display_args+=(--viewer)
 elif [[ "${display_mode}" == headless ]]; then
   arm_display_args+=(--headless)
@@ -143,6 +158,24 @@ if [[ "${required_capability}" == real && "${confirm_real}" != true ]]; then
   exit 2
 fi
 if [[ "${required_capability}" == real ]]; then
+  if [[ "${profile}" == regrind_real ]]; then
+    if [[ -n "${playback_speed}" ]]; then
+      if ! pixi run python - "${playback_speed}" <<'PY'
+import math
+import sys
+try:
+    speed = float(sys.argv[1])
+except (TypeError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if math.isfinite(speed) and speed == 1.0 else 1)
+PY
+      then
+        printf '%s\n' '错误：regrind_real 的策略 capability 要求 --speed 1.0；物理动态限制由 profile config 控制。' >&2
+        exit 2
+      fi
+    fi
+    playback_speed=1.0
+  fi
   export TIANJI_REAL_SPEED="${playback_speed:-${TIANJI_REAL_SPEED:-0.25}}"
   export TIANJI_REAL_YAW_DEG="${TIANJI_REAL_YAW_DEG:-0}"
   if [[ -z "${TIANJI_REAL_PREFLIGHT_FD:-}" &&
@@ -169,7 +202,7 @@ if [[ -n "${record_path}" ]]; then
 fi
 source_name="$(basename -- "${source_config}" .yaml)"
 case "${source_name}" in
-  mocap_live|h5_replay|target|joint|joint_real) ;;
+  mocap_live|h5_replay|regrind_policy|target|joint|joint_real) ;;
   mocap_calibration) ;;
   *) printf '错误：source config 不在 canonical source/replay/diagnostic 树: %s\n' "${source_config}" >&2; exit 2 ;;
 esac
@@ -228,6 +261,12 @@ if [[ "${source_id}" == joint_replay ]]; then
 elif [[ -n "${arm_producer_config}" && "${arm_producer_config}" != null ]]; then
   arm_producer_instance="${TIANJI_ARM_PRODUCER_INSTANCE_ID:-$(new_instance_id)}"
 fi
+if [[ "${arm_command_path}" == direct ]]; then
+  [[ "${arm_producer_id}" == arm_ik_producer && -n "${arm_producer_instance}" ]] || {
+    printf '%s\n' '错误：direct arm path 仅允许绑定已配置的 IK producer。' >&2
+    exit 2
+  }
+fi
 arm_executor_instance="${TIANJI_ARM_EXECUTOR_INSTANCE_ID:-$(new_instance_id)}"
 if [[ "${source_id}" == target_replay || "${source_id}" == joint_replay ]]; then
   [[ -n "${input_path}" && -f "${input_path}" ]] || {
@@ -266,6 +305,9 @@ if [[ -n "${active_hand_sides}" ]]; then
     hand_executor_instance_array+=("${mapped_hand_executor:-$(new_instance_id)}")
     if [[ "${source_id}" == h5_replay && "${hand_mode}" == direct ]]; then
       hand_producer_id_array+=("h5_direct")
+      hand_producer_instance_array+=("${source_instance}")
+    elif [[ "${source_id}" == regrind_policy && "${hand_mode}" == direct ]]; then
+      hand_producer_id_array+=("regrind_policy")
       hand_producer_instance_array+=("${source_instance}")
     elif [[ "${source_id}" == joint_replay ]]; then
       hand_producer_id_array+=("joint_replay")
@@ -321,7 +363,7 @@ import json
 import sys
 
 source, source_instance, arm_producer, arm_producer_instance, arm_executor_config, arm_executor_instance, coordinator, router, rows = sys.argv[1:]
-arm_executor_logical_id = "marvin" if arm_executor_config == "marvin.yaml" else "mujoco"
+arm_executor_logical_id = "mujoco" if arm_executor_config == "mujoco.yaml" else "marvin"
 disabled = {"logical_id": "disabled", "publisher_instance_id": "disabled", "router_zid": router, "enabled": False}
 hand_producers = {"left": dict(disabled), "right": dict(disabled)}
 hand_executors = {"left": dict(disabled), "right": dict(disabled)}
@@ -402,6 +444,13 @@ trap run_session_stop_on_signal INT TERM
 launch() {
   local label="$1"; shift
   local log_path="${TELEOP_RUNTIME_DIR}/${run_id}-${label}.log"
+  local term_timeout_s=5
+  if [[ "${label}" == arm_executor &&
+        "${required_capability}" == real &&
+        "${arm_executor_config}" == executors/marvin_impedance.yaml ]]; then
+    # Allow the real arm's bounded home trajectory to finish before release.
+    term_timeout_s=60
+  fi
   local source_tty_fd=""
   if [[ "${label}" == source && -t 0 ]] &&
      { exec {source_tty_fd}<>/dev/tty; } 2>/dev/null; then
@@ -419,7 +468,7 @@ launch() {
     setsid env "$@" </dev/null >"${log_path}" 2>&1 &
     local pid=$!
   fi
-  if ! register_teleop_process_group "${pid}" "${label}" 5; then
+  if ! register_teleop_process_group "${pid}" "${label}" "${term_timeout_s}"; then
     kill -TERM -- "-${pid}" 2>/dev/null || true
     wait "${pid}" 2>/dev/null || true
     return 1
@@ -434,9 +483,6 @@ launch() {
   child_pids+=("${pid}")
   child_labels+=("${label}")
 }
-declare -a child_pids=()
-declare -a child_labels=()
-session_shutdown_requested=false
 recorder_instance=""
 [[ -n "${record_path}" ]] && recorder_instance="${TIANJI_RECORDER_INSTANCE_ID:-$(new_instance_id)}"
 base_env=(
@@ -455,6 +501,8 @@ base_env=(
   "TIANJI_HAND_INPUT_INSTANCE_ID=${hand_input_instance}"
   "TIANJI_SOURCE_LOGICAL_ID=${source_id}"
   "TIANJI_SOURCE_INSTANCE_ID=${source_instance}"
+  "TIANJI_ARM_COMMAND_PATH=${arm_command_path}"
+  "TIANJI_ARM_PRODUCER_LOGICAL_ID=${arm_producer_id}"
   "TIANJI_ARM_PRODUCER_INSTANCE_ID=${arm_producer_instance}"
   "TIANJI_AUTHORITIES=${TIANJI_AUTHORITIES}"
   "TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID=${TIANJI_VALIDATION_SUPERVISOR_INSTANCE_ID:-}"
@@ -476,6 +524,14 @@ if [[ -n "${record_path}" ]]; then
   launch recorder "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${recorder_instance}" TIANJI_RECORD_PATH="${record_path}" TIANJI_RECORD_SOURCE_TYPE="${source_id}" TIANJI_RECORDING_CONFIG="$(canonical_config recording/session.yaml)" python -m tianji_teleop.recording.session_recorder
 fi
 launch coordinator "${base_env[@]}" TIANJI_COORDINATOR_INSTANCE_ID="${coordinator_id}" TIANJI_COORDINATOR_CONFIG="$(canonical_config "${coordinator_config}")" python "${BUNDLE_ROOT}/src/tianji_teleop/scripts/arm_command_coordinator"
+if [[ "${regrind_alignment_viewer}" == true ]]; then
+  viewer_entry="${BUNDLE_ROOT}/scripts/regrind_live_infer.py"
+  [[ -f "${viewer_entry}" ]] || {
+    printf '错误：regrind_real viewer 入口不存在：%s\n' "${viewer_entry}" >&2
+    exit 1
+  }
+  launch regrind_alignment_viewer "${base_env[@]}" python "${viewer_entry}" "${extra_args[@]}" --viewer
+fi
 if [[ "${profile}" == h5_real && "${hand_overlay}" == mujoco ]]; then
   overlay_entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/h5_wrist_diagnostic"
   [[ -x "${overlay_entry}" ]] || {
@@ -521,20 +577,20 @@ launch_hand_executor() {
       TIANJI_HAND_PRODUCER_INSTANCE_ID="${hand_producer_instance_array[hand_index]}" \
       TIANJI_HAND_INPUT_INSTANCE_ID="${hand_input_instance}" \
       bash "${SCRIPT_DIR}/run_executor.sh" --executor wuji_hand2 --mode "${hand_mode}" \
-      --side "${hand_side_array[hand_index]}" --config "$(canonical_config executors/wuji_hand2.yaml)"
+      --side "${hand_side_array[hand_index]}" --config "$(canonical_config "${hand_executor_config}")"
   done
 }
 launch_arm_producer() {
   [[ -n "${arm_producer_config}" && "${arm_producer_config}" != null ]] || return 0
   producer_name="$(basename -- "${arm_producer_config}" .yaml)"
-  [[ "${producer_name}" == ik ]] && producer_name=ik
+  [[ "${producer_name}" == ik_regrind ]] && producer_name=ik
   launch arm_producer "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_producer_instance}" bash "${SCRIPT_DIR}/run_producer.sh" --producer "${producer_name}" --config "$(canonical_config "${arm_producer_config}")"
 }
 if [[ "${required_capability}" == real ]]; then
   launch_arm_producer
   launch source "${source_args[@]}"
-  launch_arm_executor
   launch_hand_executor
+  launch_arm_executor
 else
   launch_arm_executor
   launch_hand_executor

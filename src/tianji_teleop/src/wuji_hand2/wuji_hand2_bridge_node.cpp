@@ -6,7 +6,9 @@
  * SessionState or an arm/final command authority.
  */
 #include "tianji_teleop/protocol/json_parser.hpp"
+#include "tianji_teleop/wuji_hand2/direct_target_interpolator.hpp"
 #include "tianji_teleop/wuji_hand2/wuji_hand2_control.hpp"
+#include "tianji_teleop/wuji_hand2/wuji_execution_limits.hpp"
 
 #include <zenoh.hxx>
 
@@ -233,6 +235,7 @@ public:
     std::string coordinator_instance;
     std::string config_path;
     bool dry_run{false};
+    bool linear_interpolation{false};
     int rate_hz{100};
     float command_slew_rate_rad_s{1.0F};
     float tracking_slew_rate_rad_s{6.0F};
@@ -271,6 +274,7 @@ private:
   std::unique_ptr<zenoh::Subscriber<void>> safety_sub_;
   std::mutex mutex_;
   std::array<float, kKeypointCount * 3> keypoints_{};
+  DirectTargetInterpolator<kJointCount> direct_interpolator_;
   std::array<float, kJointCount> direct_command_{};
   bool have_target_{false};
   bool have_direct_{false};
@@ -331,6 +335,7 @@ void WujiHand2Bridge::on_command(const zenoh::Sample &sample) {
       throw std::invalid_argument("hand command requires fresh teleop state");
     }
     if (sequence <= last_input_sequence_) throw std::invalid_argument("hand command sequence rollback");
+    if (params_.linear_interpolation) direct_interpolator_.accept(command, received);
     direct_command_ = command;
     input_received_ns_ = received;
     input_sequence_ = sequence;
@@ -340,6 +345,7 @@ void WujiHand2Bridge::on_command(const zenoh::Sample &sample) {
   } catch (const std::exception &error) {
     std::lock_guard<std::mutex> guard(mutex_);
     last_error_ = std::string("command rejected: ") + error.what();
+    direct_interpolator_.reset();
     have_direct_ = false;
     tracking_allowed_ = false;
   }
@@ -368,6 +374,12 @@ void WujiHand2Bridge::on_session_state(const zenoh::Sample &sample) {
     last_session_sequence_ = sequence;
     session_state_ = state;
     session_state_received_ns_ = received;
+    if (state != "teleop" && params_.mode == "direct") {
+      direct_interpolator_.reset();
+      have_direct_ = false;
+      input_received_ns_ = 0;
+      tracking_allowed_ = false;
+    }
     if (state == "returning" || state == "fault") {
       have_target_ = false;
       have_direct_ = false;
@@ -395,6 +407,7 @@ void WujiHand2Bridge::on_safety_stop(const zenoh::Sample &sample) {
       if (sequence <= last_safety_sequence_) throw std::invalid_argument("safety stop sequence rollback");
       last_safety_sequence_ = sequence;
       safety_locked_ = true;
+      direct_interpolator_.reset();
       last_error_ = reason;
       if (active_device_ != nullptr) active_device_->close();
     }
@@ -579,18 +592,22 @@ int WujiHand2Bridge::run() {
         (params_.mode == "retarget" ? have_target_ : have_direct_);
       if (state == "teleop" && !state_fresh) {
         have_target_ = false;
+        if (params_.mode == "direct") direct_interpolator_.reset();
         have_direct_ = false;
         tracking = false;
         last_error_ = "coordinator teleop state expired";
       } else if (state == "teleop" && input_received_ns_ > 0 && !input_fresh) {
         have_target_ = false;
+        if (params_.mode == "direct") direct_interpolator_.reset();
         have_direct_ = false;
         tracking = false;
         last_error_ = "hand input expired";
       }
       tracking_allowed_ = tracking;
       desired.fill(0.0F);
-      if (params_.mode == "direct" && tracking && have_direct_) desired = direct_command_;
+      if (params_.mode == "direct" && tracking && have_direct_) {
+        desired = params_.linear_interpolation ? direct_interpolator_.sample(current) : direct_command_;
+      }
     }
     if (tracking && params_.mode == "retarget") {
       std::string error;
@@ -603,9 +620,7 @@ int WujiHand2Bridge::run() {
       }
     }
     for (std::size_t index = 0; index < kJointCount; ++index) {
-      if (!std::isfinite(desired[index]) ||
-          desired[index] < lower_limits[index] ||
-          desired[index] > upper_limits[index]) {
+      if (!within_wuji_execution_limits(desired[index], lower_limits[index], upper_limits[index])) {
         std::lock_guard<std::mutex> guard(mutex_);
         desired.fill(0.0F);
         safety_locked_ = true;
@@ -722,6 +737,7 @@ int main(int argc, char **argv) {
       const auto value = [&]() -> std::string { if (++index >= argc) throw std::invalid_argument(arg + " needs a value"); return argv[index]; };
       if (arg == "--side") params.side = value();
       else if (arg == "--mode") params.mode = value();
+      else if (arg == "--linear-interpolation") params.linear_interpolation = true;
       else if (arg == "--dry-run") params.dry_run = true;
       else if (arg == "--serial") params.serial = value();
       else if (arg == "--address") params.address = value();

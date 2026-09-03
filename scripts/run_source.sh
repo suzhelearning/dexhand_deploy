@@ -12,7 +12,7 @@ while (($#)); do
     --source|--profile) source_id="${2:-}"; shift 2 ;;
     --config) config_override="${2:-}"; shift 2 ;;
     --help|-h)
-      printf '%s\n' '用法: run_source.sh --source {mocap_live|h5_replay} [--config PATH] [参数...]'
+      printf '%s\n' '用法: run_source.sh --source {mocap_live|h5_replay|regrind_policy} [--config PATH] [参数...]'
       exit 0 ;;
     --) shift; break ;;
     *) break ;;
@@ -25,6 +25,7 @@ fi
 case "${source_id}" in
   mocap_live) entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/mocap_live"; default_config="sources/mocap_live.yaml" ;;
   h5_replay) entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/mocap_h5_replay"; default_config="sources/h5_replay.yaml" ;;
+  regrind_policy) entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/regrind_policy"; default_config="sources/regrind_policy.yaml" ;;
   target_replay|joint_replay)
     entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/${source_id}"
     default_config="replay/${source_id%_replay}.yaml" ;;

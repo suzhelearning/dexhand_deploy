@@ -34,6 +34,7 @@ if(NOT EXISTS "${WUJI_SDK_ROOT}/lib/libwuji_sdk_c.so")
 endif()
 
 find_package(Eigen3 REQUIRED)
+find_package(Threads REQUIRED)
 
 # 与 TJ_arm_control 保持同一版本；静态链接，部署时无需额外共享库。
 include(FetchContent)
@@ -96,6 +97,28 @@ target_link_libraries(
   arm_ik PUBLIC Eigen3::Eigen pinocchio::pinocchio ruckig::ruckig ${CMAKE_DL_LIBS}
 )
 
+# Marvin SDK I/O stays in one dedicated 200 Hz native loop.  The Python
+# executor remains the protocol/safety boundary and calls this small C ABI.
+add_library(marvin_native_driver SHARED src/marvin/native_driver.cpp)
+target_compile_features(marvin_native_driver PUBLIC cxx_std_17)
+target_compile_options(marvin_native_driver PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(
+  marvin_native_driver PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(marvin_native_driver PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+
+add_library(marvin_native_fake_sdk SHARED src/marvin/native_driver_fake_sdk.cpp)
+target_compile_features(marvin_native_fake_sdk PUBLIC cxx_std_17)
+target_compile_options(marvin_native_fake_sdk PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(marvin_native_driver_probe src/marvin/native_driver_probe.cpp)
+target_compile_features(marvin_native_driver_probe PUBLIC cxx_std_17)
+target_compile_options(marvin_native_driver_probe PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(marvin_native_driver_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(marvin_native_driver_probe PRIVATE marvin_native_driver Threads::Threads)
+
 # 厂商 libKine 与 Pinocchio 的依赖闭包不能安全共存。native 库只链接
 # Eigen/dl，供独立 worker 和 probe 使用；主节点内使用 IPC proxy。
 add_library(
@@ -145,11 +168,21 @@ add_executable(
   joint_trajectory_limiter_probe
   src/control/joint_trajectory_limiter_probe.cpp
 )
+add_executable(
+  wuji_hand2_interpolation_probe
+  src/wuji_hand2/wuji_hand2_interpolation_probe.cpp
+)
+add_executable(
+  wuji_hand2_control_probe
+  src/wuji_hand2/wuji_hand2_control_probe.cpp
+)
 target_compile_features(arm_ik_producer PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_probe PUBLIC cxx_std_17)
 target_compile_features(tianji_official_ik_worker PUBLIC cxx_std_17)
 target_compile_features(pinocchio_qp_ik_probe PUBLIC cxx_std_17)
 target_compile_features(joint_trajectory_limiter_probe PUBLIC cxx_std_17)
+target_compile_features(wuji_hand2_interpolation_probe PUBLIC cxx_std_17)
+target_compile_features(wuji_hand2_control_probe PUBLIC cxx_std_17)
 target_compile_options(
   arm_ik_producer PRIVATE -Wall -Wextra -Wpedantic
 )
@@ -165,6 +198,21 @@ target_compile_options(
 target_compile_options(
   joint_trajectory_limiter_probe PRIVATE -Wall -Wextra -Wpedantic
 )
+target_compile_options(
+  wuji_hand2_interpolation_probe PRIVATE -Wall -Wextra -Wpedantic
+)
+target_compile_options(
+  wuji_hand2_control_probe PRIVATE -Wall -Wextra -Wpedantic
+)
+target_include_directories(
+  wuji_hand2_interpolation_probe PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_include_directories(
+  wuji_hand2_control_probe PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${WUJI_SDK_ROOT}/include"
+)
 target_include_directories(
   arm_ik_producer PRIVATE
     "${ZENOH_CPP_ROOT}/include"
@@ -176,6 +224,12 @@ target_link_libraries(tianji_official_ik_probe tianji_official_native)
 target_link_libraries(tianji_official_ik_worker tianji_official_native)
 target_link_libraries(pinocchio_qp_ik_probe arm_ik)
 target_link_libraries(joint_trajectory_limiter_probe arm_ik)
+target_link_libraries(
+  wuji_hand2_control_probe PRIVATE
+  "${WUJI_SDK_ROOT}/lib/libwuji_sdk_c.so"
+  ${CMAKE_DL_LIBS}
+  Threads::Threads
+)
 # 便携 runtime 层为 glibc 2.35：把 glibc 2.38 的 __isoc23_strtol
 # 引用改接到 shim（见 glibc_isoc23_strtol_shim.cpp）。
 target_sources(arm_ik_producer PRIVATE src/tianji_official/glibc_isoc23_strtol_shim.cpp)
@@ -237,6 +291,7 @@ target_link_options(
 install(
   TARGETS
     arm_ik
+    marvin_native_driver
     tianji_official_native
     arm_ik_producer
     tianji_official_ik_probe
@@ -249,11 +304,17 @@ install(
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
+install(
+  TARGETS marvin_native_fake_sdk marvin_native_driver_probe
+  LIBRARY DESTINATION lib/${PROJECT_NAME}/test
+  RUNTIME DESTINATION lib/${PROJECT_NAME}/test
+)
 install(DIRECTORY include/ DESTINATION include)
 install(
   PROGRAMS
     scripts/mocap_live
     scripts/mocap_h5_replay
+    scripts/regrind_policy
     scripts/mocap_calibration
     scripts/target_replay
     scripts/joint_replay

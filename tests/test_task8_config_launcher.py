@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -30,12 +31,17 @@ class Task8ConfigTreeTest(unittest.TestCase):
             "robot/devices.yaml",
             "sources/mocap_live.yaml",
             "sources/h5_replay.yaml",
+            "sources/regrind_policy.yaml",
             "producers/ik.yaml",
+            "producers/ik_regrind.yaml",
             "producers/policy_hold.yaml",
             "coordinator/arm.yaml",
+            "coordinator/arm_regrind.yaml",
             "executors/mujoco.yaml",
             "executors/marvin.yaml",
+            "executors/marvin_impedance.yaml",
             "executors/wuji_hand2.yaml",
+            "executors/wuji_hand2_regrind.yaml",
             "recording/session.yaml",
             "replay/target.yaml",
             "replay/joint.yaml",
@@ -44,11 +50,49 @@ class Task8ConfigTreeTest(unittest.TestCase):
             "sessions/mocap_live_real.yaml",
             "sessions/h5_sim.yaml",
             "sessions/h5_real.yaml",
+            "sessions/regrind_real.yaml",
             "sessions/target_replay_sim.yaml",
             "sessions/joint_replay_sim.yaml",
             "sessions/diagnostic_mocap_calibration_sim.yaml",
         )
         self.assertTrue(all((CONFIG / path).is_file() for path in required))
+
+    def test_regrind_coordinator_profile_is_isolated_from_shared_safety_step(self) -> None:
+        shared = yaml.safe_load((CONFIG / "coordinator/arm.yaml").read_text())
+        self.assertEqual(float(shared["maximum_command_step_rad"]), 0.00596902599)
+        regrind = yaml.safe_load((CONFIG / "coordinator/arm_regrind.yaml").read_text())
+        self.assertEqual(float(regrind["maximum_command_step_rad"]), 1000.0)
+        profile = yaml.safe_load((CONFIG / "sessions/regrind_real.yaml").read_text())
+        self.assertEqual(profile["coordinator_config"], "coordinator/arm_regrind.yaml")
+
+    def test_regrind_ik_profile_is_isolated_from_shared_h5_and_mocap_settings(self) -> None:
+        shared = yaml.safe_load((CONFIG / "producers/ik.yaml").read_text())
+        regrind = yaml.safe_load((CONFIG / "producers/ik_regrind.yaml").read_text())
+        self.assertEqual(float(shared["maximum_joint_step_rad"]), 0.00596902599)
+        self.assertEqual(float(shared["qp_position_time_constant_s"]), 0.30)
+        self.assertEqual(float(shared["qp_orientation_time_constant_s"]), 0.40)
+        self.assertEqual(float(regrind["maximum_joint_step_rad"]), 1000.0)
+        self.assertEqual(float(regrind["qp_position_time_constant_s"]), 0.02)
+        self.assertEqual(float(regrind["qp_orientation_time_constant_s"]), 0.03)
+        regrind_profile = yaml.safe_load((CONFIG / "sessions/regrind_real.yaml").read_text())
+        self.assertEqual(regrind_profile["arm_producer_config"], "producers/ik_regrind.yaml")
+        for profile in ("h5_sim", "h5_real", "mocap_live_sim", "mocap_live_real"):
+            value = yaml.safe_load((CONFIG / "sessions" / f"{profile}.yaml").read_text())
+            self.assertEqual(value["arm_producer_config"], "producers/ik.yaml")
+
+    def test_hand_executor_profiles_keep_shared_rate_and_enable_regrind_interpolation(self) -> None:
+        shared = yaml.safe_load((CONFIG / "executors/wuji_hand2.yaml").read_text())
+        regrind = yaml.safe_load((CONFIG / "executors/wuji_hand2_regrind.yaml").read_text())
+        self.assertEqual(float(shared["rate_hz"]), 60.0)
+        self.assertFalse(shared["linear_interpolation"])
+        self.assertEqual(float(regrind["rate_hz"]), 100.0)
+        self.assertTrue(regrind["linear_interpolation"])
+        regrind_profile = yaml.safe_load((CONFIG / "sessions/regrind_real.yaml").read_text())
+        self.assertEqual(regrind_profile["hand_executor_config"], "executors/wuji_hand2_regrind.yaml")
+        for profile in ("mocap_live_sim", "mocap_live_real", "h5_sim", "h5_real", "wuji_direct_real"):
+            value = yaml.safe_load((CONFIG / "sessions" / f"{profile}.yaml").read_text())
+            self.assertEqual(value.get("hand_executor_config", "executors/wuji_hand2.yaml"), "executors/wuji_hand2.yaml")
+
 
     def test_session_config_cannot_copy_router_or_ik_authority(self) -> None:
         session = yaml.safe_load((CONFIG / "sessions/mocap_live_sim.yaml").read_text())
@@ -59,7 +103,9 @@ class Task8ConfigTreeTest(unittest.TestCase):
 
     def test_real_device_defaults_are_canonical_and_used(self) -> None:
         devices = yaml.safe_load((CONFIG / "robot/devices.yaml").read_text())
+        marvin = yaml.safe_load((CONFIG / "executors/marvin.yaml").read_text())
         self.assertEqual(devices["marvin"]["ip"], "192.168.1.190")
+        self.assertGreaterEqual(float(marvin["connection_wait_s"]), 5.0)
         self.assertEqual(devices["wuji_hand2"]["right"]["ip"], "192.168.1.111")
         self.assertEqual(
             devices["wuji_hand2"]["right"]["serial"], "WH2KA01260814006"
@@ -79,7 +125,7 @@ class Task8ConfigTreeTest(unittest.TestCase):
                 bad.unlink()
 
     def test_hand_enabled_profiles_select_one_hand_executor_authority(self) -> None:
-        for profile in ("h5_sim", "h5_real", "target_replay_sim", "joint_replay_sim"):
+        for profile in ("h5_sim", "h5_real", "regrind_real", "target_replay_sim", "joint_replay_sim"):
             with self.subTest(profile=profile):
                 value = yaml.safe_load((CONFIG / "sessions" / f"{profile}.yaml").read_text())
                 self.assertEqual(value["hand_executor"], "wuji_hand2")
@@ -92,6 +138,57 @@ class Task8ConfigTreeTest(unittest.TestCase):
         self.assertIn("TIANJI_RECORDING_CONFIG=", launcher)
         self.assertIn('hand_args+=(--hand-sides "${active_hand_sides}" --hand-overlay)', launcher)
         self.assertIn('hand_executor}" == wuji_hand2', launcher)
+        self.assertIn('hand_executor_config="$(profile_value hand_executor_config)"', launcher)
+        self.assertIn('hand_executor_config=executors/wuji_hand2.yaml', launcher)
+        executor_launcher = (SCRIPTS / "run_executor.sh").read_text(encoding="utf-8")
+        self.assertIn('value.get("linear_interpolation") is True', executor_launcher)
+        self.assertIn('native_args+=(--linear-interpolation)', executor_launcher)
+        bridge = (ROOT / "src/tianji_teleop/src/wuji_hand2/wuji_hand2_bridge_node.cpp").read_text(encoding="utf-8")
+        self.assertIn("bool linear_interpolation{false};", bridge)
+        self.assertIn("if (params_.linear_interpolation) direct_interpolator_.accept", bridge)
+        self.assertIn("params_.linear_interpolation ? direct_interpolator_.sample(current) : direct_command_", bridge)
+
+    def test_regrind_real_uses_direct_wuji_and_existing_arm_ik(self) -> None:
+        profile = yaml.safe_load((CONFIG / "sessions/regrind_real.yaml").read_text())
+        self.assertEqual(profile["required_capability"], "real")
+        self.assertEqual(profile["arm_producer_config"], "producers/ik_regrind.yaml")
+        self.assertEqual(profile["arm_executor_config"], "executors/marvin_impedance.yaml")
+        self.assertEqual(profile["hand_mode"], "direct")
+        self.assertEqual(profile["hand_executor"], "wuji_hand2")
+        launcher = (SCRIPTS / "run_session.sh").read_text(encoding="utf-8")
+        self.assertIn('hand_producer_id_array+=("regrind_policy")', launcher)
+        self.assertIn(
+            'launch regrind_alignment_viewer "${base_env[@]}" python "${viewer_entry}" "${extra_args[@]}" --viewer',
+            launcher,
+        )
+        self.assertIn('source_args+=("${extra_args[@]}")', launcher)
+        self.assertIn('TIANJI_ARM_COMMAND_PATH=${arm_command_path}', launcher)
+        self.assertIn('TIANJI_ARM_PRODUCER_LOGICAL_ID=${arm_producer_id}', launcher)
+        self.assertTrue(os.access(ROOT / "src/tianji_teleop/scripts/regrind_policy", os.X_OK))
+        self.assertIn("regrind_real 的策略 capability 要求 --speed 1.0", launcher)
+
+    def test_regrind_real_uses_direct_arm_path_and_bounded_target_conditioning(self) -> None:
+        profile = yaml.safe_load((CONFIG / "sessions/regrind_real.yaml").read_text())
+        self.assertEqual(profile["arm_command_path"], "direct")
+        source = yaml.safe_load((CONFIG / "sources/regrind_policy.yaml").read_text())
+        self.assertEqual(source["maximum_linear_speed_m_s"], 0.09)
+        self.assertEqual(source["maximum_angular_speed_rad_s"], 0.3875)
+        self.assertEqual(source["maximum_linear_acceleration_m_s2"], 0.875)
+        self.assertEqual(source["maximum_angular_acceleration_rad_s2"], 2.25)
+        self.assertEqual(source["hammer_start_position_tolerance_m"], 0.02)
+        self.assertEqual(source["hammer_start_orientation_tolerance_deg"], 10.0)
+        self.assertEqual(source["hand_maximum_step_rad"], 0.01)
+
+    def test_real_launcher_starts_hand_feedback_before_arm_executor(self) -> None:
+        launcher = (SCRIPTS / "run_session.sh").read_text(encoding="utf-8")
+        marker = 'if [[ "${required_capability}" == real ]]; then\n  launch_arm_producer\n  launch source'
+        start = launcher.index(marker)
+        real_launches = launcher[start:launcher.index("\nelse\n", start)]
+        self.assertLess(
+            real_launches.index("launch_hand_executor"),
+            real_launches.index("launch_arm_executor"),
+        )
+
     def test_deploy_and_doctor_match_only_deleted_entries(self) -> None:
         deploy = (SCRIPTS / "deploy_ik_runtime.sh").read_text(encoding="utf-8")
         doctor = (SCRIPTS / "doctor.sh").read_text(encoding="utf-8")
@@ -145,6 +242,150 @@ class Task8LauncherTest(unittest.TestCase):
         )
         self.assertEqual(rejected.returncode, 2)
         self.assertIn("speed must be in (0, 1]", rejected.stderr)
+
+    def test_regrind_real_accepts_equivalent_numeric_speed_one(self) -> None:
+        result = subprocess.run(
+            [
+                str(SCRIPTS / "run_session.sh"),
+                "--profile", "regrind_real", "--confirm-real", "--speed", "1e0",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "TIANJI_TELEOP_NODE_LIST_OVERRIDE": ""},
+        )
+        self.assertNotEqual(result.returncode, 2)
+        self.assertNotIn("regrind_real 的策略 capability 要求 --speed 1.0", result.stderr)
+
+        rejected = subprocess.run(
+            [
+                str(SCRIPTS / "run_session.sh"),
+                "--profile", "regrind_real", "--confirm-real", "--speed", "0.25",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "TIANJI_TELEOP_NODE_LIST_OVERRIDE": ""},
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("regrind_real 的策略 capability 要求 --speed 1.0", rejected.stderr)
+
+    def test_regrind_viewer_and_preflight_share_hammer_start_tolerance(self) -> None:
+        scope = runpy.run_path(
+            str(SCRIPTS / "regrind_live_infer.py"),
+            run_name="regrind_viewer_tolerance_check",
+        )
+        self.assertEqual(scope.get("_HAMMER_START_POSITION_TOLERANCE_M"), 0.02)
+        self.assertEqual(
+            scope.get("_HAMMER_START_ORIENTATION_TOLERANCE_DEG"), 10.0
+        )
+        aligned = scope["_hammer_pose_is_aligned"]
+        self.assertTrue(aligned(0.02, 10.0))
+        self.assertFalse(aligned(0.0200001, 10.0))
+        self.assertFalse(aligned(0.02, 10.0001))
+
+    def test_regrind_alignment_viewer_accepts_reference_speed(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "regrind_live_infer.py"),
+                "--reference-speed",
+                "0.5",
+                "--viewer",
+                "--help",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join(
+                    (str(ROOT / "src/tianji_teleop"), str(ROOT / "vendor/python"))
+                ),
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--reference-speed", result.stdout)
+
+    def test_regrind_alignment_viewer_rejects_invalid_reference_speed(self) -> None:
+        for value in ("0", "-0.1", "1.1", "nan", "inf", "-inf"):
+            with self.subTest(value=value):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPTS / "regrind_live_infer.py"),
+                        "--reference",
+                        __file__,
+                        "--model",
+                        __file__,
+                        "--viewer",
+                        f"--reference-speed={value}",
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    env={
+                        **os.environ,
+                        "PYTHONPATH": os.pathsep.join(
+                            (
+                                str(ROOT / "src/tianji_teleop"),
+                                str(ROOT / "vendor/python"),
+                            )
+                        ),
+                    },
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(
+                    "--reference-speed must be finite and in (0, 1]",
+                    result.stderr,
+                )
+
+
+    def test_home_wrapper_runs_previous_speed_dual_arm_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            capture = root / "pixi-args.txt"
+            pixi = bin_dir / "pixi"
+            pixi.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n",
+                encoding="utf-8",
+            )
+            pixi.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "CAPTURE": str(capture),
+            }
+            result = subprocess.run(
+                ["bash", str(ROOT / "home.sh")],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            arguments = (
+                capture.read_text(encoding="utf-8").splitlines()
+                if capture.exists()
+                else []
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            arguments,
+            [
+                "run",
+                "bash",
+                "scripts/return_home.sh",
+                "--confirm-real",
+                "--side",
+                "both",
+                "--recover-outside-limits",
+            ],
+        )
+
+
 
     def test_replay_record_is_rejected_before_router_access(self) -> None:
         result = subprocess.run(
@@ -238,8 +479,8 @@ class Task8LauncherTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("互斥", result.stderr)
 
-    def _run_h5_session_until_components_are_wired(
-        self, *display_args: str
+    def _run_session_until_components_are_wired(
+        self, profile: str, *display_args: str
     ) -> list[list[str]]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -302,17 +543,21 @@ class Task8LauncherTest(unittest.TestCase):
                     "TIANJI_TELEOP_NODE_LIST_OVERRIDE": "",
                     "TIANJI_TELEOP_RUNTIME_DIR": str(root / "runtime"),
                     "TIANJI_VALIDATION_HAND_MODE": "retarget",
+                    "TIANJI_REAL_PREFLIGHT_FD": "9",
                 }
             )
+            arguments = [
+                str(SCRIPTS / "run_session.sh"),
+                "--profile",
+                profile,
+            ]
+            if profile.startswith("h5_"):
+                arguments.extend(("--h5", str(h5_path)))
+            if profile.endswith("_real"):
+                arguments.append("--confirm-real")
+            arguments.extend(display_args)
             result = subprocess.run(
-                [
-                    str(SCRIPTS / "run_session.sh"),
-                    "--profile",
-                    "h5_sim",
-                    "--h5",
-                    str(h5_path),
-                    *display_args,
-                ],
+                arguments,
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
@@ -331,8 +576,8 @@ class Task8LauncherTest(unittest.TestCase):
         cases = (((), "--viewer"), (("--headless",), "--headless"))
         for display_args, expected in cases:
             with self.subTest(display_args=display_args):
-                launches = self._run_h5_session_until_components_are_wired(
-                    *display_args
+                launches = self._run_session_until_components_are_wired(
+                    "h5_sim", *display_args
                 )
                 arm_executor = next(
                     args
@@ -352,6 +597,38 @@ class Task8LauncherTest(unittest.TestCase):
                 )
                 self.assertNotIn("--viewer", source)
                 self.assertNotIn("--headless", source)
+
+    def test_regrind_direct_path_launches_dedicated_config_under_shared_ik_authority(
+        self,
+    ) -> None:
+        launches = self._run_session_until_components_are_wired("regrind_real")
+        arm_producer = next(
+            args
+            for args in launches
+            if any(arg.endswith("/run_producer.sh") for arg in args)
+        )
+        self.assertEqual(
+            arm_producer[arm_producer.index("--producer") + 1],
+            "ik",
+        )
+        self.assertTrue(
+            arm_producer[arm_producer.index("--config") + 1].endswith(
+                "/producers/ik_regrind.yaml"
+            )
+        )
+        self.assertIn(
+            "TIANJI_ARM_PRODUCER_LOGICAL_ID=arm_ik_producer",
+            arm_producer,
+        )
+        authorities = next(
+            arg.removeprefix("TIANJI_AUTHORITIES=")
+            for arg in arm_producer
+            if arg.startswith("TIANJI_AUTHORITIES=")
+        )
+        self.assertEqual(
+            __import__("json").loads(authorities)["producer_arm"]["logical_id"],
+            "arm_ik_producer",
+        )
 
 
 if __name__ == "__main__":

@@ -77,23 +77,27 @@ def _sim_from_motive_rotation(
     return result
 
 
-def _authority_instances(router_zid: str) -> tuple[str, str, str]:
+def _authority_instances(
+    router_zid: str,
+    *,
+    source_logical_id: str = "h5_replay",
+) -> tuple[str, str, str]:
     authorities = strict_loads(os.environ.get("TIANJI_AUTHORITIES", ""))
     source = authorities.get("source")
     arm = authorities.get("executor_arm")
     hands = authorities.get("executor_hand")
     hand = hands.get("right") if isinstance(hands, Mapping) else None
     if not all(isinstance(item, Mapping) for item in (source, arm, hand)):
-        raise ValueError("H5 mirror requires source/arm/right-hand authorities")
+        raise ValueError("real state mirror requires source/arm/right-hand authorities")
     if (
-        source.get("logical_id") != "h5_replay"
+        source.get("logical_id") != source_logical_id
         or source.get("router_zid") != router_zid
         or arm.get("logical_id") != "marvin"
         or hand.get("logical_id") != "wuji_right"
         or arm.get("router_zid") != router_zid
         or hand.get("router_zid") != router_zid
     ):
-        raise ValueError("H5 mirror authority mismatch")
+        raise ValueError("real state mirror authority mismatch")
     source_instance = str(source.get("publisher_instance_id", ""))
     arm_instance = str(arm.get("publisher_instance_id", ""))
     hand_instance = str(hand.get("publisher_instance_id", ""))

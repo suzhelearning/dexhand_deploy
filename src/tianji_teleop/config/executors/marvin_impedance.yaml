@@ -1,0 +1,34 @@
+hardware_driver: native_cpp
+control_mode: joint_impedance
+controlled_sides: [right]
+# A normal process exit homes only after fresh coordinator returning authority.
+return_home_on_exit: true
+robot_ip: ""
+connection_wait_s: 10.0
+rate_hz: 200.0
+velocity_ratio: 50
+acceleration_ratio: 50
+velocity_estimation_step_ms: 5
+# 厂商 SDK 关节阻抗参数；Kp/Kd 均按 7 个关节顺序填写。
+joint_stiffness: [10, 10, 10, 1.6, 1, 1, 1]
+joint_damping: [0.8, 0.8, 0.8, 0.4, 0.4, 0.4, 0.4]
+# 参考范围：k_max=[20,20,20,15,8,8,8]，k_min=[2,2,2,1.5,0.8,0.8,0.8]。
+# Wuji Hand：质量 kg；质心/惯量采用厂商 SDK 的 mm、kg·mm² 约定。
+tool_kinematics: [0, 0, 0, 0, 0, 0]
+tool_dynamics:
+  left: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  right: [0.95, 0, 0, 90, 0, 0, 0, 0, 0, 0]
+host_status_timeout_s: 1.0
+command_timeout_s: 0.15
+state_timeout_s: 1.0
+feedback_timeout_s: 0.15
+# Keep nominal joint smoothing in the IK producer's Ruckig limiter.
+# This output-step bypass does not disable the independent tracking guard.
+maximum_pair_skew_s: 0.03
+maximum_output_step_deg: 100000.0
+maximum_teleop_speed_deg_s: 100000.0
+maximum_tracking_error_deg: 8.0
+return_minimum_duration_s: 2.0
+return_max_speed_deg_s: 10.0
+home_tolerance_deg: 1.0
+feedback_hard_limit_padding_deg: 5.0

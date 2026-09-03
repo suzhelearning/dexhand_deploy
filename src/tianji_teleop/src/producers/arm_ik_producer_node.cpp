@@ -452,6 +452,9 @@ private:
     std::string status_error;
     bool healthy = true;
     bool degraded = false;
+    double velocity_ratio = 0.0;
+    double acceleration_ratio = 0.0;
+    double jerk_ratio = 0.0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       for (std::size_t index = 0; index < 2; ++index) {
@@ -519,8 +522,18 @@ private:
         const ArmJointVector target_velocity =
           (result.joints_rad - current_[index]) / settings_.control_period_s;
         const auto limited = trajectory_limiters_[index].update(target_velocity);
+        velocity_ratio = std::max(velocity_ratio, limited.velocity_ratio);
+        acceleration_ratio = std::max(acceleration_ratio, limited.acceleration_ratio);
+        jerk_ratio = std::max(jerk_ratio, limited.jerk_ratio);
         if (!limited.accepted) {
-          reject(std::string(limited.detail), limited.hard_failure);
+          std::ostringstream detail;
+          detail << limited.detail
+                 << " velocity_ratio=" << limited.velocity_ratio
+                 << " acceleration_ratio=" << limited.acceleration_ratio
+                 << " jerk_ratio=" << limited.jerk_ratio;
+          const bool recoverable_output =
+            limited.detail == "joint_trajectory_output_rejected";
+          reject(detail.str(), limited.hard_failure && !recoverable_output);
           continue;
         }
         const double step =
@@ -553,7 +566,9 @@ private:
         publish_proposal(index, target, result, limited.state.position, achieved, false);
       }
     }
-    publish_status(status_error, healthy, degraded);
+    publish_status(
+      status_error, healthy, degraded,
+      velocity_ratio, acceleration_ratio, jerk_ratio);
   }
 
   void publish_proposal(
@@ -575,7 +590,10 @@ private:
   void publish_status(
     const std::string &error,
     bool healthy = true,
-    bool degraded = false)
+    bool degraded = false,
+    double velocity_ratio = 0.0,
+    double acceleration_ratio = 0.0,
+    double jerk_ratio = 0.0)
   {
     std::lock_guard<std::mutex> publish_lock(publish_mutex_);
     if (!status_publisher_) return;
@@ -597,6 +615,9 @@ private:
       ",\"component_role\":\"producer_arm\",\"component_id\":\"arm_ik_producer\",\"phase\":\"ready\",\"ready\":true,\"healthy\":" +
       (healthy ? "true" : "false") + ",\"capabilities\":" + capabilities + ",\"error\":" + (error.empty() ? "null" : quote(error)) +
       ",\"diagnostics\":{\"backend\":" + quote(backend_) + ",\"degraded\":" + (degraded ? "true" : "false") +
+      ",\"velocity_ratio\":" + number(velocity_ratio) +
+      ",\"acceleration_ratio\":" + number(acceleration_ratio) +
+      ",\"jerk_ratio\":" + number(jerk_ratio) +
       ",\"rate_hz\":" + number(rate_hz_) + "}}"));
   }
 

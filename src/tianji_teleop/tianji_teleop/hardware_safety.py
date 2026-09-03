@@ -23,6 +23,7 @@ class HardwareSafetySettings:
     return_max_speed_deg_s: float = 10.0
     home_tolerance_deg: float = 1.0
     feedback_hard_limit_padding_deg: float = 5.0
+    required_arm_state: int = 1
 
 
 @dataclass(frozen=True)
@@ -85,18 +86,12 @@ class HardwareSafetyController:
         if any(value <= 0.0 for value in positive_settings):
             raise ValueError("hardware safety settings must be positive")
         if (
-            self.settings.maximum_tracking_error_deg
-            <= self.settings.maximum_output_step_deg
-        ):
-            raise ValueError(
-                "maximum_tracking_error_deg must exceed "
-                "maximum_output_step_deg"
-            )
-        if (
             self.settings.maximum_pair_skew_s < 0.0
             or self.settings.feedback_hard_limit_padding_deg < 0.0
         ):
             raise ValueError("hardware safety tolerances are invalid")
+        if self.settings.required_arm_state not in {1, 3}:
+            raise ValueError("required_arm_state must be position(1) or impedance(3)")
         self._home = np.concatenate(
             [
                 self._arm_vector(left_home_deg, "left_home_deg"),
@@ -269,18 +264,25 @@ class HardwareSafetyController:
                     self.settings.maximum_output_step_deg / max_delta
                 )
             output = self._last_output + delta
-            command_lead_deg = (
-                self.settings.maximum_tracking_error_deg
-                - self.settings.maximum_output_step_deg
-            )
-            lead_limited_output = np.clip(
-                output,
-                self._feedback.joints_deg - command_lead_deg,
-                self._feedback.joints_deg + command_lead_deg,
-            )
-            tracking_lead_limited = not np.array_equal(
-                lead_limited_output, output
-            )
+            if (
+                self.settings.maximum_output_step_deg
+                < self.settings.maximum_tracking_error_deg
+            ):
+                command_lead_deg = (
+                    self.settings.maximum_tracking_error_deg
+                    - self.settings.maximum_output_step_deg
+                )
+                lead_limited_output = np.clip(
+                    output,
+                    self._feedback.joints_deg - command_lead_deg,
+                    self._feedback.joints_deg + command_lead_deg,
+                )
+                tracking_lead_limited = not np.array_equal(
+                    lead_limited_output, output
+                )
+            else:
+                lead_limited_output = output
+                tracking_lead_limited = False
             self._last_output = lead_limited_output
             return self._split_decision(
                 "send",
@@ -359,11 +361,12 @@ class HardwareSafetyController:
             return "arm_error"
         if self._feedback.servo_error_reports != ("None", "None"):
             return "servo_error"
-        if self._feedback.arm_states != (1, 1):
+        required_state = self.settings.required_arm_state
+        if self._feedback.arm_states != (required_state, required_state):
             return "arm_state_invalid"
         if not command_states_compatible(
             self._feedback.command_states,
-            1,
+            required_state,
         ):
             return "command_state_invalid"
         return None

@@ -1,0 +1,13 @@
+source_config: sources/regrind_policy.yaml
+arm_producer_config: producers/ik_regrind.yaml
+arm_executor_config: executors/marvin_impedance.yaml
+coordinator_config: coordinator/arm_regrind.yaml
+required_capability: real
+active_sides: [right]
+arm_command_path: direct
+inactive_sides: [left]
+hand_mode: direct
+hand_executor: wuji_hand2
+hand_executor_config: executors/wuji_hand2_regrind.yaml
+hand_overlay: none
+active_hand_sides: [right]
