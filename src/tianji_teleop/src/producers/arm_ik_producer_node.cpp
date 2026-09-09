@@ -161,7 +161,9 @@ struct Target {
   std::string frame;
   std::uint64_t sequence{0};
   std::int64_t timestamp_ns{0};
+  std::int64_t receive_time_ns{0};
   std::optional<std::int64_t> source_timestamp_ns;
+  bool tracking_valid{true};
   Eigen::Isometry3d pose{Eigen::Isometry3d::Identity()};
   Eigen::Vector3d elbow{Eigen::Vector3d::UnitZ()};
 };
@@ -172,7 +174,14 @@ public:
 
   Target parse() const {
     const auto root = protocol::StrictJsonParser::parse(text_);
-    protocol::require_exact_fields(root, {
+    auto required = root.as_object("target");
+    bool tracking_valid = true;
+    const auto tracking = required.find("tracking_valid");
+    if (tracking != required.end()) {
+      tracking_valid = tracking->second.as_bool();
+      required.erase(tracking);
+    }
+    protocol::require_exact_fields(protocol::JsonValue(required), {
       "schema_version", "publisher_instance_id", "router_zid", "sequence",
       "timestamp_ns", "source_timestamp_ns", "source", "side", "frame_id",
       "position_m", "orientation_xyzw", "elbow_reference_direction"
@@ -181,6 +190,7 @@ public:
       throw std::invalid_argument("unsupported arm target schema");
     }
     Target target;
+    target.tracking_valid = tracking_valid;
     target.instance = protocol::field(root, "publisher_instance_id").as_string("publisher_instance_id");
     target.router = protocol::field(root, "router_zid").as_string("router_zid");
     target.source = protocol::field(root, "source").as_string("source");
@@ -292,7 +302,8 @@ std::string proposal_json(const Target &target, const IkResult &result, const Ar
       << ",\"target_sequence\":" << target.sequence << ",\"names\":[";
   for (std::size_t i = 0; i < names.size(); ++i) { if (i) out << ','; out << quote(names[i]); }
   out << "],\"position_rad\":" << array_json(joints) << ",\"diagnostics\":{\"accepted\":true,\"converged\":" << (result.converged ? "true" : "false")
-      << ",\"hold\":" << (hold ? "true" : "false") << "}}";
+      << ",\"hold\":" << (hold ? "true" : "false")
+      << ",\"tracking_hold\":" << (!target.tracking_valid ? "true" : "false") << "}}";
   return out.str();
 }
 
@@ -337,6 +348,12 @@ public:
     rate_hz_(rate_hz),
     freshness_timeout_ns_(static_cast<std::int64_t>(freshness_timeout_s * 1.0e9)),
     real_capability_(env_or("TIANJI_REQUIRED_CAPABILITY", "simulation") == "real") {
+    if(real_capability_ && backend_ == "pico_ee_dexhand_qp")
+      throw std::invalid_argument("v131 fast profile is simulation-only; physical qualification is required");
+    trajectory_processor_ = env_or("TIANJI_JOINT_TRAJECTORY_PROCESSOR",
+      env_or("TIANJI_IK_JOINT_TRAJECTORY_PROCESSOR", backend_ == "pico_ee_dexhand_qp" ? "passthrough" : "ruckig"));
+    if (trajectory_processor_ != "passthrough" && trajectory_processor_ != "ruckig")
+      throw std::invalid_argument("joint trajectory processor must be passthrough or ruckig");
     if (source_.empty() || source_instance_.empty()) {
       throw std::invalid_argument("source logical and publisher identities are required");
     }
@@ -381,6 +398,9 @@ private:
       const std::string expected_side = index == 0 ? "left" : "right";
       if (parsed.side != expected_side) throw std::invalid_argument("target side does not match topic");
       if (parsed.router != router_) throw std::invalid_argument("target router mismatch");
+      if (!parsed.tracking_valid && real_capability_) {
+        throw std::invalid_argument("tracking hold is simulation-only");
+      }
       if (parsed.source != source_ || parsed.instance != source_instance_) {
         throw std::invalid_argument("target source authority mismatch");
       }
@@ -396,6 +416,7 @@ private:
         }
       }
       last_target_baseline_[index] = std::make_pair(parsed.instance, parsed.sequence);
+      parsed.receive_time_ns = now_ns();
       targets_[index] = std::move(parsed);
       target_input_errors_[index].reset();
     } catch (const std::exception &error) {
@@ -424,6 +445,10 @@ private:
       }
       last_command_sequence_[index] = command.sequence;
       current_[index] = command.joints;
+      teleop_active_[index] = command.mode == "teleop";
+      if(command.mode != "teleop")
+        solver_->reset(index==0?ArmSide::kLeft:ArmSide::kRight);
+      solver_->command_feedback(index==0?ArmSide::kLeft:ArmSide::kRight,command.joints);
       const bool resynchronize =
         command.mode != "teleop" || !trajectory_limiters_[index].initialized() ||
         (trajectory_limiters_[index].state().position - command.joints)
@@ -467,10 +492,17 @@ private:
       }
       for (std::size_t index = 0; index < 2; ++index) {
         if (!targets_[index].has_value()) continue;
+        if (solver_->owns_reference_state() && !teleop_active_[index]) continue;
         const auto &target = *targets_[index];
-        if (tick_ns - target.timestamp_ns > kFreshnessNs) continue;
+        if (tick_ns - target.timestamp_ns > kFreshnessNs) {
+          if(solver_->owns_reference_state()) solver_->reset(index==0?ArmSide::kLeft:ArmSide::kRight);
+          continue;
+        }
         const auto side = index == 0 ? ArmSide::kLeft : ArmSide::kRight;
         const auto reject = [&](const std::string & detail, bool hard_failure) {
+          // Rejected host output is an explicit fault/resynchronization event,
+          // not ordinary per-tick feedback into the model controller.
+          if(solver_->owns_reference_state() && hard_failure) solver_->reset(side);
           const bool continuous = hard_failure || failure_windows_[index].failed(tick_ns);
           healthy = healthy && !continuous;
           degraded = true;
@@ -495,9 +527,32 @@ private:
           }
         };
 
+        if (!target.tracking_valid) {
+          try {
+            // Never integrate against a cached Cartesian target while tracking
+            // is absent. Recovery seeds a fresh solver state from final feedback.
+            solver_->reset(side);
+            ArmMotionState state;
+            state.position = current_[index];
+            (void)trajectory_limiters_[index].reset(state);
+            IkResult held;
+            held.achieved_pose = solver_->forward(side, current_[index]);
+            if (!held.achieved_pose.matrix().allFinite()) {
+              throw std::runtime_error("non-finite tracking hold FK");
+            }
+            failure_windows_[index].recovered();
+            publish_proposal(index, target, held, current_[index], held.achieved_pose, true);
+          } catch (const std::exception &error) {
+            reject(std::string("tracking hold failed: ") + error.what(), true);
+          }
+          continue;
+        }
+
         IkResult result;
         try {
-          result = solver_->solve(side, target.pose, current_[index], target.elbow);
+          result = solver_->solve_timed(side, target.pose, current_[index], target.elbow,
+            target.source_timestamp_ns.value_or(target.timestamp_ns)*1.0e-9,
+            target.receive_time_ns*1.0e-9, tick_ns*1.0e-9);
         } catch (const std::exception & error) {
           reject(std::string("solver exception: ") + error.what(), false);
           continue;
@@ -520,8 +575,19 @@ private:
         }
 
         const ArmJointVector target_velocity =
-          (result.joints_rad - current_[index]) / settings_.control_period_s;
-        const auto limited = trajectory_limiters_[index].update(target_velocity);
+          result.model_state_only ? result.reference_velocity_rad_s :
+          ArmJointVector((result.joints_rad - current_[index]) / settings_.control_period_s);
+        JointTrajectoryResult limited;
+        if (trajectory_processor_ == "ruckig") {
+          limited = result.model_state_only ?
+            trajectory_limiters_[index].update_position(result.joints_rad) :
+            trajectory_limiters_[index].update(target_velocity);
+        } else {
+          limited.accepted = true;
+          limited.state.position = result.joints_rad;
+          limited.state.velocity = target_velocity;
+          limited.detail = "passthrough";
+        }
         velocity_ratio = std::max(velocity_ratio, limited.velocity_ratio);
         acceleration_ratio = std::max(acceleration_ratio, limited.acceleration_ratio);
         jerk_ratio = std::max(jerk_ratio, limited.jerk_ratio);
@@ -537,6 +603,8 @@ private:
           continue;
         }
         const double step =
+          result.model_state_only && trajectory_processor_ == "passthrough" ?
+          result.maximum_joint_step_rad :
           (limited.state.position - current_[index]).cwiseAbs().maxCoeff();
         if (!std::isfinite(step)) {
           reject("Ruckig output step is non-finite", true);
@@ -558,7 +626,14 @@ private:
           reject("FK returned non-finite output", true);
           continue;
         }
-        failure_windows_[index].recovered();
+        if(result.status == "v131_bounded_solver_fallback") {
+          degraded=true;
+          const bool persistent=failure_windows_[index].failed(tick_ns);
+          healthy=healthy && !persistent;
+          status_error=persistent?"continuous v131 solver failure; bounded fallback":"transient v131 bounded solver fallback";
+        } else {
+          failure_windows_[index].recovered();
+        }
         result.joints_rad = limited.state.position;
         result.achieved_pose = achieved;
         result.converged = result.converged &&
@@ -615,6 +690,11 @@ private:
       ",\"component_role\":\"producer_arm\",\"component_id\":\"arm_ik_producer\",\"phase\":\"ready\",\"ready\":true,\"healthy\":" +
       (healthy ? "true" : "false") + ",\"capabilities\":" + capabilities + ",\"error\":" + (error.empty() ? "null" : quote(error)) +
       ",\"diagnostics\":{\"backend\":" + quote(backend_) + ",\"degraded\":" + (degraded ? "true" : "false") +
+      ",\"algorithm\":" + quote(backend_ == "pico_ee_dexhand_qp" ? "pico_ee_v131_velocity_qp" : backend_) +
+      (backend_ == "pico_ee_dexhand_qp" ?
+        ",\"model_state_only\":true,\"kinematics\":\"mujoco_world\",\"cartesian_otg_enabled\":true,\"adaptive_cartesian_gain_enabled\":true,\"cartesian_linear_limit_m_s\":3.0,\"cartesian_angular_limit_rad_s\":12.0,\"joint_velocity_limit_rad_s\":" +
+          number(std::min(4.0,settings_.maximum_joint_step_rad/settings_.control_period_s)) : "") +
+      ",\"joint_trajectory_processor\":" + quote(trajectory_processor_) +
       ",\"velocity_ratio\":" + number(velocity_ratio) +
       ",\"acceleration_ratio\":" + number(acceleration_ratio) +
       ",\"jerk_ratio\":" + number(jerk_ratio) +
@@ -623,6 +703,7 @@ private:
 
   zenoh::Session &session_;
   std::string backend_, instance_, router_, coordinator_, source_, source_instance_;
+  std::string trajectory_processor_;
   IkSettings settings_{};
   std::unique_ptr<ArmIkSolver> solver_;
   ArmJointNames joint_names_{};
@@ -643,6 +724,7 @@ private:
   std::string last_status_signature_;
   std::array<std::optional<Target>, 2> targets_;
   std::array<ArmJointVector, 2> current_{ArmJointVector::Zero(), ArmJointVector::Zero()};
+  std::array<bool,2> teleop_active_{false,false};
   std::mutex mutex_;
   std::atomic<std::uint64_t> sequence_{0};
   double rate_hz_{200.0};
@@ -674,6 +756,34 @@ int main() {
     const double freshness_timeout_s = tianji_teleop::env_double("TIANJI_IK_FRESHNESS_TIMEOUT_S", 0.5);
     const double reject_grace_s = tianji_teleop::env_double("TIANJI_IK_SOLVER_REJECT_GRACE_S", 0.15);
     tianji_teleop::IkSettings settings;
+    const double active_set_iterations = tianji_teleop::env_double(
+      "TIANJI_IK_QP_MAX_ACTIVE_SET_ITERATIONS", settings.qp_max_active_set_iterations);
+    if (active_set_iterations < 1 || active_set_iterations > 100000 ||
+        std::floor(active_set_iterations) != active_set_iterations)
+      throw std::invalid_argument("QP active-set iterations must be a positive integer");
+    settings.qp_max_active_set_iterations = static_cast<int>(active_set_iterations);
+    settings.singular_value_threshold = tianji_teleop::env_double("TIANJI_IK_SINGULAR_VALUE_THRESHOLD", settings.singular_value_threshold);
+    settings.qp_position_time_constant_s = tianji_teleop::env_double("TIANJI_IK_QP_POSITION_TIME_CONSTANT_S", settings.qp_position_time_constant_s);
+    settings.qp_orientation_time_constant_s = tianji_teleop::env_double("TIANJI_IK_QP_ORIENTATION_TIME_CONSTANT_S", settings.qp_orientation_time_constant_s);
+    settings.qp_max_linear_speed_m_s = tianji_teleop::env_double("TIANJI_IK_QP_MAX_LINEAR_SPEED_M_S", settings.qp_max_linear_speed_m_s);
+    settings.qp_max_angular_speed_rad_s = tianji_teleop::env_double("TIANJI_IK_QP_MAX_ANGULAR_SPEED_RAD_S", settings.qp_max_angular_speed_rad_s);
+    settings.qp_position_weight = tianji_teleop::env_double("TIANJI_IK_QP_POSITION_WEIGHT", settings.qp_position_weight);
+    settings.qp_orientation_weight = tianji_teleop::env_double("TIANJI_IK_QP_ORIENTATION_WEIGHT", settings.qp_orientation_weight);
+    settings.qp_velocity_regularization_weight = tianji_teleop::env_double("TIANJI_IK_QP_VELOCITY_REGULARIZATION_WEIGHT", settings.qp_velocity_regularization_weight);
+    settings.qp_continuity_weight = tianji_teleop::env_double("TIANJI_IK_QP_CONTINUITY_WEIGHT", settings.qp_continuity_weight);
+    settings.qp_posture_weight = tianji_teleop::env_double("TIANJI_IK_QP_POSTURE_WEIGHT", settings.qp_posture_weight);
+    settings.qp_posture_time_constant_s = tianji_teleop::env_double("TIANJI_IK_QP_POSTURE_TIME_CONSTANT_S", settings.qp_posture_time_constant_s);
+    settings.qp_joint_limit_activation_margin_rad = tianji_teleop::env_double("TIANJI_IK_QP_JOINT_LIMIT_ACTIVATION_MARGIN_RAD", settings.qp_joint_limit_activation_margin_rad);
+    settings.qp_joint_limit_velocity_damper_gain = tianji_teleop::env_double("TIANJI_IK_QP_JOINT_LIMIT_VELOCITY_DAMPER_GAIN", settings.qp_joint_limit_velocity_damper_gain);
+    settings.qp_singularity_critical_threshold = tianji_teleop::env_double("TIANJI_IK_QP_SINGULARITY_CRITICAL_THRESHOLD", settings.qp_singularity_critical_threshold);
+    settings.qp_singularity_orientation_scale = tianji_teleop::env_double("TIANJI_IK_QP_SINGULARITY_ORIENTATION_SCALE", settings.qp_singularity_orientation_scale);
+    settings.qp_singularity_posture_multiplier = tianji_teleop::env_double("TIANJI_IK_QP_SINGULARITY_POSTURE_MULTIPLIER", settings.qp_singularity_posture_multiplier);
+    settings.qp_singularity_velocity_multiplier = tianji_teleop::env_double("TIANJI_IK_QP_SINGULARITY_VELOCITY_MULTIPLIER", settings.qp_singularity_velocity_multiplier);
+    settings.qp_singularity_escape_weight = tianji_teleop::env_double("TIANJI_IK_QP_SINGULARITY_ESCAPE_WEIGHT", settings.qp_singularity_escape_weight);
+    settings.qp_singularity_escape_speed_rad_s = tianji_teleop::env_double("TIANJI_IK_QP_SINGULARITY_ESCAPE_SPEED_RAD_S", settings.qp_singularity_escape_speed_rad_s);
+    settings.qp_active_set_tolerance = tianji_teleop::env_double("TIANJI_IK_QP_ACTIVE_SET_TOLERANCE", settings.qp_active_set_tolerance);
+    settings.qp_left_nominal_rad = tianji_teleop::env_vector("TIANJI_IK_QP_LEFT_NOMINAL_RAD", settings.qp_left_nominal_rad);
+    settings.qp_right_nominal_rad = tianji_teleop::env_vector("TIANJI_IK_QP_RIGHT_NOMINAL_RAD", settings.qp_right_nominal_rad);
     settings.maximum_joint_step_rad = tianji_teleop::env_double("TIANJI_IK_MAXIMUM_JOINT_STEP_RAD", settings.maximum_joint_step_rad);
     settings.position_tolerance_m = tianji_teleop::env_double("TIANJI_IK_POSITION_TOLERANCE_M", settings.position_tolerance_m);
     settings.orientation_tolerance_rad = tianji_teleop::env_double("TIANJI_IK_ORIENTATION_TOLERANCE_RAD", settings.orientation_tolerance_rad);

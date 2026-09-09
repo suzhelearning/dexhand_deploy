@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(tianji_teleop)
+option(TIANJI_SIMULATION_ONLY "Build local Pinocchio IK without physical-device SDKs" OFF)
+option(TIANJI_ENABLE_V131 "Enable the host-native v131 simulation backend" OFF)
+if(TIANJI_ENABLE_V131 AND NOT TIANJI_SIMULATION_ONLY)
+  message(FATAL_ERROR "v131 requires TIANJI_SIMULATION_ONLY; its host-native dependencies are not a portable runtime bundle")
+endif()
 
 # Zenoh（zenoh-c + zenoh-cpp）vendored 于仓库根 vendor/ 下：
 #   vendor/zenoh/include        zenoh-c 头文件
@@ -29,7 +34,7 @@ endif()
 if(NOT EXISTS "${ZENOH_CPP_ROOT}/include/zenoh.hxx")
   message(FATAL_ERROR "缺少 vendor/zenoh-cpp/include（zenoh-cpp 1.10.0 头文件）")
 endif()
-if(NOT EXISTS "${WUJI_SDK_ROOT}/lib/libwuji_sdk_c.so")
+if(NOT TIANJI_SIMULATION_ONLY AND NOT EXISTS "${WUJI_SDK_ROOT}/lib/libwuji_sdk_c.so")
   message(FATAL_ERROR "缺少 vendor/wuji-sdk/lib/libwuji_sdk_c.so（wuji-sdk C v2026.8.17）")
 endif()
 
@@ -65,6 +70,15 @@ if(NOT PINOCCHIO_PREFIX_RESULT EQUAL 0)
 endif()
 list(PREPEND CMAKE_PREFIX_PATH "${PINOCCHIO_CMEEL_PREFIX}")
 find_package(pinocchio 4.0 REQUIRED CONFIG)
+if(TIANJI_ENABLE_V131)
+  find_path(V131_QPOASES_INCLUDE qpOASES.hpp HINTS "$ENV{CONDA_PREFIX}/include" REQUIRED)
+  find_library(V131_QPOASES_LIBRARY qpOASES HINTS "$ENV{CONDA_PREFIX}/lib" REQUIRED)
+  find_path(V131_MUJOCO_INCLUDE mujoco/mujoco.h HINTS "$ENV{CONDA_PREFIX}/include" REQUIRED)
+  find_library(V131_MUJOCO_LIBRARY mujoco HINTS "$ENV{CONDA_PREFIX}/lib" REQUIRED)
+  # MuJoCo's conda build uses newer GLIBCXX symbols than the host GCC 11
+  # driver. Link the matching conda runtime explicitly, not its system default.
+  find_library(V131_CXX_RUNTIME stdc++ HINTS "$ENV{CONDA_PREFIX}/lib" NO_DEFAULT_PATH REQUIRED)
+endif()
 
 get_filename_component(
   PINOCCHIO_CMEEL_PREFIX_REAL
@@ -83,6 +97,30 @@ add_library(
   src/ik/pinocchio_qp/pinocchio_qp_arm_ik.cpp
   src/ik/tianji_official/tianji_official_arm_ik_proxy.cpp
 )
+if(TIANJI_ENABLE_V131)
+  target_sources(arm_ik PRIVATE
+  src/ik/dexhand_qp/arm_ik.cpp
+  src/ik/dexhand_qp/dexhand_velocity_qp_ik.cpp
+  src/ik/dexhand_qp/dexhand_velocity_ruckig.cpp
+  src/ik/dexhand_qp/so3.cpp
+  src/ik/v131_qp/hierarchical_qp.cpp
+  src/ik/v131_qp/hierarchical_qpoases_solver.cpp
+  src/ik/v131_qp/velocity_ik.cpp
+  src/ik/v131_qp/full_joint_temporal_envelope.cpp
+  src/ik/v131_qp/pico_ee_v131_singularity.cpp
+  src/ik/v131_qp/pico_ee_v131_jacobian_svd.cpp
+  src/ik/v131_qp/so3.cpp
+  src/ik/v131_qp/velocity_qp.cpp
+  src/ik/v131_qp/mujoco_robot.cpp
+  src/ik/v131_qp/cartesian_otg.cpp
+  src/ik/v131_qp/cartesian_servo.cpp
+  src/ik/v131_qp/target_manager.cpp
+  src/ik/v131_qp/dexhand_target_conditioner.cpp
+)
+  target_compile_definitions(arm_ik PRIVATE TIANJI_ENABLE_V131=1)
+  target_include_directories(arm_ik PUBLIC ${V131_QPOASES_INCLUDE} ${V131_MUJOCO_INCLUDE})
+  target_link_libraries(arm_ik PUBLIC ${V131_QPOASES_LIBRARY} ${V131_MUJOCO_LIBRARY} ${V131_CXX_RUNTIME})
+endif()
 target_compile_features(arm_ik PUBLIC cxx_std_17)
 target_compile_options(
   arm_ik PRIVATE -Wall -Wextra -Wpedantic
@@ -96,6 +134,42 @@ target_include_directories(
 target_link_libraries(
   arm_ik PUBLIC Eigen3::Eigen pinocchio::pinocchio ruckig::ruckig ${CMAKE_DL_LIBS}
 )
+
+# Local simulation uses the same solver/factory and producer as deployment.
+# No Wuji device SDK or portable runtime/ABI bundle is needed on this path.
+if(TIANJI_SIMULATION_ONLY)
+  if(TIANJI_ENABLE_V131)
+    add_executable(dexhand_qp_arm_probe src/ik/dexhand_qp/arm_probe.cpp)
+    target_link_libraries(dexhand_qp_arm_probe PRIVATE arm_ik)
+    add_executable(dexhand_qp_core_probe src/ik/dexhand_qp/core_probe.cpp)
+    add_executable(v131_qp_probe src/ik/v131_qp/probe.cpp)
+    target_link_libraries(v131_qp_probe PRIVATE arm_ik)
+    add_executable(v131_model_trace src/ik/v131_qp/model_trace.cpp)
+    target_link_libraries(v131_model_trace PRIVATE arm_ik)
+    target_link_libraries(dexhand_qp_core_probe PRIVATE arm_ik)
+    install(TARGETS dexhand_qp_core_probe dexhand_qp_arm_probe v131_qp_probe
+      RUNTIME DESTINATION lib/${PROJECT_NAME})
+  endif()
+  add_executable(arm_ik_producer src/producers/arm_ik_producer_node.cpp)
+  target_compile_features(arm_ik_producer PRIVATE cxx_std_17)
+  target_compile_definitions(arm_ik_producer PRIVATE ZENOHCXX_ZENOHC)
+  target_include_directories(arm_ik_producer PRIVATE
+    "${ZENOH_CPP_ROOT}/include" "${ZENOH_ROOT}/include")
+  target_link_libraries(arm_ik_producer PRIVATE arm_ik "${ZENOH_ROOT}/lib/libzenohc.so")
+  add_executable(pinocchio_qp_ik_probe src/pinocchio_qp/pinocchio_qp_ik_probe.cpp)
+  target_link_libraries(pinocchio_qp_ik_probe PRIVATE arm_ik)
+  add_executable(joint_trajectory_limiter_probe src/control/joint_trajectory_limiter_probe.cpp)
+  target_link_libraries(joint_trajectory_limiter_probe PRIVATE arm_ik)
+  install(TARGETS arm_ik_producer pinocchio_qp_ik_probe joint_trajectory_limiter_probe
+    RUNTIME DESTINATION lib/${PROJECT_NAME})
+  install(
+    DIRECTORY tianji_world_output
+    DESTINATION lib/python3.10/site-packages
+    PATTERN "__pycache__" EXCLUDE
+    PATTERN "*.pyc" EXCLUDE
+  )
+  return()
+endif()
 
 # Marvin SDK I/O stays in one dedicated 200 Hz native loop.  The Python
 # executor remains the protocol/safety boundary and calls this small C ABI.
@@ -328,10 +402,20 @@ install(
     scripts/real_diagnostic
     scripts/h5_wrist_diagnostic
     scripts/joint_watcher
+    scripts/hand_tracking_observation
+    scripts/hand_tracking_target
+    scripts/pico_capture
+    scripts/manus_capture
   DESTINATION lib/${PROJECT_NAME}
 )
 install(
   DIRECTORY tianji_teleop
+  DESTINATION lib/python3.10/site-packages
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+)
+install(
+  DIRECTORY tianji_world_output
   DESTINATION lib/python3.10/site-packages
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE

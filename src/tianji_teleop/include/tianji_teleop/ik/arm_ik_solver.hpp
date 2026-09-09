@@ -95,6 +95,10 @@ struct IkSettings
 
 struct IkResult
 {
+  // Stateful reference-model backends report their own one-tick displacement;
+  // it must not be reconstructed from asynchronous coordinator feedback.
+  bool model_state_only{false};
+  ArmJointVector reference_velocity_rad_s{ArmJointVector::Zero()};
   ArmJointVector joints_rad{ArmJointVector::Zero()};
   Eigen::Isometry3d achieved_pose{Eigen::Isometry3d::Identity()};
   bool accepted{false};
@@ -148,6 +152,15 @@ class ArmIkSolver
 {
 public:
   virtual ~ArmIkSolver() = default;
+
+  // Optional lifecycle/timing extension. Stateless and legacy solvers retain
+  // exactly their existing solve path through these default implementations.
+  virtual void reset(ArmSide) const {}
+  virtual void command_feedback(ArmSide, const ArmJointVector&) const {}
+  virtual bool owns_reference_state() const { return false; }
+  virtual IkResult solve_timed(ArmSide side, const Eigen::Isometry3d& target,
+    const ArmJointVector& q, const Eigen::Vector3d& elbow,
+    double, double, double) const { return solve(side,target,q,elbow); }
 
   virtual Eigen::Isometry3d forward(
     ArmSide side,

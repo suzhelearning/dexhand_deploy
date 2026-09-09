@@ -430,7 +430,7 @@ class WujiHandExecutor:
                 values = _retarget_keypoints(self._latest_target.keypoints_m, self.config)
                 command = HandJointCommand(
                     1, self._sequence, now_ns, self.authorized_producer, self.side,
-                    list(self.config.joint_names), values, self.producer_publisher_instance_id, self.router_zid,
+                    list(HAND_JOINT_NAMES[self.side]), values, self.producer_publisher_instance_id, self.router_zid,
                 )
                 self._last_command = command
                 _put(self._publishers.get("command"), command.to_dict())

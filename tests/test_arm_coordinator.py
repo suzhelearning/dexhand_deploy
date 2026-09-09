@@ -208,6 +208,29 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
         self.assertEqual(self.coordinator.state.state, "teleop")
         self.assertAlmostEqual(command.position_rad[0] - old[0], maximum_step)
 
+    def test_command_step_clipping_can_be_disabled_without_changing_proposal(self):
+        self.test_one_tick_proposal_lag_is_clipped_not_faulted()
+        self.coordinator.config['command_step_clipping_enabled'] = False
+        candidate = self.coordinator._proposals['right'].value.position_rad
+        candidate[0] = self.coordinator._safe_command['right'][0] + 1.5 * self.coordinator.config['maximum_command_step_rad']
+        command = self.coordinator._command('right', 5, 1_000_000_000)
+        self.assertEqual(command.position_rad, candidate)
+
+    def test_disabled_clipping_config_is_strict_boolean(self):
+        config = dict(self.coordinator.config, command_step_clipping_enabled=False)
+        self.assertFalse(self.coordinator._coordinator_config(config)['command_step_clipping_enabled'])
+        config['command_step_clipping_enabled'] = 'false'
+        with self.assertRaises(ValueError):
+            self.coordinator._coordinator_config(config)
+
+    def test_disabling_clipping_keeps_abnormal_step_rejection(self):
+        self.test_one_tick_proposal_lag_is_clipped_not_faulted()
+        self.coordinator.config['command_step_clipping_enabled'] = False
+        candidate = self.coordinator._proposals['right'].value.position_rad
+        candidate[0] = self.coordinator._safe_command['right'][0] + 3 * self.coordinator.config['maximum_command_step_rad']
+        self.coordinator._validate_proposals(1_000_000_000)
+        self.assertEqual(self.coordinator.state.state, 'fault')
+
     def test_return_waits_for_fresh_arm_home_then_latches_once(self):
         self.coordinator._state = self.coordinator._make_state("returning", "return", 4)
         self.coordinator.tick()
@@ -219,6 +242,21 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
         first_sequence = self.coordinator.return_complete.sequence
         self.coordinator.tick(now_ns=1_000_000_300)
         self.assertGreater(self.coordinator.return_complete.sequence, first_sequence)
+
+    def test_completed_return_uses_exact_home_despite_float_cancellation(self):
+        c = self.coordinator
+        c._state = c._make_state('returning', 'return', 4)
+        c._return_start_command = {
+            'left': list(c.robot.left_home_rad), 'right': list(c.robot.right_home_rad),
+        }
+        c._return_start_command['left'][0] = 0.2
+        c._return_started_ns = 1_000_000_000
+        now = 100_000_000_000
+        c.update_arm_state(_arm_state(now, c.robot.home_all), received_ns=now)
+        commands = c.tick(now_ns=now)
+        self.assertEqual(commands['left'].position_rad, list(c.robot.left_home_rad))
+        self.assertEqual(c.state.state, 'idle')
+        self.assertTrue(c.return_complete.value)
 
 
 class ArmCommandCoordinatorAuthorityRound5Test(unittest.TestCase):

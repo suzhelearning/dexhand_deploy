@@ -1,0 +1,42 @@
+# Simulation-only Manus + historical TJVR arm target source.
+#
+# Manus supplies the canonical 21-point hand observations.  The companion
+# legacy TJVR stream supplies the corrected palm pose already used by
+# TJ_arm_control, so the arm mapper intentionally remains direct-pose.
+input_profile: manus
+simulation_only: true
+rate_hz: 60.0
+arm_input_max_age_s: 0.5
+active_sides: [left, right]
+active_hand_sides: [left, right]
+arm_input_source: legacy_pico_palm
+
+hand_adapter: fixed_rotation
+hand_adapter_config:
+  source: manus
+  coordinate_frame: manus_local_vuh_y_flipped_wrist_relative
+  max_age_s: 0.5
+  rotation:
+    left: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    right: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+arm_pose_mapper: direct_pose
+arm_pose_mapper_config:
+  input_to_base_rotation:
+    left: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    right: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+  input_origin_in_base_m:
+    left: [0.0, 0.0, 0.0]
+    right: [0.0, 0.0, 0.0]
+  tracked_to_tcp_pose:
+    left: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    right: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+  expected_reference_frame: legacy_pico_tracking
+  expected_tracked_frame: palm
+
+arm_target_processor: passthrough
+arm_target_processor_config: {}
+
+elbow_reference_direction:
+  left: [0.45638698, -0.74604902, -0.48489358]
+  right: [0.45638698, 0.74604902, -0.48489358]

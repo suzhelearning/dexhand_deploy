@@ -12,6 +12,16 @@ _EXPORTS = {
     "TargetConditioningDiagnostics": (".target_conditioner", "TargetConditioningDiagnostics"),
     "TargetConditioningSettings": (".target_conditioner", "TargetConditioningSettings"),
     "TargetPublisher": (".target_publisher", "TargetPublisher"),
+    "ArmPoseMapper": (".pose_mapping", "ArmPoseMapper"),
+    "DirectPoseMapper": (".pose_mapping", "DirectPoseMapper"),
+    "MappedArmPose": (".pose_mapping", "MappedArmPose"),
+    "RelativeHomeMapper": (".pose_mapping", "RelativeHomeMapper"),
+    "create_arm_pose_mapper": (".pose_mapping", "create_arm_pose_mapper"),
+    "ArmTargetProcessor": (".target_processing", "ArmTargetProcessor"),
+    "ConditionedTargetProcessor": (".target_processing", "ConditionedTargetProcessor"),
+    "PassthroughTargetProcessor": (".target_processing", "PassthroughTargetProcessor"),
+    "ProcessedArmTarget": (".target_processing", "ProcessedArmTarget"),
+    "create_arm_target_processor": (".target_processing", "create_arm_target_processor"),
 }
 
 

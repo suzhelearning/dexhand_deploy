@@ -1,0 +1,16 @@
+# Simulation session: PICO2 observation receiver + target bridge + existing IK
+# and MuJoCo/Wuji executors.  The target bridge is the sole source authority.
+source_config: sources/hand_tracking_target.yaml
+observation_config: sources/hand_tracking_observation.yaml
+arm_producer_config: producers/ik.yaml
+arm_executor_config: executors/mujoco.yaml
+coordinator_config: coordinator/arm.yaml
+required_capability: simulation
+active_sides: [left, right]
+inactive_sides: []
+hand_mode: retarget
+hand_executor: wuji_hand2
+# Wuji dry-run produces the hand commands; MuJoCo applies them for display.
+hand_overlay: mujoco
+active_hand_sides: [left, right]
+arm_command_path: coordinator

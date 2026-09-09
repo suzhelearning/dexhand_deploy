@@ -1,0 +1,18 @@
+# Receive-only Manus + historical PICO arm-input settings.
+# This profile publishes Manus 21-point hand observations and the TJVR palm
+# pose used by the Manus arm experiment.  It never starts IK or an executor.
+input_profile: manus
+observation_only: true
+receiver_instance_id: manus-pico-observation
+print_interval_s: 1.0
+
+manus:
+  topics:
+    left: manus/raw_skeleton/left_hand
+    right: manus/raw_skeleton/right_hand
+
+legacy_pico:
+  host: 127.0.0.1
+  port: 15000
+  recv_timeout_seconds: 1.0
+  use_corrected_skeleton: true

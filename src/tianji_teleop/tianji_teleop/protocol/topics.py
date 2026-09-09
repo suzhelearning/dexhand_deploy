@@ -28,6 +28,11 @@ SAFETY_ACK = "tianji/safety/ack/{executor_id}"
 
 RAW_MOCAP_LIVE = "tianji/raw/mocap_live"
 RAW_H5_REPLAY = "tianji/raw/h5_replay"
+RAW_PICO_HAND_TRACKING = "tianji/raw/pico_hand_tracking"
+RAW_MANUS_HAND_TRACKING = "tianji/raw/manus_hand_tracking"
+RAW_LEGACY_PICO_PALM = "tianji/raw/legacy_pico_palm"
+HAND_OBSERVATION = "tianji/observation/hand/{side}"
+ARM_INPUT_OBSERVATION = "tianji/observation/arm_input/{side}"
 FRAME0_HAND_SKELETON = "tianji/diagnostics/h5/frame0_hand_skeleton"
 
 MOCAP_ALIGNED_HANDS = "mocap/aligned/hands"
@@ -41,6 +46,14 @@ def arm_target(side: str) -> str:
 
 def hand_target(side: str) -> str:
     return HAND_TARGET.format(side=_side(side))
+
+
+def hand_observation(side: str) -> str:
+    return HAND_OBSERVATION.format(side=_side(side))
+
+
+def arm_input_observation(side: str) -> str:
+    return ARM_INPUT_OBSERVATION.format(side=_side(side))
 
 
 def arm_proposal(side: str) -> str:
@@ -84,9 +97,12 @@ __all__ = [
     "COORDINATOR_STATUS", "AT_HOME", "RETURN_COMPLETE", "ARM_COMMAND",
     "HAND_COMMAND", "ARM_STATE", "HAND_STATE", "EXECUTOR_STATUS",
     "HAND_EXECUTOR_STATUS", "SAFETY_STOP", "SAFETY_ACK",
-    "RAW_MOCAP_LIVE", "RAW_H5_REPLAY",
+    "RAW_MOCAP_LIVE", "RAW_H5_REPLAY", "RAW_PICO_HAND_TRACKING",
+    "RAW_MANUS_HAND_TRACKING", "RAW_LEGACY_PICO_PALM", "HAND_OBSERVATION",
+    "ARM_INPUT_OBSERVATION",
     "FRAME0_HAND_SKELETON", "MOCAP_ALIGNED_HANDS", "MOCAP_HANDS_FRAME",
-    "MOCAP_RIGID_BODY_NAMES", "arm_target", "hand_target", "arm_proposal",
+    "MOCAP_RIGID_BODY_NAMES", "arm_target", "hand_target", "hand_observation",
+    "arm_input_observation", "arm_proposal",
     "arm_solved_pose", "arm_command", "hand_command", "hand_state",
     "hand_executor_status", "safety_ack",
 ]

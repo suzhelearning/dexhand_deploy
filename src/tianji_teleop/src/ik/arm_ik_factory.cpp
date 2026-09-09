@@ -1,4 +1,7 @@
 #include "tianji_teleop/ik/arm_ik_factory.hpp"
+#ifdef TIANJI_ENABLE_V131
+#include "tianji_teleop/ik/dexhand_qp_arm_ik.hpp"
+#endif
 
 #include "tianji_teleop/ik/pinocchio_cpp/pinocchio_arm_ik.hpp"
 #include "tianji_teleop/ik/pinocchio_qp/pinocchio_qp_arm_ik.hpp"
@@ -21,6 +24,11 @@ using Factory = std::function<std::unique_ptr<ArmIkSolver>(
 const std::map<std::string, Factory> & solver_factories()
 {
   static const std::map<std::string, Factory> factories{
+#ifdef TIANJI_ENABLE_V131
+    {"pico_ee_dexhand_qp", [](const ArmIkBackendOptions& o, const IkSettings& s) {
+      return std::make_unique<DexhandQpArmIk>(o.urdf_path, s);
+    }},
+#endif
     {
       "pinocchio_cpp",
       [](const ArmIkBackendOptions & options, const IkSettings & settings) {

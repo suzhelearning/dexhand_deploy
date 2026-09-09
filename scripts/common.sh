@@ -549,8 +549,8 @@ canonical_config() {
 }
 
 activate_bundle_runtime() {
-  if [[ ! -d "${BUNDLE_ROOT}/vendor/python" ||
-        ! -d "${ZENOH_LIBRARY_ROOT}" ]]; then
+  if [[ "${TIANJI_REQUIRED_CAPABILITY:-}" != simulation ]] &&
+     [[ ! -d "${BUNDLE_ROOT}/vendor/python" || ! -d "${ZENOH_LIBRARY_ROOT}" ]]; then
     printf '%s\n' \
       '错误：缺少随包运行环境（vendor/python、vendor/zenoh）。' >&2
     return 1

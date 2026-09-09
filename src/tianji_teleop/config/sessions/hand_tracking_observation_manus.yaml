@@ -1,0 +1,6 @@
+# Receive-only Manus + historical PICO arm-input session.
+source_config: sources/hand_tracking_observation_manus.yaml
+input_profile: manus
+required_capability: observation_only
+schema_name: tianji-teleop-session
+schema_version: "1.1"

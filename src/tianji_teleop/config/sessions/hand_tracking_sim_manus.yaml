@@ -1,0 +1,15 @@
+# Simulation session: Manus hand observations + historical TJVR arm input.
+# The target bridge remains the sole source authority for coordinator/IK.
+source_config: sources/hand_tracking_target_manus.yaml
+observation_config: sources/hand_tracking_observation_manus.yaml
+arm_producer_config: producers/ik.yaml
+arm_executor_config: executors/mujoco.yaml
+coordinator_config: coordinator/arm.yaml
+required_capability: simulation
+active_sides: [left, right]
+inactive_sides: []
+hand_mode: retarget
+hand_executor: wuji_hand2
+hand_overlay: none
+active_hand_sides: [left, right]
+arm_command_path: coordinator

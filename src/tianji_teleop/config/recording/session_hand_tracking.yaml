@@ -1,0 +1,6 @@
+# One passive recorder for a hand-tracking simulation session.
+# The recorder subscribes to raw source frames, canonical observations, arm/
+# hand targets, joint streams, and session events in the same HDF5 file.
+flush_interval_s: 1.0
+schema_name: tianji-teleop-session
+schema_version: "1.1"

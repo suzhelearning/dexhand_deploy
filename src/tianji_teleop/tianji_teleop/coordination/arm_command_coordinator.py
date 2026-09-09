@@ -77,6 +77,7 @@ class ArmRobotConfig:
 
     @classmethod
     def load(cls, path: str | os.PathLike[str] | None = None) -> "ArmRobotConfig":
+        path = path or os.environ.get("TIANJI_ARM_CONFIG")
         path = Path(path) if path else Path(__file__).resolve().parents[4] / "src" / "tianji_teleop" / "config" / "robot" / "arm.yaml"
         try:
             import yaml
@@ -153,6 +154,8 @@ class ArmCommandCoordinator:
         self._arm_state: _Timed | None = None
         self._arm_state_baseline: tuple[str, int] | None = None
         self._proposals: dict[str, _Timed] = {}
+        self._adopted_proposal_time_ns: dict[str, int] = {}
+        self._step_rejection: dict[str, Any] | None = None
         self._hand_status: dict[str, _Timed] = {}
         self._hand_status_baseline: dict[str, tuple[str, int]] = {}
         self._hand_state: dict[str, _Timed] = {}
@@ -277,11 +280,19 @@ class ArmCommandCoordinator:
                 value = yaml.safe_load(Path(raw).read_text(encoding="utf-8"))
             except Exception as exc:
                 raise ValueError(f"unable to load coordinator config {raw}: {exc}") from exc
-        if not isinstance(value, Mapping) or set(value) != set(required):
-            raise ValueError("coordinator config must contain only the eight canonical fields")
+        if not isinstance(value, Mapping) or not set(required) <= set(value) or set(value) - set(required) - {'command_step_clipping_enabled', 'command_step_time_window_s'}:
+            raise ValueError("coordinator config contains missing or unknown fields")
         result = {key: float(value[key]) for key in required}
         if any(not math.isfinite(x) or x <= 0.0 for x in result.values()):
             raise ValueError("coordinator config values must be finite and positive")
+        clipping = value.get('command_step_clipping_enabled', True)
+        if not isinstance(clipping, bool):
+            raise ValueError('command_step_clipping_enabled must be boolean')
+        result['command_step_clipping_enabled'] = clipping
+        window = value.get('command_step_time_window_s', 0.0)
+        if isinstance(window, bool) or not isinstance(window, (int, float)) or not math.isfinite(window) or not 0 <= window <= result['proposal_timeout_s']:
+            raise ValueError('command_step_time_window_s must be finite, nonnegative and <= proposal_timeout_s')
+        result['command_step_time_window_s'] = float(window)
         return result
 
     @property
@@ -539,6 +550,9 @@ class ArmCommandCoordinator:
             elif parsed.sequence <= old.value.sequence:
                 self._enter_fault("arm proposal sequence rollback")
                 return False
+            elif self.config['command_step_time_window_s'] > 0 and parsed.timestamp_ns < old.value.timestamp_ns:
+                self._enter_fault("arm proposal timestamp rollback")
+                return False
         self._proposals[parsed.side] = _Timed(parsed, observed_ns)
         return True
 
@@ -648,6 +662,8 @@ class ArmCommandCoordinator:
                 self._publish_session_snapshot()
                 return IntentResult(False, rejected, why)
             self._proposals.clear()
+            self._adopted_proposal_time_ns.clear()
+            self._step_rejection = None
             self._teleop_started_ns = now_ns
             self._state = self._next_state("teleop", "accepted", sequence)
             self._at_home = LatchedBool(1, self._sequence, self._state.timestamp_ns, False, self.publisher_instance_id, self.router_zid)
@@ -720,6 +736,7 @@ class ArmCommandCoordinator:
         home = list(getattr(self.robot, f"{side}_home_rad"))
         position = home
         if mode == "teleop" and side in set(self.profile.get("active_sides", ("left", "right"))):
+            self._adopted_proposal_time_ns.setdefault(side, timestamp_ns)
             if proposal is not None and self._fresh(proposal, timestamp_ns):
                 candidate = proposal.value
                 maximum_step = self.config["maximum_command_step_rad"]
@@ -727,15 +744,29 @@ class ArmCommandCoordinator:
                     old + max(-maximum_step, min(maximum_step, new - old))
                     for new, old in zip(candidate.position_rad, self._safe_command[side])
                 ]
+                if not self.config['command_step_clipping_enabled']:
+                    position = list(candidate.position_rad)
+                tracking_hold = candidate.diagnostics.get('tracking_hold') is True
+                if tracking_hold:
+                    position = list(self._safe_command[side])
                 proposal_seq, target_seq = candidate.sequence, candidate.target_sequence
+                # Heartbeats of the same proposal must not refresh its source
+                # clock. A partially clipped target has not yet been adopted.
+                stationary_failure_hold = candidate.diagnostics.get('hold') is True and position == self._safe_command[side]
+                if position == candidate.position_rad and not stationary_failure_hold and not tracking_hold:
+                    self._adopted_proposal_time_ns[side] = candidate.timestamp_ns
         elif mode == "returning":
             start = (self._return_start_command or self._safe_command)[side]
             elapsed = max(0.0, (timestamp_ns - (self._return_started_ns or timestamp_ns)) / 1e9)
             distance = max(abs(x - y) for x, y in zip(start, home))
             duration = max(self.config["home_minimum_duration_s"], distance / self.config["home_max_speed_rad_s"])
             fraction = min(1.0, elapsed / duration)
-            position = [x + fraction * (y - x) for x, y in zip(start, home)]
+            # Preserve the exact endpoint required by the Home/return barrier;
+            # x + 1 * (home - x) can differ from home by one floating-point ULP.
+            position = home if fraction >= 1.0 else [x + fraction * (y - x) for x, y in zip(start, home)]
         self._safe_command[side] = position
+        if mode != "teleop":
+            self._adopted_proposal_time_ns.pop(side, None)
         return ArmJointCommand(1, sequence, timestamp_ns, "coordinator", side, mode, proposal_seq, target_seq, list(ARM_JOINT_NAMES[side]), position, self.publisher_instance_id, self.router_zid)
 
     def _validate_proposals(self, now_ns: int) -> None:
@@ -747,12 +778,37 @@ class ArmCommandCoordinator:
             if timed is None or not self._fresh(timed, now_ns):
                 continue
             candidate = timed.value
+            tracking_hold = candidate.diagnostics.get('tracking_hold') is True
+            if tracking_hold and self.profile.get('required_capability', 'simulation') != 'simulation':
+                self._enter_fault("tracking hold is simulation-only")
+                return
             if not all(math.isfinite(x) and lo <= x <= hi for x, lo, hi in zip(candidate.position_rad, self.robot.lower_limits_rad, self.robot.upper_limits_rad)):
                 self._enter_fault("proposal exceeds hard joint limits or is nonfinite")
                 return
-            # ponytail: one control-tick transport lag; add timestamped state
-            # reconciliation if producer feedback can lag by more than one tick.
-            if any(abs(x - old) > 2.0 * self.config["maximum_command_step_rad"] for x, old in zip(candidate.position_rad, self._safe_command[side])):
+            allowed = 2.0 * self.config["maximum_command_step_rad"]
+            window = self.config['command_step_time_window_s']
+            elapsed_s = 0.0
+            if window > 0:
+                anchor = self._adopted_proposal_time_ns.get(side, self._teleop_started_ns)
+                if anchor is not None:
+                    elapsed_s = (candidate.timestamp_ns - anchor) / 1e9
+                    if elapsed_s < 0:
+                        self._enter_fault("arm proposal timestamp precedes adopted command")
+                        return
+                    speed = self.config['maximum_command_step_rad'] * self.config['rate_hz']
+                    allowed = max(allowed, speed * min(elapsed_s, window))
+                if not 0 <= now_ns-candidate.timestamp_ns <= self.config['proposal_timeout_s']*1e9:
+                    self._enter_fault("arm proposal source timestamp stale")
+                    return
+            if tracking_hold:
+                # Keep our own final command, never the producer's delayed
+                # feedback. Authority, freshness and hard bounds still apply.
+                continue
+            delta = max(abs(x - old) for x, old in zip(candidate.position_rad, self._safe_command[side]))
+            if delta > allowed + (1e-10 if window > 0 else 0.0):
+                self._step_rejection = {'side': side, 'delta_rad': delta,
+                    'allowed_rad': allowed, 'proposal_elapsed_s': elapsed_s,
+                    'time_window_s': window, 'proposal_sequence': candidate.sequence}
                 self._enter_fault("proposal exceeds maximum command step")
 
     def tick(self, *, now_ns: int | None = None) -> dict[str, ArmJointCommand]:
@@ -794,7 +850,10 @@ class ArmCommandCoordinator:
                 self._state.state != "fault",
                 [str(self.profile.get("required_capability", "simulation"))],
                 self._fault_reason if self._state.state == "fault" else None,
-                {"authority": "final_command_and_session_state"},
+                {"authority": "final_command_and_session_state",
+                 "command_step_clipping_enabled": self.config['command_step_clipping_enabled'],
+                 "command_step_time_window_s": self.config['command_step_time_window_s'],
+                 "step_rejection": self._step_rejection},
                 self.publisher_instance_id,
                 self.router_zid,
             )
@@ -925,6 +984,12 @@ def main() -> int:
     router = require_single_router(session, router)
     hand_mode = os.environ.get("TIANJI_HAND_MODE", "disabled")
     coordinator_config = os.environ.get("TIANJI_COORDINATOR_CONFIG")
+    clipping = os.environ.get('TIANJI_COMMAND_STEP_CLIPPING')
+    if clipping is not None:
+        if clipping not in ('true', 'false'):
+            raise ValueError('TIANJI_COMMAND_STEP_CLIPPING must be true or false')
+        coordinator_config = ArmCommandCoordinator._coordinator_config(coordinator_config)
+        coordinator_config['command_step_clipping_enabled'] = clipping == 'true'
     node = ArmCommandCoordinator(
         session,
         publisher_instance_id=instance,

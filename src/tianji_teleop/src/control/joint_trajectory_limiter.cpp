@@ -87,20 +87,37 @@ bool JointTrajectoryLimiter7::reset(const ArmMotionState & state) noexcept
 JointTrajectoryResult JointTrajectoryLimiter7::update(
   const ArmJointVector & target_velocity)
 {
+  return update_target(target_velocity, false);
+}
+
+JointTrajectoryResult JointTrajectoryLimiter7::update_position(
+  const ArmJointVector & target_position)
+{
+  return update_target(target_position, true);
+}
+
+JointTrajectoryResult JointTrajectoryLimiter7::update_target(
+  const ArmJointVector & target, bool position_mode)
+{
   JointTrajectoryResult result;
   result.state = state_;
-  if (!initialized_ || !target_velocity.allFinite()) {
+  if (!initialized_ || !target.allFinite() ||
+    (position_mode && ((target.array() < limits_.lower_position.array()).any() ||
+    (target.array() > limits_.upper_position.array()).any()))) {
     result.hard_failure = true;
     result.detail = "invalid_joint_trajectory_input";
     return result;
   }
+  const ArmJointVector target_velocity = position_mode ? ArmJointVector::Zero() : target;
   const ArmJointVector bounded_target_velocity = target_velocity.cwiseMax(
     -limits_.maximum_velocity).cwiseMin(limits_.maximum_velocity);
 
   input_.current_position = to_array(state_.position);
   input_.current_velocity = to_array(state_.velocity);
   input_.current_acceleration = to_array(state_.acceleration);
-  input_.target_position = to_array(state_.position);
+  input_.control_interface = position_mode ? ruckig::ControlInterface::Position :
+    ruckig::ControlInterface::Velocity;
+  input_.target_position = to_array(position_mode ? target : state_.position);
   input_.target_velocity = to_array(bounded_target_velocity);
   input_.target_acceleration = to_array(ArmJointVector::Zero());
   input_.max_velocity = to_array(limits_.maximum_velocity);
@@ -138,8 +155,9 @@ JointTrajectoryResult JointTrajectoryLimiter7::update(
   state_ = candidate;
   result.state = state_;
   result.accepted = true;
-  result.detail = update_result == ruckig::Result::Finished ?
-    "joint_velocity_finished" : "joint_velocity_working";
+  result.detail = position_mode ?
+    (update_result == ruckig::Result::Finished ? "joint_position_finished" : "joint_position_working") :
+    (update_result == ruckig::Result::Finished ? "joint_velocity_finished" : "joint_velocity_working");
   return result;
 }
 

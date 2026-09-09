@@ -1,0 +1,14 @@
+# Receive-only source settings.  Select exactly one profile here.
+input_profile: pico
+observation_only: true
+receiver_instance_id: hand-tracking-receiver
+print_interval_s: 1.0
+
+pico:
+  host: 127.0.0.1
+  port: 10002
+  reconnect_seconds: 1.0
+  adb_path: adb
+  adb_serial: null
+  adb_device_port: 10002
+  auto_adb_forward: true

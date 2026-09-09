@@ -12,7 +12,7 @@ while (($#)); do
     --source|--profile) source_id="${2:-}"; shift 2 ;;
     --config) config_override="${2:-}"; shift 2 ;;
     --help|-h)
-      printf '%s\n' '用法: run_source.sh --source {mocap_live|h5_replay|regrind_policy} [--config PATH] [参数...]'
+      printf '%s\n' '用法: run_source.sh --source {mocap_live|h5_replay|regrind_policy|hand_tracking_observation|hand_tracking_target|pico_capture|manus_capture} [--config PATH] [参数...]'
       exit 0 ;;
     --) shift; break ;;
     *) break ;;
@@ -29,6 +29,18 @@ case "${source_id}" in
   target_replay|joint_replay)
     entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/${source_id}"
     default_config="replay/${source_id%_replay}.yaml" ;;
+  hand_tracking_observation)
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/hand_tracking_observation"
+    default_config="sources/hand_tracking_observation.yaml" ;;
+  hand_tracking_target)
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/hand_tracking_target"
+    default_config="sources/hand_tracking_target.yaml" ;;
+  pico_capture)
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/pico_capture"
+    default_config="sources/hand_tracking_observation.yaml" ;;
+  manus_capture)
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/manus_capture"
+    default_config="sources/hand_tracking_observation_manus.yaml" ;;
   diagnostic_mocap_calibration)
     entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/mocap_calibration"
     default_config="diagnostics/mocap_calibration.yaml" ;;
@@ -44,7 +56,9 @@ fi
 export TIANJI_ROUTER_ENDPOINT="${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
 export TIANJI_ROUTER_ZID="${TIANJI_ROUTER_ZID:-$(require_router)}"
 export TIANJI_COMPONENT_INSTANCE_ID="${TIANJI_COMPONENT_INSTANCE_ID:-$(new_instance_id)}"
-export TIANJI_COORDINATOR_INSTANCE_ID="${TIANJI_COORDINATOR_INSTANCE_ID:?必须由run_session注入 TIANJI_COORDINATOR_INSTANCE_ID}"
+if [[ "${source_id}" != hand_tracking_observation && "${source_id}" != pico_capture && "${source_id}" != manus_capture ]]; then
+  export TIANJI_COORDINATOR_INSTANCE_ID="${TIANJI_COORDINATOR_INSTANCE_ID:?必须由run_session注入 TIANJI_COORDINATOR_INSTANCE_ID}"
+fi
 activate_bundle_runtime
 case "${source_id}" in
   target_replay|joint_replay)

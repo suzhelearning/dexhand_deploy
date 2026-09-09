@@ -16,6 +16,7 @@ export CXX=/usr/bin/g++
 cd "${BUNDLE_ROOT}"
 rm -rf build/ik
 cmake -S src/tianji_teleop -B build/ik \
+  -DTIANJI_ENABLE_V131=OFF \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_C_COMPILER=/usr/bin/gcc \
   -DCMAKE_CXX_COMPILER=/usr/bin/g++ \

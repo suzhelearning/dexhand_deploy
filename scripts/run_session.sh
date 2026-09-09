@@ -11,13 +11,33 @@ input_path=""
 confirm_real=false
 display_mode=""
 playback_speed=""
+observation_config_override=""
+disable_hands=false
+pico_overlay=false
+ik_target_overlay=false
+ik_backend_override=""
+joint_trajectory_override=""
+command_clipping_override=""
+target_processor_override=""
+pose_mapper_override=""
+joint_limit_source=""
 extra_args=()
 while (($#)); do
   case "$1" in
     --profile) profile="${2:-}"; shift 2 ;;
+    --disable-hands) disable_hands=true; shift ;;
+    --pico-overlay) pico_overlay=true; shift ;;
+    --ik-target-overlay) ik_target_overlay=true; shift ;;
+    --ik-backend) ik_backend_override="${2:?missing IK backend}"; shift 2 ;;
+    --joint-trajectory) joint_trajectory_override="${2:?missing trajectory processor}"; shift 2 ;;
+    --command-step-clipping) command_clipping_override="${2:?missing clipping mode}"; shift 2 ;;
+    --arm-target-processor) target_processor_override="${2:?missing target processor}"; shift 2 ;;
+    --arm-pose-mapper) pose_mapper_override="${2:?missing pose mapper}"; shift 2 ;;
+    --joint-limit-source) joint_limit_source="${2:?missing joint limit source}"; shift 2 ;;
     --record) record_path="${2:-}"; shift 2 ;;
     --h5|--input) input_path="${2:-}"; shift 2 ;;
     --speed) playback_speed="${2:-}"; shift 2 ;;
+    --observation-config) observation_config_override="${2:-}"; shift 2 ;;
     --confirm-real) confirm_real=true; shift ;;
     --viewer)
       [[ "${display_mode}" != headless ]] || {
@@ -37,8 +57,13 @@ while (($#)); do
       ;;
     --help|-h)
       printf '%s\n' \
-        '用法: run_session.sh --profile PROFILE [--record PATH] [--confirm-real] [--h5 PATH] [--speed RATE] [--viewer|--headless]' \
+        '用法: run_session.sh --profile PROFILE [--record PATH] [--observation-config PATH] [--disable-hands] [--confirm-real] [--h5 PATH] [--speed RATE] [--viewer|--headless]' \
         '显示模式：h5_sim 默认打开 MuJoCo viewer；追加 --headless 可显式启用无窗口模式。' \
+        'hand_tracking 仿真可选：--ik-backend NAME --joint-trajectory {passthrough|ruckig} --command-step-clipping {true|false} --arm-target-processor {passthrough|conditioned}' \
+        'PICO 仿真位姿映射：--arm-pose-mapper {relative_home|head_direct|head_palm_direct}（默认 relative_home）' \
+        'PICO 原始头显/手腕/26点骨架显示：--profile hand_tracking_sim --viewer --pico-overlay（兼容 --disable-hands）' \
+        'Dexhand QP 仿真限位来源：--joint-limit-source {yaml|urdf}（默认 yaml，保留硬限位检查）' \
+        'hand_tracking 仿真显示实际 IK 期望 TCP：--ik-target-overlay（可与 --pico-overlay 同用）' \
         'regrind_real 可用 --viewer 打开只读 frame0 对齐窗口；其他 profile 保持 executor config 默认。'
       exit 0 ;;
     --) shift; extra_args+=("$@"); break ;;
@@ -52,9 +77,74 @@ if [[ -z "${profile}" ]]; then
   exit 2
 fi
 case "${profile}" in
-  mocap_live_sim|mocap_live_real|h5_sim|h5_real|regrind_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim) ;;
+  mocap_live_sim|mocap_live_real|h5_sim|h5_real|regrind_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim|hand_tracking_observation|hand_tracking_observation_manus|hand_tracking_sim|hand_tracking_sim_manus) ;;
   *) printf '错误：未知 session profile: %s\n' "${profile}" >&2; exit 2 ;;
 esac
+if [[ -n "${pose_mapper_override}" ]]; then
+  if [[ "${profile}" != hand_tracking_sim ]]; then
+    printf '%s\n' '错误：--arm-pose-mapper 仅支持 PICO hand_tracking_sim。' >&2; exit 2
+  fi
+  case "${pose_mapper_override}" in
+    relative_home|head_direct|head_palm_direct) ;;
+    *) printf '%s\n' '错误：--arm-pose-mapper 必须为 relative_home、head_direct 或 head_palm_direct。' >&2; exit 2 ;;
+  esac
+fi
+# No inherited override may silently change another profile's mapping.
+unset TIANJI_ARM_POSE_MAPPER
+unset TIANJI_JOINT_TRAJECTORY_PROCESSOR TIANJI_COMMAND_STEP_CLIPPING TIANJI_ARM_TARGET_PROCESSOR
+[[ -z "${pose_mapper_override}" ]] || export TIANJI_ARM_POSE_MAPPER="${pose_mapper_override}"
+if [[ -n "${joint_limit_source}" ]]; then
+  case "${joint_limit_source}" in
+    yaml|urdf) ;;
+    *) printf '%s\n' '错误：--joint-limit-source 必须为 yaml 或 urdf。' >&2; exit 2 ;;
+  esac
+  if [[ "${profile}" != hand_tracking_sim && "${profile}" != hand_tracking_sim_manus ]]; then
+    printf '%s\n' '错误：--joint-limit-source 仅支持 hand_tracking 仿真。' >&2; exit 2
+  fi
+  if [[ "${joint_limit_source}" == urdf && "${ik_backend_override}" != pico_ee_dexhand_qp ]]; then
+    printf '%s\n' '错误：--joint-limit-source urdf 需要 --ik-backend pico_ee_dexhand_qp。' >&2; exit 2
+  fi
+fi
+if [[ "${pico_overlay}" == true && "${profile}" != hand_tracking_sim ]]; then
+  printf '%s\n' '错误：--pico-overlay 仅支持 hand_tracking_sim。' >&2
+  exit 2
+fi
+if [[ "${ik_target_overlay}" == true && "${profile}" != hand_tracking_sim && "${profile}" != hand_tracking_sim_manus ]]; then
+  printf '%s\n' '错误：--ik-target-overlay 仅支持 hand_tracking 仿真。' >&2
+  exit 2
+fi
+if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]]; then
+  [[ "${confirm_real}" != true ]] || {
+    printf '%s\n' '错误：hand_tracking_sim 是 simulation-only profile，不接受 --confirm-real。' >&2
+    exit 2
+  }
+fi
+if [[ "${profile}" == hand_tracking_observation || "${profile}" == hand_tracking_observation_manus ]]; then
+  if [[ -n "${input_path}" || -n "${playback_speed}" || "${confirm_real}" == true || "${display_mode}" == viewer || "${display_mode}" == headless ]]; then
+    printf '%s\n' '错误：hand_tracking_observation 只支持接收/发布/记录，不接受机器人或 viewer 参数。' >&2
+    exit 2
+  fi
+  if [[ -n "${observation_config_override}" ]]; then
+    observation_config="${observation_config_override}"
+  elif [[ "${profile}" == hand_tracking_observation_manus ]]; then
+    observation_config="${SCRIPT_DIR}/../src/tianji_teleop/config/sources/hand_tracking_observation_manus.yaml"
+  else
+    observation_config="${SCRIPT_DIR}/../src/tianji_teleop/config/sources/hand_tracking_observation.yaml"
+  fi
+  [[ -f "${observation_config}" ]] || {
+    printf '错误：缺少 observation config: %s\n' "${observation_config}" >&2
+    exit 1
+  }
+  if [[ "${profile}" == hand_tracking_observation_manus ]]; then
+    export TIANJI_REQUIRED_OBSERVATION_PROFILE=manus
+  else
+    export TIANJI_REQUIRED_OBSERVATION_PROFILE=pico
+  fi
+  observation_args=(--config "${observation_config}")
+  [[ -n "${record_path}" ]] && observation_args+=(--record "${record_path}")
+  ((${#extra_args[@]} == 0)) || observation_args+=(-- "${extra_args[@]}")
+  exec bash "${SCRIPT_DIR}/run_observation_session.sh" "${observation_args[@]}"
+fi
 if [[ "${profile}" == target_replay_sim || "${profile}" == joint_replay_sim || "${profile}" == wuji_direct_real ]]; then
   if [[ -n "${record_path}" ]]; then
     printf '%s\n' 'replay profile cannot be recorded' >&2
@@ -100,6 +190,7 @@ active_hand_sides="$(profile_value active_hand_sides)"
 hand_executor="$(profile_value hand_executor)"
 hand_executor_config="$(profile_value hand_executor_config)"
 hand_overlay="$(profile_value hand_overlay)"
+observation_config="$(profile_value observation_config)"
 [[ -n "${arm_command_path}" ]] || arm_command_path=coordinator
 if [[ "${arm_command_path}" != coordinator && "${arm_command_path}" != direct ]]; then
   printf '错误：非法 arm_command_path: %s\n' "${arm_command_path}" >&2
@@ -109,6 +200,31 @@ if [[ "${TIANJI_VALIDATION_PRODUCER:-}" == policy_hold && "${TIANJI_VALIDATION_C
   arm_producer_config="producers/policy_hold.yaml"
 fi
 forced_hand_mode="${TIANJI_VALIDATION_HAND_MODE:-}"
+if [[ -n "${ik_backend_override}${joint_trajectory_override}${command_clipping_override}${target_processor_override}" ]]; then
+  [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]] || {
+    printf '%s\n' '错误：IK/处理链覆盖参数只支持 hand_tracking 仿真。' >&2; exit 2;
+  }
+  case "${ik_backend_override}" in ""|pinocchio_qp|pinocchio_cpp|tianji_official|pico_ee_dexhand_qp) ;; *) exit 2 ;; esac
+  case "${joint_trajectory_override}" in ""|passthrough|ruckig) ;; *) exit 2 ;; esac
+  case "${command_clipping_override}" in ""|true|false) ;; *) exit 2 ;; esac
+  case "${target_processor_override}" in ""|passthrough|conditioned) ;; *) exit 2 ;; esac
+fi
+if [[ "${ik_backend_override}" == pico_ee_dexhand_qp ]]; then
+  arm_producer_config=producers/ik_dexhand_qp.yaml
+  coordinator_config=coordinator/arm_v131.yaml
+  joint_trajectory_override="${joint_trajectory_override:-passthrough}"
+  command_clipping_override="${command_clipping_override:-false}"
+  target_processor_override="${target_processor_override:-passthrough}"
+fi
+[[ -z "${joint_trajectory_override}" ]] || export TIANJI_JOINT_TRAJECTORY_PROCESSOR="${joint_trajectory_override}"
+[[ -z "${command_clipping_override}" ]] || export TIANJI_COMMAND_STEP_CLIPPING="${command_clipping_override}"
+[[ -z "${target_processor_override}" ]] || export TIANJI_ARM_TARGET_PROCESSOR="${target_processor_override}"
+if [[ "${disable_hands}" == true ]]; then
+  [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]] || {
+    printf '%s\n' '错误：--disable-hands 仅支持 hand_tracking 仿真。' >&2; exit 2;
+  }
+  forced_hand_mode=disabled
+fi
 if [[ -n "${forced_hand_mode}" && "${forced_hand_mode}" != disabled && "${forced_hand_mode}" != direct && "${forced_hand_mode}" != retarget ]]; then
   printf '错误：非法 validation hand mode: %s\n' "${forced_hand_mode}" >&2
   exit 2
@@ -122,6 +238,23 @@ if [[ -n "${forced_hand_mode}" ]]; then hand_mode="${forced_hand_mode}"; fi
   printf '%s\n' '错误：session profile 缺少 source/executor/coordinator config。' >&2
   exit 2
 }
+if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]]; then
+  if [[ -n "${observation_config_override}" ]]; then
+    observation_config="${observation_config_override}"
+    [[ -f "${observation_config}" ]] || { printf '错误：缺少 observation config: %s\n' "${observation_config}" >&2; exit 2; }
+  else
+    observation_config="$(canonical_config "${observation_config}")"
+  fi
+  [[ -n "${observation_config}" ]] || {
+    printf '%s\n' '错误：hand_tracking_sim profile 缺少 observation_config。' >&2
+    exit 2
+  }
+  [[ "${required_capability}" == simulation && ( "${hand_mode}" == disabled ||
+     ( "${hand_mode}" == retarget && "${hand_executor}" == wuji_hand2 ) ) ]] || {
+    printf '%s\n' '错误：hand_tracking_sim 只允许 simulation + (disabled 或 retarget + wuji_hand2)。' >&2
+    exit 2
+  }
+fi
 if [[ -z "${display_mode}" ]]; then
   if [[ "${profile}" == h5_sim ]]; then
     display_mode=viewer
@@ -202,11 +335,12 @@ if [[ -n "${record_path}" ]]; then
 fi
 source_name="$(basename -- "${source_config}" .yaml)"
 case "${source_name}" in
-  mocap_live|h5_replay|regrind_policy|target|joint|joint_real) ;;
+  mocap_live|h5_replay|regrind_policy|hand_tracking_target|hand_tracking_target_manus|target|joint|joint_real) ;;
   mocap_calibration) ;;
   *) printf '错误：source config 不在 canonical source/replay/diagnostic 树: %s\n' "${source_config}" >&2; exit 2 ;;
 esac
 case "${source_name}" in
+  hand_tracking_target_manus) source_id=hand_tracking_target ;;
   target) source_id=target_replay ;;
   joint|joint_real) source_id=joint_replay ;;
   mocap_calibration) source_id=diagnostic_mocap_calibration ;;
@@ -250,6 +384,16 @@ if [[ "${hand_mode}" == auto ]]; then hand_mode=retarget; fi
 run_id="${TIANJI_RUN_ID:-$(new_instance_id)}"
 coordinator_id="${TIANJI_COORDINATOR_INSTANCE_ID:-$(new_instance_id)}"
 source_instance="${TIANJI_SOURCE_INSTANCE_ID:-$(new_instance_id)}"
+observation_instance=""
+observation_profile=""
+if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]]; then
+  observation_instance="${TIANJI_OBSERVATION_INSTANCE_ID:-$(new_instance_id)}"
+  if [[ "${profile}" == hand_tracking_sim_manus ]]; then
+    observation_profile=manus
+  else
+    observation_profile=pico
+  fi
+fi
 arm_producer_instance=""
 arm_producer_id="arm_ik_producer"
 if [[ "${arm_producer_config}" == producers/policy_hold.yaml ]]; then
@@ -385,6 +529,7 @@ PY
 )"
 [[ -n "${authorities_json}" ]] || { printf '%s\n' '错误：无法构造完整 authority mapping。' >&2; exit 1; }
 export TIANJI_AUTHORITIES="${authorities_json}"
+export TIANJI_REQUIRED_CAPABILITY="${required_capability}"
 activate_bundle_runtime
 mode="simulation"
 [[ "${required_capability}" == real ]] && mode=real
@@ -485,6 +630,18 @@ launch() {
 }
 recorder_instance=""
 [[ -n "${record_path}" ]] && recorder_instance="${TIANJI_RECORDER_INSTANCE_ID:-$(new_instance_id)}"
+if [[ -n "${joint_limit_source}" ]]; then
+  export TIANJI_JOINT_LIMIT_SOURCE="${joint_limit_source}"
+  if [[ "${joint_limit_source}" == urdf ]]; then
+    export TIANJI_ARM_URDF="${TIANJI_ARM_URDF:-${BUNDLE_ROOT}/src/tianji_teleop/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf}"
+    effective_arm_config="${TELEOP_RUNTIME_DIR}/${run_id}-arm-limits.yaml"
+    PYTHONPATH="${BUNDLE_ROOT}/src/tianji_teleop${PYTHONPATH:+:${PYTHONPATH}}" pixi run python -m tianji_teleop.joint_limit_source \
+      --arm-config "${TIANJI_ARM_CONFIG:-$(canonical_config robot/arm.yaml)}" \
+      --urdf "${TIANJI_ARM_URDF}" --source urdf --output "${effective_arm_config}"
+    export TIANJI_ARM_CONFIG="${effective_arm_config}"
+    printf 'joint_limit_source=urdf; arm_config=%s; urdf=%s\n' "${TIANJI_ARM_CONFIG}" "${TIANJI_ARM_URDF}"
+  fi
+fi
 base_env=(
   "TIANJI_COORDINATOR_INSTANCE_ID=${coordinator_id}"
   "TIANJI_ROUTER_ENDPOINT=${TIANJI_ROUTER_ENDPOINT}"
@@ -501,6 +658,8 @@ base_env=(
   "TIANJI_HAND_INPUT_INSTANCE_ID=${hand_input_instance}"
   "TIANJI_SOURCE_LOGICAL_ID=${source_id}"
   "TIANJI_SOURCE_INSTANCE_ID=${source_instance}"
+  "TIANJI_OBSERVATION_PUBLISHER_INSTANCE_ID=${observation_instance}"
+  "TIANJI_REQUIRED_OBSERVATION_PROFILE=${observation_profile}"
   "TIANJI_ARM_COMMAND_PATH=${arm_command_path}"
   "TIANJI_ARM_PRODUCER_LOGICAL_ID=${arm_producer_id}"
   "TIANJI_ARM_PRODUCER_INSTANCE_ID=${arm_producer_instance}"
@@ -521,7 +680,25 @@ if [[ "${required_capability}" == real ]]; then
   )
 fi
 if [[ -n "${record_path}" ]]; then
-  launch recorder "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${recorder_instance}" TIANJI_RECORD_PATH="${record_path}" TIANJI_RECORD_SOURCE_TYPE="${source_id}" TIANJI_RECORDING_CONFIG="$(canonical_config recording/session.yaml)" python -m tianji_teleop.recording.session_recorder
+  record_source_type="${source_id}"
+  record_input_profile=""
+  recording_config_path="$(canonical_config recording/session.yaml)"
+  if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]]; then
+    # A hand-tracking simulation has two source processes: the observation
+    # receiver and the target bridge.  The recorder is passive and owns the
+    # only HDF5 writer, while the session profile identifies the extended
+    # source type and input profile.
+    record_source_type="${profile}"
+    record_input_profile="${observation_profile}"
+    recording_config_path="$(canonical_config recording/session_hand_tracking.yaml)"
+  fi
+  launch recorder "${base_env[@]}" \
+    TIANJI_COMPONENT_INSTANCE_ID="${recorder_instance}" \
+    TIANJI_RECORD_PATH="${record_path}" \
+    TIANJI_RECORD_SOURCE_TYPE="${record_source_type}" \
+    TIANJI_RECORD_INPUT_PROFILE="${record_input_profile}" \
+    TIANJI_RECORDING_CONFIG="${recording_config_path}" \
+    python -m tianji_teleop.recording.session_recorder
 fi
 launch coordinator "${base_env[@]}" TIANJI_COORDINATOR_INSTANCE_ID="${coordinator_id}" TIANJI_COORDINATOR_CONFIG="$(canonical_config "${coordinator_config}")" python "${BUNDLE_ROOT}/src/tianji_teleop/scripts/arm_command_coordinator"
 if [[ "${regrind_alignment_viewer}" == true ]]; then
@@ -554,6 +731,18 @@ elif [[ "${source_id}" == target_replay || "${source_id}" == joint_replay ]]; th
   source_args+=(-- "${input_path}" --active-hand-sides "${active_hand_sides}" --inactive-hand-sides "${inactive_sides}")
 fi
 source_args+=("${extra_args[@]}")
+observation_args=()
+if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]]; then
+  observation_args=(
+    "${base_env[@]}"
+    "TIANJI_COMPONENT_INSTANCE_ID=${observation_instance}"
+    "TIANJI_SOURCE_INSTANCE_ID=${observation_instance}"
+    bash "${SCRIPT_DIR}/run_source.sh"
+    --source hand_tracking_observation
+    --config "${observation_config}"
+    --suppress-status
+  )
+fi
 launch_arm_executor() {
   local hand_args=()
   if [[ "${hand_overlay}" == mujoco && -n "${active_hand_sides}" ]]; then
@@ -562,6 +751,8 @@ launch_arm_executor() {
     # Wuji is the sole hand executor authority for hand-enabled sim/replay.
     hand_args+=(--hand-sides "")
   fi
+  [[ "${pico_overlay}" != true ]] || hand_args+=(--pico-overlay)
+  [[ "${ik_target_overlay}" != true ]] || hand_args+=(--ik-target-overlay)
   if [[ "${arm_executor_config}" == executors/mujoco.yaml ]]; then
     launch arm_executor "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_executor_instance}" bash "${SCRIPT_DIR}/run_executor.sh" --executor mujoco --config "$(canonical_config "${arm_executor_config}")" "${arm_display_args[@]}" "${hand_args[@]}"
   else
@@ -583,8 +774,12 @@ launch_hand_executor() {
 launch_arm_producer() {
   [[ -n "${arm_producer_config}" && "${arm_producer_config}" != null ]] || return 0
   producer_name="$(basename -- "${arm_producer_config}" .yaml)"
-  [[ "${producer_name}" == ik_regrind ]] && producer_name=ik
-  launch arm_producer "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_producer_instance}" bash "${SCRIPT_DIR}/run_producer.sh" --producer "${producer_name}" --config "$(canonical_config "${arm_producer_config}")"
+  [[ "${producer_name}" == ik_regrind || "${producer_name}" == ik_dexhand_qp ]] && producer_name=ik
+  launch arm_producer "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_producer_instance}" bash "${SCRIPT_DIR}/run_producer.sh" --producer "${producer_name}" --backend "${ik_backend_override}" --config "$(canonical_config "${arm_producer_config}")"
+}
+launch_hand_tracking_observation() {
+  [[ -n "${observation_config}" ]] || return 0
+  launch hand_tracking_observation "${observation_args[@]}"
 }
 if [[ "${required_capability}" == real ]]; then
   launch_arm_producer
@@ -595,6 +790,7 @@ else
   launch_arm_executor
   launch_hand_executor
   launch_arm_producer
+  launch_hand_tracking_observation
   launch source "${source_args[@]}"
 fi
 printf '%s\n' "session ${profile} started; router_zid=${router_zid}; run_id=${run_id}"

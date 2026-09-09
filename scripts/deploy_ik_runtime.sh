@@ -43,6 +43,17 @@ RUNTIME_PYTHON="${BUNDLE_ROOT}/runtime/tianji_teleop/lib/python3.10/site-package
 STAGING_PYTHON="${BUNDLE_ROOT}/staging/ik/lib/python3.10/site-packages/tianji_teleop"
 STRIP_TOOL="${IK_STRIP_TOOL:-/usr/bin/strip}"
 
+# Never copy a host-native simulation binary into the portable ABI bundle.
+# Check before backup/cleanup/copy: even legacy backend selection cannot avoid
+# the dynamic loader's unconditional dependencies in a v131-enabled binary.
+if [[ -f "${NEW_IK}" ]]; then
+  ik_dynamic_dependencies="$(readelf -d "${NEW_IK}")"
+  if grep -Eq 'libmujoco|libqpOASES' <<< "${ik_dynamic_dependencies}"; then
+    printf '%s\n' '错误：staging 含本机 v131 依赖，不能部署到便携 runtime；请先运行 build-ik（TIANJI_ENABLE_V131=OFF）。' >&2
+    exit 1
+  fi
+fi
+
 for binary in "${NEW_IK}" "${NEW_PROBE}" "${NEW_WORKER}" "${NEW_BRIDGE}" "${NEW_MARVIN_NATIVE}"; do
   if [[ ! -x "${binary}" ]]; then
     printf '错误：请先执行 pixi run -e ik-build build-ik；缺少 %s\n' \

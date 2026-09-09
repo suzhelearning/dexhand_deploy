@@ -275,7 +275,8 @@ def load_tianji_config():
             "config",
             "tianji_robot.yaml",
         )
-        return TianjiConfig.load(config_path)
+        if os.path.isfile(config_path):
+            return TianjiConfig.load(config_path)
     # 回退：本文件位于 <root>/src/tianji_teleop/tianji_teleop/
     here = os.path.dirname(os.path.abspath(__file__))
     fallback = os.path.join(
@@ -289,7 +290,11 @@ def load_tianji_config():
         "config",
         "tianji_robot.yaml",
     )
-    return TianjiConfig.load(fallback)
+    if os.path.isfile(fallback):
+        return TianjiConfig.load(fallback)
+    # Source and installed bundles carry the pure compatibility package and
+    # its canonical config; do not require the old ignored vendor directory.
+    return TianjiConfig.load(use_ros=False)
 
 
 def parse_cli_args(

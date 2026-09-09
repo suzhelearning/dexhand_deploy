@@ -1,7 +1,7 @@
 """Append-only Tianji session-v1 HDF5 storage."""
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import json
 from pathlib import Path
 import time
@@ -16,13 +16,29 @@ from ..protocol.messages import (
     SessionState, ARM_JOINT_NAMES, HAND_JOINT_NAMES,
     ALL_ARM_JOINT_NAMES,
 )
+from ..hand_tracking.models import (
+    ArmInputObservation as ArmInputObservationModel,
+    HandObservation,
+    LegacyPicoPalmFrame,
+    ManusRawFrame,
+    PICO_JOINT_NAMES,
+    PicoRawFrame,
+    SIDES as HAND_TRACKING_SIDES,
+)
 
 SCHEMA_NAME = "tianji-teleop-session"
 SCHEMA_VERSION = "1.0"
+EXTENDED_SCHEMA_VERSION = "1.1"
 SOURCE_TYPES = frozenset({"mocap_live", "h5_replay", "target_replay", "joint_replay"})
+EXTENDED_SOURCE_TYPES = frozenset({
+    "hand_tracking_observation",
+    "hand_tracking_sim",
+    "hand_tracking_sim_manus",
+})
 _LEGACY_CONTROLLER_GROUP = "pico_controller"
 SIDES = ("left", "right")
 _STRING = h5py.string_dtype(encoding="utf-8")
+_UINT8_VECTOR = h5py.vlen_dtype(np.dtype("uint8"))
 
 
 class SessionH5Error(ValueError):
@@ -44,7 +60,7 @@ def _text(value: Any) -> str:
 
 
 def _json_text(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
 def _empty_dataset(group: h5py.Group, name: str, shape: tuple[int, ...] = (), *, dtype: Any = np.float64) -> h5py.Dataset:
@@ -95,15 +111,27 @@ class SessionH5Writer:
         schema_version: str = SCHEMA_VERSION,
         overwrite: bool = False,
         clock: Any = time.monotonic_ns,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        if source_type not in SOURCE_TYPES:
+        if source_type not in SOURCE_TYPES | EXTENDED_SOURCE_TYPES:
             raise SessionH5Error(f"unsupported source_type: {source_type}")
         if not robot_model or not router_zid:
             raise SessionH5Error("robot_model and router_zid are required")
         if flush_interval_s <= 0:
             raise SessionH5Error("flush_interval_s must be positive")
-        if schema_name != SCHEMA_NAME or schema_version != SCHEMA_VERSION:
+        if schema_name != SCHEMA_NAME or schema_version not in (SCHEMA_VERSION, EXTENDED_SCHEMA_VERSION):
             raise SessionH5Error("unsupported session HDF5 schema")
+        if schema_version == SCHEMA_VERSION and source_type not in SOURCE_TYPES:
+            raise SessionH5Error("schema 1.0 only supports legacy session source types")
+        if schema_version == EXTENDED_SCHEMA_VERSION and source_type not in EXTENDED_SOURCE_TYPES:
+            raise SessionH5Error("schema 1.1 requires an extended hand-tracking source type")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise SessionH5Error("session metadata must be a mapping")
+        metadata_value = dict(metadata or {})
+        try:
+            _json_text(metadata_value)
+        except (TypeError, ValueError) as exc:
+            raise SessionH5Error("session metadata must be JSON serializable") from exc
         self.path = Path(path)
         if self.path.exists() and not overwrite:
             raise FileExistsError(f"refusing to overwrite existing recording: {self.path}")
@@ -117,6 +145,7 @@ class SessionH5Writer:
         self._timeline_start: int | None = None
         self._schema_name = schema_name
         self._schema_version = schema_version
+        self._metadata = metadata_value
         self._initialize_layout(source_type, robot_model, router_zid)
     def _initialize_layout(self, source_type: str, robot_model: str, router_zid: str) -> None:
         self._file.attrs.update(
@@ -154,6 +183,157 @@ class SessionH5Writer:
             for name, shape, dtype in (("time_ns", (), np.int64), ("publisher_instance_id", (), _STRING), ("sequence", (), np.int64), ("position_rad", (20,), np.float64), ("velocity_rad_s", (20,), np.float64), ("velocity_valid", (), np.bool_)): _empty_dataset(hg, name, shape, dtype=dtype)
         events = self._file.create_group("meta").create_group("session_events")
         for name, shape, dtype in (("time_ns", (), np.int64), ("publisher_instance_id", (), _STRING), ("state", (), _STRING), ("reason", (), _STRING), ("source", (), _STRING), ("intent_sequence", (), np.int64), ("intent_sequence_valid", (), np.bool_)): _empty_dataset(events, name, shape, dtype=dtype)
+        if self._schema_version == EXTENDED_SCHEMA_VERSION:
+            self._initialize_hand_tracking_layout()
+            metadata_group = self._file["meta"].create_group("hand_tracking")
+            metadata_group.attrs["metadata_json"] = _json_text(self._metadata)
+
+    def _initialize_hand_tracking_layout(self) -> None:
+        """Add the receive-only hand-tracking streams used by schema 1.1.
+
+        The legacy groups remain present in a 1.1 file so existing session
+        tooling can still inspect the common target/joint streams.  The new
+        groups deliberately keep source frames, converted observations, and
+        arm-input poses separate; no target or command dataset is populated by
+        this layer.
+        """
+        for side in SIDES:
+            _empty_dataset(self._file[f"target/arm/{side}"], "tracking_valid", (), dtype=np.bool_)
+        raw = self._file["raw"]
+
+        pico = raw.create_group("pico_hand_tracking")
+        for name, shape, dtype in (
+            ("time_ns", (), np.int64),
+            ("source_time_ns", (), np.int64),
+            ("source_time_valid", (), np.bool_),
+            ("source_timestamp_ms", (), np.int64),
+            ("protocol_version", (), np.uint8),
+            ("flags", (), np.uint8),
+            ("joint_count", (), np.uint8),
+            ("head_valid", (), np.bool_),
+            ("head_pose", (7,), np.float64),
+            ("receiver_instance_id", (), _STRING),
+            ("connection_generation", (), np.int64),
+            ("receiver_frame_sequence", (), np.int64),
+            ("association_id", (), _STRING),
+            ("raw_packet", (), _UINT8_VECTOR),
+        ):
+            _empty_dataset(pico, name, shape, dtype=dtype)
+        pico.attrs["source"] = "pico2"
+        pico_hands = pico.create_group("hands")
+        for side in SIDES:
+            hand = pico_hands.create_group(side)
+            hand.attrs.update(side=side, joint_names=_json_text(list(PICO_JOINT_NAMES)))
+            for name, shape, dtype in (
+                ("valid", (), np.bool_),
+                ("wrist_valid", (), np.bool_),
+                ("wrist_pose", (7,), np.float64),
+                ("joint_valid", (26,), np.bool_),
+                ("joint_poses", (26, 7), np.float64),
+                ("joint_radii_m", (26,), np.float64),
+            ):
+                _empty_dataset(hand, name, shape, dtype=dtype)
+
+        manus = raw.create_group("manus_hand_tracking")
+        for name, shape, dtype in (
+            ("time_ns", (), np.int64),
+            ("source_time_ns", (), np.int64),
+            ("source_time_valid", (), np.bool_),
+            ("source_sequence", (), np.int64),
+            ("sdk_publish_time", (), np.int64),
+            ("glove_id", (), _STRING),
+            ("side", (), _STRING),
+            ("receiver_instance_id", (), _STRING),
+            ("receiver_frame_sequence", (), np.int64),
+            ("association_id", (), _STRING),
+            ("node_count", (), np.int64),
+            ("node_valid", (64,), np.bool_),
+            ("node_positions", (64, 3), np.float64),
+            ("node_quaternions_wxyz", (64, 4), np.float64),
+            ("node_semantics_json", (), _STRING),
+            ("payload_json", (), _STRING),
+        ):
+            _empty_dataset(manus, name, shape, dtype=dtype)
+        manus.attrs["source"] = "manus"
+
+        legacy = raw.create_group("legacy_pico_palm")
+        for name, shape, dtype in (
+            ("time_ns", (), np.int64),
+            ("source_time_ns", (), np.int64),
+            ("source_time_valid", (), np.bool_),
+            ("protocol_version", (), np.uint8),
+            ("packet_size", (), np.int64),
+            ("flags", (), np.int64),
+            ("source_sequence", (), np.int64),
+            ("tracking_epoch", (), np.int64),
+            ("bridge_send_monotonic_ns", (), np.int64),
+            ("receiver_instance_id", (), _STRING),
+            ("receiver_frame_sequence", (), np.int64),
+            ("association_id", (), _STRING),
+            ("raw_packet", (), _UINT8_VECTOR),
+            ("left_valid", (), np.bool_),
+            ("right_valid", (), np.bool_),
+            ("left_pose", (7,), np.float64),
+            ("right_pose", (7,), np.float64),
+            ("upper_limb_skeleton_valid", (), np.bool_),
+            ("upper_limb_rotations_valid", (), np.bool_),
+            ("upper_limb_points", (8, 3), np.float64),
+            ("upper_limb_rotations_xyzw", (8, 4), np.float64),
+        ):
+            _empty_dataset(legacy, name, shape, dtype=dtype)
+        legacy.attrs["source"] = "pico_manus_teleop_experiments"
+
+        observation = self._file.create_group("observation")
+        hand_observation = observation.create_group("hand_tracking")
+        arm_observation = observation.create_group("arm_input")
+        hand_specs = (
+            ("time_ns", (), np.int64),
+            ("source_time_ns", (), np.int64),
+            ("source_time_valid", (), np.bool_),
+            ("received_timestamp_ns", (), np.int64),
+            ("source", (), _STRING),
+            ("source_instance_id", (), _STRING),
+            ("source_sequence", (), np.int64),
+            ("source_sequence_valid", (), np.bool_),
+            ("receiver_instance_id", (), _STRING),
+            ("receiver_frame_sequence", (), np.int64),
+            ("coordinate_frame", (), _STRING),
+            ("mapping_version", (), _STRING),
+            ("valid", (), np.bool_),
+            ("joint_valid", (21,), np.bool_),
+            ("keypoints_m", (21, 3), np.float64),
+            ("wrist_pose", (7,), np.float64),
+            ("wrist_pose_valid", (), np.bool_),
+            ("frame_association_id", (), _STRING),
+        )
+        arm_specs = (
+            ("time_ns", (), np.int64),
+            ("source_time_ns", (), np.int64),
+            ("source_time_valid", (), np.bool_),
+            ("received_timestamp_ns", (), np.int64),
+            ("source", (), _STRING),
+            ("tracked_frame", (), _STRING),
+            ("reference_frame", (), _STRING),
+            ("source_instance_id", (), _STRING),
+            ("source_sequence", (), np.int64),
+            ("source_sequence_valid", (), np.bool_),
+            ("receiver_instance_id", (), _STRING),
+            ("receiver_frame_sequence", (), np.int64),
+            ("mapping_version", (), _STRING),
+            ("pose", (7,), np.float64),
+            ("pose_valid", (), np.bool_),
+            ("valid", (), np.bool_),
+            ("frame_association_id", (), _STRING),
+        )
+        for side in SIDES:
+            hand_group = hand_observation.create_group(side)
+            arm_group = arm_observation.create_group(side)
+            hand_group.attrs["side"] = side
+            arm_group.attrs["side"] = side
+            for name, shape, dtype in hand_specs:
+                _empty_dataset(hand_group, name, shape, dtype=dtype)
+            for name, shape, dtype in arm_specs:
+                _empty_dataset(arm_group, name, shape, dtype=dtype)
 
     def _record_time(self, received_time_ns: int | None) -> int:
         value = _time_value(received_time_ns, self._clock)
@@ -194,9 +374,211 @@ class SessionH5Writer:
             elif "wuji2_joints" in hand: _append(hand["wuji2_joints"], np.full(20, np.nan))
         self._maybe_flush()
 
+    def _require_extended(self) -> None:
+        if self._schema_version != EXTENDED_SCHEMA_VERSION:
+            raise SessionH5Error("hand-tracking records require session HDF5 schema 1.1")
+
+    def append_raw_pico(self, frame: PicoRawFrame, received_time_ns: int | None = None) -> None:
+        """Append the complete decoded PICO frame, including its wire bytes."""
+        self._require_extended()
+        if not isinstance(frame, PicoRawFrame):
+            raise TypeError("frame must be PicoRawFrame")
+        group = self._file["raw/pico_hand_tracking"]
+        receive = self._record_time(
+            frame.received_timestamp_ns if received_time_ns is None else received_time_ns
+        )
+        source_time, source_valid = _source_time(frame.source_timestamp_ns)
+        _append(group["time_ns"], receive)
+        _append(group["source_time_ns"], source_time)
+        _append(group["source_time_valid"], source_valid)
+        _append(group["source_timestamp_ms"], frame.source_timestamp_ms)
+        _append(group["protocol_version"], frame.protocol_version)
+        _append(group["flags"], frame.flags)
+        _append(group["joint_count"], frame.joint_count)
+        _append(group["head_valid"], bool(frame.head_valid))
+        _append(group["head_pose"], _finite(frame.head_pose, "head_pose"))
+        _append(group["receiver_instance_id"], frame.receiver_instance_id)
+        _append(group["connection_generation"], frame.connection_generation)
+        _append(group["receiver_frame_sequence"], frame.receiver_frame_sequence)
+        _append(group["association_id"], frame.association_id)
+        _append(group["raw_packet"], np.frombuffer(frame.raw_packet, dtype=np.uint8))
+        for side in SIDES:
+            source_hand = frame.hands[side]
+            hand = group["hands"][side]
+            _append(hand["valid"], bool(source_hand.valid))
+            _append(hand["wrist_valid"], bool(source_hand.wrist_valid))
+            _append(hand["wrist_pose"], _finite(source_hand.wrist_pose, f"{side}_wrist_pose"))
+            _append(hand["joint_valid"], [bool(joint.valid) for joint in source_hand.joints])
+            _append(
+                hand["joint_poses"],
+                np.asarray([_finite(joint.pose, f"{side}_joint_pose") for joint in source_hand.joints]),
+            )
+            _append(
+                hand["joint_radii_m"],
+                np.asarray([joint.radius_m for joint in source_hand.joints], dtype=np.float64),
+            )
+        self._maybe_flush()
+
+    def append_raw_manus(self, frame: ManusRawFrame, received_time_ns: int | None = None) -> None:
+        """Append the complete normalized Manus source frame."""
+        self._require_extended()
+        if not isinstance(frame, ManusRawFrame):
+            raise TypeError("frame must be ManusRawFrame")
+        group = self._file["raw/manus_hand_tracking"]
+        receive = self._record_time(
+            frame.received_timestamp_ns if received_time_ns is None else received_time_ns
+        )
+        source_time, source_valid = _source_time(frame.source_monotonic_ns)
+        count = frame.node_positions.shape[0]
+        positions = np.full((64, 3), np.nan, dtype=np.float64)
+        quaternions = np.full((64, 4), np.nan, dtype=np.float64)
+        valid = np.zeros(64, dtype=np.bool_)
+        positions[:count] = _finite(frame.node_positions, "node_positions")
+        quaternions[:count] = _finite(frame.node_quaternions_wxyz, "node_quaternions_wxyz")
+        valid[:count] = True
+        for name, value in (
+            ("time_ns", receive),
+            ("source_time_ns", source_time),
+            ("source_time_valid", source_valid),
+            ("source_sequence", frame.source_sequence),
+            ("sdk_publish_time", frame.sdk_publish_time),
+            ("glove_id", frame.glove_id),
+            ("side", frame.side),
+            ("receiver_instance_id", frame.receiver_instance_id),
+            ("receiver_frame_sequence", frame.receiver_frame_sequence),
+            ("association_id", frame.association_id),
+            ("node_count", count),
+            ("node_valid", valid),
+            ("node_positions", positions),
+            ("node_quaternions_wxyz", quaternions),
+            ("node_semantics_json", _json_text([dict(item) for item in frame.node_semantics])),
+            ("payload_json", _json_text(frame.to_dict())),
+        ):
+            _append(group[name], value)
+        self._maybe_flush()
+
+    def append_raw_legacy_palm(self, frame: LegacyPicoPalmFrame, received_time_ns: int | None = None) -> None:
+        """Append one historical TJVR arm/palm datagram without control use."""
+        self._require_extended()
+        if not isinstance(frame, LegacyPicoPalmFrame):
+            raise TypeError("frame must be LegacyPicoPalmFrame")
+        group = self._file["raw/legacy_pico_palm"]
+        receive = self._record_time(
+            frame.received_timestamp_ns if received_time_ns is None else received_time_ns
+        )
+        source_time, source_valid = _source_time(frame.source_timestamp_ns)
+        values = (
+            ("time_ns", receive),
+            ("source_time_ns", source_time),
+            ("source_time_valid", source_valid),
+            ("protocol_version", frame.protocol_version),
+            ("packet_size", frame.packet_size),
+            ("flags", frame.flags),
+            ("source_sequence", frame.sequence),
+            ("tracking_epoch", frame.tracking_epoch),
+            ("bridge_send_monotonic_ns", frame.bridge_send_monotonic_ns),
+            ("receiver_instance_id", frame.receiver_instance_id),
+            ("receiver_frame_sequence", frame.receiver_frame_sequence),
+            ("association_id", frame.association_id),
+            ("raw_packet", np.frombuffer(frame.raw_packet, dtype=np.uint8)),
+            ("left_valid", True),
+            ("right_valid", True),
+            ("left_pose", _finite(frame.left_pose, "left_pose")),
+            ("right_pose", _finite(frame.right_pose, "right_pose")),
+            ("upper_limb_skeleton_valid", bool(frame.upper_limb_skeleton_valid)),
+            ("upper_limb_rotations_valid", bool(frame.upper_limb_rotations_valid)),
+            ("upper_limb_points", _finite(frame.upper_limb_points, "upper_limb_points")),
+            ("upper_limb_rotations_xyzw", _finite(frame.upper_limb_rotations_xyzw, "upper_limb_rotations_xyzw")),
+        )
+        for name, value in values:
+            _append(group[name], value)
+        self._maybe_flush()
+
+    @staticmethod
+    def _append_nullable_sequence(group: h5py.Group, sequence: int | None) -> None:
+        _append(group["source_sequence"], -1 if sequence is None else sequence)
+        _append(group["source_sequence_valid"], sequence is not None)
+
+    def append_hand_observation(
+        self,
+        observation: HandObservation,
+        received_time_ns: int | None = None,
+    ) -> None:
+        self._require_extended()
+        if not isinstance(observation, HandObservation):
+            raise TypeError("observation must be hand_tracking.models.HandObservation")
+        group = self._file["observation/hand_tracking"][observation.side]
+        receive = self._record_time(
+            observation.received_timestamp_ns if received_time_ns is None else received_time_ns
+        )
+        source_time, source_valid = _source_time(observation.source_timestamp_ns)
+        _append(group["time_ns"], receive)
+        _append(group["source_time_ns"], source_time)
+        _append(group["source_time_valid"], source_valid)
+        _append(group["received_timestamp_ns"], observation.received_timestamp_ns)
+        _append(group["source"], observation.source)
+        _append(group["source_instance_id"], observation.source_instance_id)
+        self._append_nullable_sequence(group, observation.source_sequence)
+        _append(group["receiver_instance_id"], observation.receiver_instance_id)
+        _append(group["receiver_frame_sequence"], observation.receiver_frame_sequence)
+        _append(group["coordinate_frame"], observation.coordinate_frame)
+        _append(group["mapping_version"], observation.mapping_version)
+        _append(group["valid"], bool(observation.valid))
+        _append(group["joint_valid"], observation.joint_valid)
+        _append(group["keypoints_m"], _finite(observation.keypoints_m, "keypoints_m"))
+        wrist_valid = observation.wrist_pose is not None
+        _append(
+            group["wrist_pose"],
+            _finite(observation.wrist_pose, "wrist_pose") if wrist_valid else np.full(7, np.nan),
+        )
+        _append(group["wrist_pose_valid"], wrist_valid)
+        _append(group["frame_association_id"], observation.frame_association_id)
+        self._maybe_flush()
+
+    def append_arm_input_observation(
+        self,
+        observation: ArmInputObservationModel,
+        received_time_ns: int | None = None,
+    ) -> None:
+        self._require_extended()
+        if not isinstance(observation, ArmInputObservationModel):
+            raise TypeError("observation must hand_tracking.models.ArmInputObservation")
+        group = self._file["observation/arm_input"][observation.side]
+        receive = self._record_time(
+            observation.received_timestamp_ns if received_time_ns is None else received_time_ns
+        )
+        source_time, source_valid = _source_time(observation.source_timestamp_ns)
+        _append(group["time_ns"], receive)
+        _append(group["source_time_ns"], source_time)
+        _append(group["source_time_valid"], source_valid)
+        _append(group["received_timestamp_ns"], observation.received_timestamp_ns)
+        _append(group["source"], observation.source)
+        _append(group["tracked_frame"], observation.tracked_frame)
+        _append(group["reference_frame"], observation.reference_frame)
+        _append(group["source_instance_id"], observation.source_instance_id)
+        self._append_nullable_sequence(group, observation.source_sequence)
+        _append(group["receiver_instance_id"], observation.receiver_instance_id)
+        _append(group["receiver_frame_sequence"], observation.receiver_frame_sequence)
+        _append(group["mapping_version"], observation.mapping_version)
+        pose_valid = observation.pose is not None
+        _append(group["pose"], _finite(observation.pose, "pose") if pose_valid else np.full(7, np.nan))
+        _append(group["pose_valid"], pose_valid)
+        _append(group["valid"], bool(observation.valid))
+        _append(group["frame_association_id"], observation.frame_association_id)
+        self._maybe_flush()
+
     def append_arm_target(self, target: ArmTargetCommand, received_time_ns: int | None = None) -> None:
         if not isinstance(target, ArmTargetCommand): raise TypeError("target must be ArmTargetCommand")
-        group = self._file["target/arm"][target.side]; self._common(group, self._record_time(received_time_ns), target.source_timestamp_ns, target.envelope.publisher_instance_id, target.envelope.sequence); group.attrs.update(frame_id=target.frame_id, source=target.source); _append(group["pose"], target.position_m + target.orientation_xyzw); _append(group["elbow_reference_direction"], target.elbow_reference_direction); self._maybe_flush()
+        if not target.tracking_valid and self._schema_version != EXTENDED_SCHEMA_VERSION:
+            raise SessionH5Error("tracking hold targets require session HDF5 schema 1.1")
+        group = self._file["target/arm"][target.side]
+        self._common(group, self._record_time(received_time_ns), target.source_timestamp_ns, target.envelope.publisher_instance_id, target.envelope.sequence)
+        group.attrs.update(frame_id=target.frame_id, source=target.source)
+        _append(group["pose"], target.position_m + target.orientation_xyzw)
+        _append(group["elbow_reference_direction"], target.elbow_reference_direction)
+        if "tracking_valid" in group:
+            _append(group["tracking_valid"], target.tracking_valid)
+        self._maybe_flush()
 
     def append_hand_target(self, target: HandTargetCommand, received_time_ns: int | None = None) -> None:
         if not isinstance(target, HandTargetCommand): raise TypeError("target must be HandTargetCommand")
@@ -223,9 +605,12 @@ class SessionH5Writer:
 
     append_raw_mocap_live = append_raw_mocap
     append_raw_h5_replay = append_raw_h5
+    append_raw_pico_hand_tracking = append_raw_pico
+    append_raw_manus_hand_tracking = append_raw_manus
+    append_raw_legacy_pico_palm = append_raw_legacy_palm
 
     def append(self, value: Any, received_time_ns: int | None = None) -> None:
-        dispatch = ((RawMocapLiveSample, self.append_raw_mocap), (RawH5ReplaySample, self.append_raw_h5), (ArmTargetCommand, self.append_arm_target), (HandTargetCommand, self.append_hand_target), (ArmJointCommand, self.append_arm_command), (ArmJointState, self.append_arm_state), (HandJointCommand, self.append_hand_command), (HandJointState, self.append_hand_state), (SessionState, self.append_session_state))
+        dispatch = ((RawMocapLiveSample, self.append_raw_mocap), (RawH5ReplaySample, self.append_raw_h5), (PicoRawFrame, self.append_raw_pico), (ManusRawFrame, self.append_raw_manus), (LegacyPicoPalmFrame, self.append_raw_legacy_palm), (HandObservation, self.append_hand_observation), (ArmInputObservationModel, self.append_arm_input_observation), (ArmTargetCommand, self.append_arm_target), (HandTargetCommand, self.append_hand_target), (ArmJointCommand, self.append_arm_command), (ArmJointState, self.append_arm_state), (HandJointCommand, self.append_hand_command), (HandJointState, self.append_hand_state), (SessionState, self.append_session_state))
         for cls, method in dispatch:
             if isinstance(value, cls): method(value, received_time_ns=received_time_ns); return
         raise TypeError(f"unsupported session message: {type(value).__name__}")
@@ -246,6 +631,7 @@ class SessionH5Reader:
     """Validated read-only session-v1 loader."""
     def __init__(self, path: str | Path, *, allow_incomplete: bool = False) -> None:
         self.path = Path(path); self._file = h5py.File(self.path, "r"); self._closed = False
+        self._schema_version = _text(self._file.attrs.get("schema_version", ""))
         try: self._validate(allow_incomplete)
         except Exception: self._file.close(); self._closed = True; raise
 
@@ -267,7 +653,11 @@ class SessionH5Reader:
 
     @staticmethod
     def _dtype_ok(dataset: h5py.Dataset, dtype: Any) -> bool:
-        if dtype == _STRING: return dataset.dtype.kind == "O" and h5py.check_dtype(vlen=dataset.dtype) is str
+        expected_vlen = h5py.check_dtype(vlen=np.dtype(dtype))
+        if expected_vlen is str:
+            return dataset.dtype.kind == "O" and h5py.check_dtype(vlen=dataset.dtype) is str
+        if expected_vlen == np.dtype("uint8"):
+            return dataset.dtype.kind == "O" and h5py.check_dtype(vlen=dataset.dtype) == np.dtype("uint8")
         return dataset.dtype == np.dtype(dtype)
 
     @staticmethod
@@ -297,15 +687,25 @@ class SessionH5Reader:
     def _validate(self, allow_incomplete: bool) -> None:
         self._reject_links(self._file); attrs = self.attrs
         if set(attrs) != {"schema_name", "schema_version", "source_type", "robot_model", "router_zid", "complete"}: raise SessionH5Error("invalid root attrs")
-        if attrs.get("schema_name") != SCHEMA_NAME or attrs.get("schema_version") != SCHEMA_VERSION: raise SessionH5Error("unsupported session HDF5 schema")
-        if attrs.get("source_type") not in SOURCE_TYPES | {_LEGACY_CONTROLLER_GROUP}: raise SessionH5Error("invalid source_type")
+        schema_version = attrs.get("schema_version")
+        if attrs.get("schema_name") != SCHEMA_NAME or schema_version not in (SCHEMA_VERSION, EXTENDED_SCHEMA_VERSION): raise SessionH5Error("unsupported session HDF5 schema")
+        if schema_version == SCHEMA_VERSION and attrs.get("source_type") not in SOURCE_TYPES | {_LEGACY_CONTROLLER_GROUP}: raise SessionH5Error("invalid source_type")
+        if schema_version == EXTENDED_SCHEMA_VERSION and attrs.get("source_type") not in EXTENDED_SOURCE_TYPES: raise SessionH5Error("invalid schema 1.1 source_type")
         if not isinstance(attrs["complete"], (bool, np.bool_)): raise SessionH5Error("complete attr must be boolean")
         for key in ("robot_model", "router_zid"):
             if not isinstance(attrs[key], str) or not attrs[key]: raise SessionH5Error(f"invalid root attr: {key}")
         if not bool(attrs["complete"]) and not allow_incomplete: raise IncompleteSessionError(f"session is incomplete: {self.path}")
-        if set(self.file.keys()) != {"raw", "target", "joint", "meta"}: raise SessionH5Error("invalid root group set")
+        expected_root_groups = {"raw", "target", "joint", "meta"} | ({"observation"} if schema_version == EXTENDED_SCHEMA_VERSION else set())
+        if set(self.file.keys()) != expected_root_groups: raise SessionH5Error("invalid root group set")
         raw_groups = set(self.file["raw"].keys())
-        if raw_groups not in ({"mocap_live", "h5_replay"}, {"mocap_live", "h5_replay", _LEGACY_CONTROLLER_GROUP}) or set(self.file["target"].keys()) != {"arm", "hand"} or set(self.file["joint"].keys()) != {"command", "state"} or set(self.file["meta"].keys()) != {"session_events"}: raise SessionH5Error("invalid fixed group set")
+        expected_raw_groups = (
+            {"mocap_live", "h5_replay", "pico_hand_tracking", "manus_hand_tracking", "legacy_pico_palm"}
+            if schema_version == EXTENDED_SCHEMA_VERSION
+            else None
+        )
+        raw_groups_ok = raw_groups == expected_raw_groups if expected_raw_groups is not None else raw_groups in ({"mocap_live", "h5_replay"}, {"mocap_live", "h5_replay", _LEGACY_CONTROLLER_GROUP})
+        expected_meta_groups = {"session_events"} | ({"hand_tracking"} if schema_version == EXTENDED_SCHEMA_VERSION else set())
+        if not raw_groups_ok or set(self.file["target"].keys()) != {"arm", "hand"} or set(self.file["joint"].keys()) != {"command", "state"} or set(self.file["meta"].keys()) != expected_meta_groups: raise SessionH5Error("invalid fixed group set")
         scalar_i = (("time_ns", (), np.int64), ("source_time_ns", (), np.int64)); scalar_b = (("source_time_valid", (), np.bool_),); instance = (("publisher_instance_id", (), _STRING),)
         if _LEGACY_CONTROLLER_GROUP in raw_groups:
             self._validate_group(f"raw/{_LEGACY_CONTROLLER_GROUP}", scalar_i + scalar_b + instance + (("sequence", (), np.int64), ("left_pose", (7,), np.float64), ("right_pose", (7,), np.float64), ("right_a_pressed", (), np.bool_)))
@@ -324,7 +724,10 @@ class SessionH5Reader:
             ag = self.file[f"target/arm/{side}"]; hg = self.file[f"target/hand/{side}"]
             if _text(ag.attrs.get("side", "")) != side or _text(hg.attrs.get("side", "")) != side: raise SessionH5Error("invalid target side attr")
             if _text(ag.attrs.get("frame_id", "")) != ("Base_L" if side == "left" else "Base_R") or _text(hg.attrs.get("frame_id", "")) != "wrist_relative_mediapipe": raise SessionH5Error("invalid target frame_id")
-            arm_rows = self._validate_group(f"target/arm/{side}", scalar_i + scalar_b + instance + (("sequence", (), np.int64), ("pose", (7,), np.float64), ("elbow_reference_direction", (3,), np.float64)))
+            # Older 1.1 files predate explicit tracking-loss holds. Accept the
+            # missing field, but validate dtype and row count when present.
+            tracking_specs = (("tracking_valid", (), np.bool_),) if schema_version == EXTENDED_SCHEMA_VERSION and "tracking_valid" in ag else ()
+            arm_rows = self._validate_group(f"target/arm/{side}", scalar_i + scalar_b + instance + (("sequence", (), np.int64), ("pose", (7,), np.float64), ("elbow_reference_direction", (3,), np.float64)) + tracking_specs)
             hand_rows = self._validate_group(f"target/hand/{side}", scalar_i + scalar_b + instance + (("sequence", (), np.int64), ("keypoints_m", (21, 3), np.float64)))
             if arm_rows and not _text(ag.attrs.get("source", "")): raise SessionH5Error("missing non-empty arm target source attr")
             if hand_rows and not _text(hg.attrs.get("source", "")): raise SessionH5Error("missing non-empty hand target source attr")
@@ -338,6 +741,160 @@ class SessionH5Reader:
         arm_state_rows = self._validate_group("joint/state/arm", (("time_ns", (), np.int64), ("publisher_instance_id", (), _STRING), ("sequence", (), np.int64), ("position_rad", (14,), np.float64), ("velocity_rad_s", (14,), np.float64), ("velocity_valid", (), np.bool_)))
         if arm_state_rows: self._validate_joint_attrs(arm_state_group, ALL_ARM_JOINT_NAMES)
         self._validate_group("meta/session_events", (("time_ns", (), np.int64), ("publisher_instance_id", (), _STRING), ("state", (), _STRING), ("reason", (), _STRING), ("source", (), _STRING), ("intent_sequence", (), np.int64), ("intent_sequence_valid", (), np.bool_)))
+        if schema_version == EXTENDED_SCHEMA_VERSION:
+            self._validate_extended_layout()
+
+    def _validate_extended_layout(self) -> None:
+        """Validate schema 1.1 raw and receive-only observation groups."""
+        pico_specs = (
+            ("time_ns", (), np.int64),
+            ("source_time_ns", (), np.int64),
+            ("source_time_valid", (), np.bool_),
+            ("source_timestamp_ms", (), np.int64),
+            ("protocol_version", (), np.uint8),
+            ("flags", (), np.uint8),
+            ("joint_count", (), np.uint8),
+            ("head_valid", (), np.bool_),
+            ("head_pose", (7,), np.float64),
+            ("receiver_instance_id", (), _STRING),
+            ("connection_generation", (), np.int64),
+            ("receiver_frame_sequence", (), np.int64),
+            ("association_id", (), _STRING),
+            ("raw_packet", (), _UINT8_VECTOR),
+        )
+        pico_rows = self._validate_group("raw/pico_hand_tracking", pico_specs, children=("hands",))
+        pico_group = self.file["raw/pico_hand_tracking"]
+        if _text(pico_group.attrs.get("source", "")) != "pico2":
+            raise SessionH5Error("invalid PICO raw source attr")
+        if set(pico_group["hands"].keys()) != set(SIDES):
+            raise SessionH5Error("invalid PICO raw hand group set")
+        pico_hand_specs = (
+            ("valid", (), np.bool_),
+            ("wrist_valid", (), np.bool_),
+            ("wrist_pose", (7,), np.float64),
+            ("joint_valid", (26,), np.bool_),
+            ("joint_poses", (26, 7), np.float64),
+            ("joint_radii_m", (26,), np.float64),
+        )
+        for side in SIDES:
+            group = pico_group["hands"][side]
+            if _text(group.attrs.get("side", "")) != side:
+                raise SessionH5Error(f"invalid PICO hand side attr: {side}")
+            if _text(group.attrs.get("joint_names", "")) != _json_text(list(PICO_JOINT_NAMES)):
+                raise SessionH5Error(f"invalid PICO joint names: {side}")
+            if self._validate_group(f"raw/pico_hand_tracking/hands/{side}", pico_hand_specs) != pico_rows:
+                raise SessionH5Error(f"PICO parent/hand row mismatch: {side}")
+
+        manus_specs = (
+            ("time_ns", (), np.int64),
+            ("source_time_ns", (), np.int64),
+            ("source_time_valid", (), np.bool_),
+            ("source_sequence", (), np.int64),
+            ("sdk_publish_time", (), np.int64),
+            ("glove_id", (), _STRING),
+            ("side", (), _STRING),
+            ("receiver_instance_id", (), _STRING),
+            ("receiver_frame_sequence", (), np.int64),
+            ("association_id", (), _STRING),
+            ("node_count", (), np.int64),
+            ("node_valid", (64,), np.bool_),
+            ("node_positions", (64, 3), np.float64),
+            ("node_quaternions_wxyz", (64, 4), np.float64),
+            ("node_semantics_json", (), _STRING),
+            ("payload_json", (), _STRING),
+        )
+        manus_group = self.file["raw/manus_hand_tracking"]
+        if _text(manus_group.attrs.get("source", "")) != "manus":
+            raise SessionH5Error("invalid Manus raw source attr")
+        self._validate_group("raw/manus_hand_tracking", manus_specs)
+
+        legacy_specs = (
+            ("time_ns", (), np.int64),
+            ("source_time_ns", (), np.int64),
+            ("source_time_valid", (), np.bool_),
+            ("protocol_version", (), np.uint8),
+            ("packet_size", (), np.int64),
+            ("flags", (), np.int64),
+            ("source_sequence", (), np.int64),
+            ("tracking_epoch", (), np.int64),
+            ("bridge_send_monotonic_ns", (), np.int64),
+            ("receiver_instance_id", (), _STRING),
+            ("receiver_frame_sequence", (), np.int64),
+            ("association_id", (), _STRING),
+            ("raw_packet", (), _UINT8_VECTOR),
+            ("left_valid", (), np.bool_),
+            ("right_valid", (), np.bool_),
+            ("left_pose", (7,), np.float64),
+            ("right_pose", (7,), np.float64),
+            ("upper_limb_skeleton_valid", (), np.bool_),
+            ("upper_limb_rotations_valid", (), np.bool_),
+            ("upper_limb_points", (8, 3), np.float64),
+            ("upper_limb_rotations_xyzw", (8, 4), np.float64),
+        )
+        legacy_group = self.file["raw/legacy_pico_palm"]
+        if _text(legacy_group.attrs.get("source", "")) != "pico_manus_teleop_experiments":
+            raise SessionH5Error("invalid legacy palm source attr")
+        self._validate_group("raw/legacy_pico_palm", legacy_specs)
+
+        if set(self.file["observation"].keys()) != {"hand_tracking", "arm_input"}:
+            raise SessionH5Error("invalid observation domain group set")
+        if set(self.file["observation/hand_tracking"].keys()) != set(SIDES) or set(self.file["observation/arm_input"].keys()) != set(SIDES):
+            raise SessionH5Error("invalid observation side group set")
+        hand_specs = (
+            ("time_ns", (), np.int64),
+            ("source_time_ns", (), np.int64),
+            ("source_time_valid", (), np.bool_),
+            ("received_timestamp_ns", (), np.int64),
+            ("source", (), _STRING),
+            ("source_instance_id", (), _STRING),
+            ("source_sequence", (), np.int64),
+            ("source_sequence_valid", (), np.bool_),
+            ("receiver_instance_id", (), _STRING),
+            ("receiver_frame_sequence", (), np.int64),
+            ("coordinate_frame", (), _STRING),
+            ("mapping_version", (), _STRING),
+            ("valid", (), np.bool_),
+            ("joint_valid", (21,), np.bool_),
+            ("keypoints_m", (21, 3), np.float64),
+            ("wrist_pose", (7,), np.float64),
+            ("wrist_pose_valid", (), np.bool_),
+            ("frame_association_id", (), _STRING),
+        )
+        arm_specs = (
+            ("time_ns", (), np.int64),
+            ("source_time_ns", (), np.int64),
+            ("source_time_valid", (), np.bool_),
+            ("received_timestamp_ns", (), np.int64),
+            ("source", (), _STRING),
+            ("tracked_frame", (), _STRING),
+            ("reference_frame", (), _STRING),
+            ("source_instance_id", (), _STRING),
+            ("source_sequence", (), np.int64),
+            ("source_sequence_valid", (), np.bool_),
+            ("receiver_instance_id", (), _STRING),
+            ("receiver_frame_sequence", (), np.int64),
+            ("mapping_version", (), _STRING),
+            ("pose", (7,), np.float64),
+            ("pose_valid", (), np.bool_),
+            ("valid", (), np.bool_),
+            ("frame_association_id", (), _STRING),
+        )
+        for side in SIDES:
+            hand_group = self.file[f"observation/hand_tracking/{side}"]
+            arm_group = self.file[f"observation/arm_input/{side}"]
+            if _text(hand_group.attrs.get("side", "")) != side or _text(arm_group.attrs.get("side", "")) != side:
+                raise SessionH5Error(f"invalid observation side attr: {side}")
+            self._validate_group(f"observation/hand_tracking/{side}", hand_specs)
+            self._validate_group(f"observation/arm_input/{side}", arm_specs)
+        metadata_group = self.file["meta/hand_tracking"]
+        if set(metadata_group.keys()) != set():
+            raise SessionH5Error("invalid hand-tracking metadata group")
+        try:
+            metadata = json.loads(_text(metadata_group.attrs["metadata_json"]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SessionH5Error("invalid hand-tracking metadata JSON") from exc
+        if not isinstance(metadata, dict):
+            raise SessionH5Error("hand-tracking metadata must be a JSON object")
 
     @staticmethod
     def _row_group(group: h5py.Group) -> list[dict[str, Any]]:
@@ -375,11 +932,102 @@ class SessionH5Reader:
                 hand = groups[side]; valid = bool(hand["valid"][index]); item = {"valid": valid, "wrist_pose": hand["wrist"][index].tolist() if valid else None, "keypoints_world_m": hand["keypoints_world"][index].tolist() if valid else None}; item["wuji2_joints_rad"] = None if "wuji2_joints" not in hand or not np.isfinite(hand["wuji2_joints"][index]).all() else hand["wuji2_joints"][index].tolist(); row["hands"][side] = item
         return rows
 
+    def read_raw_pico(self) -> list[dict[str, Any]]:
+        if self._schema_version != EXTENDED_SCHEMA_VERSION:
+            return []
+        group = self.file["raw/pico_hand_tracking"]
+        rows = self._source(self._row_group(group))
+        for index, row in enumerate(rows):
+            row["source_type"] = "pico2"
+            row["raw_packet"] = bytes(np.asarray(group["raw_packet"][index], dtype=np.uint8).tolist())
+            row["hands"] = {}
+            for side in SIDES:
+                hand = group["hands"][side]
+                row["hands"][side] = {
+                    "valid": bool(hand["valid"][index]),
+                    "wrist_valid": bool(hand["wrist_valid"][index]),
+                    "wrist_pose": hand["wrist_pose"][index].tolist(),
+                    "joint_valid": hand["joint_valid"][index].tolist(),
+                    "joint_poses": hand["joint_poses"][index].tolist(),
+                    "joint_radii_m": hand["joint_radii_m"][index].tolist(),
+                }
+        return rows
+
+    def read_raw_manus(self) -> list[dict[str, Any]]:
+        if self._schema_version != EXTENDED_SCHEMA_VERSION:
+            return []
+        group = self.file["raw/manus_hand_tracking"]
+        rows = self._source(self._row_group(group))
+        for index, row in enumerate(rows):
+            row["source_type"] = "manus"
+            row["node_positions"] = group["node_positions"][index].tolist()
+            row["node_quaternions_wxyz"] = group["node_quaternions_wxyz"][index].tolist()
+            row["node_valid"] = group["node_valid"][index].tolist()
+            row["node_semantics"] = json.loads(_text(group["node_semantics_json"][index]))
+            row["payload"] = json.loads(_text(group["payload_json"][index]))
+        return rows
+
+    def read_raw_legacy_palm(self) -> list[dict[str, Any]]:
+        if self._schema_version != EXTENDED_SCHEMA_VERSION:
+            return []
+        group = self.file["raw/legacy_pico_palm"]
+        rows = self._source(self._row_group(group))
+        for index, row in enumerate(rows):
+            row["source_type"] = "legacy_pico_palm"
+            row["raw_packet"] = bytes(np.asarray(group["raw_packet"][index], dtype=np.uint8).tolist())
+            row["upper_limb_points"] = group["upper_limb_points"][index].tolist()
+            row["upper_limb_rotations_xyzw"] = group["upper_limb_rotations_xyzw"][index].tolist()
+        return rows
+
+    @staticmethod
+    def _nullable_sequence(row: dict[str, Any]) -> None:
+        valid = bool(row.pop("source_sequence_valid", False))
+        row["source_sequence"] = int(row["source_sequence"]) if valid else None
+
+    def read_hand_observation(self, side: str) -> list[dict[str, Any]]:
+        if side not in SIDES:
+            raise ValueError("side must be left or right")
+        if self._schema_version != EXTENDED_SCHEMA_VERSION:
+            return []
+        group = self.file[f"observation/hand_tracking/{side}"]
+        rows = self._source(self._row_group(group))
+        for row in rows:
+            self._nullable_sequence(row)
+            if not bool(row.pop("wrist_pose_valid", False)):
+                row["wrist_pose"] = None
+        return rows
+
+    def read_arm_input_observation(self, side: str) -> list[dict[str, Any]]:
+        if side not in SIDES:
+            raise ValueError("side must be left or right")
+        if self._schema_version != EXTENDED_SCHEMA_VERSION:
+            return []
+        group = self.file[f"observation/arm_input/{side}"]
+        rows = self._source(self._row_group(group))
+        for row in rows:
+            self._nullable_sequence(row)
+            if not bool(row.pop("pose_valid", False)):
+                row["pose"] = None
+        return rows
+
+    def read_hand_tracking_metadata(self) -> dict[str, Any]:
+        if self._schema_version != EXTENDED_SCHEMA_VERSION:
+            return {}
+        try:
+            value = json.loads(_text(self.file["meta/hand_tracking"].attrs["metadata_json"]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SessionH5Error("invalid hand-tracking metadata JSON") from exc
+        if not isinstance(value, dict):
+            raise SessionH5Error("hand-tracking metadata must be a JSON object")
+        return value
+
     def _target(self, side: str, hand: bool) -> list[dict[str, Any]]:
         if side not in SIDES: raise ValueError("side must be left or right")
         group = self.file[f"target/{'hand' if hand else 'arm'}/{side}"]; rows = self._source(self._row_group(group))
         for row in rows:
             row["frame_id"] = _text(group.attrs["frame_id"]); row["source"] = _text(group.attrs.get("source", ""))
+            if not hand:
+                row["tracking_valid"] = bool(row.get("tracking_valid", True))
             if not hand: row["position_m"], row["orientation_xyzw"] = row["pose"][:3], row["pose"][3:]; row.pop("pose", None)
         return rows
     def read_arm_target(self, side: str) -> list[dict[str, Any]]: return self._target(side, False)
@@ -412,7 +1060,7 @@ class SessionH5Reader:
     read_raw_mocap_live = read_raw_mocap
     read_raw_h5_replay = read_raw_h5
     def stream(self, kind: str, side: str | None = None) -> list[dict[str, Any]]:
-        methods = {"raw_mocap": self.read_raw_mocap, "raw_h5": self.read_raw_h5, "legacy_controller": self.read_legacy_controller, "arm_state": self.read_arm_state, "session_state": self.read_session_events}; side_methods = {"arm_target": self.read_arm_target, "hand_target": self.read_hand_target, "arm_command": self.read_arm_command, "hand_command": self.read_hand_command, "hand_state": self.read_hand_state}
+        methods = {"raw_mocap": self.read_raw_mocap, "raw_h5": self.read_raw_h5, "raw_pico": self.read_raw_pico, "raw_manus": self.read_raw_manus, "raw_legacy_palm": self.read_raw_legacy_palm, "legacy_controller": self.read_legacy_controller, "arm_state": self.read_arm_state, "session_state": self.read_session_events}; side_methods = {"arm_target": self.read_arm_target, "hand_target": self.read_hand_target, "arm_command": self.read_arm_command, "hand_command": self.read_hand_command, "hand_state": self.read_hand_state, "hand_observation": self.read_hand_observation, "arm_input_observation": self.read_arm_input_observation}
         if kind in methods: return methods[kind]()
         if side is None or kind not in side_methods: raise ValueError(f"unknown stream or missing side: {kind}")
         return side_methods[kind](side)
@@ -426,4 +1074,4 @@ SessionH5Loader = SessionH5Reader
 
 def load_session_h5(path: str | Path, *, allow_incomplete: bool = False) -> SessionH5Reader: return SessionH5Reader(path, allow_incomplete=allow_incomplete)
 
-__all__ = ["SCHEMA_NAME", "SCHEMA_VERSION", "SOURCE_TYPES", "SessionH5Error", "IncompleteSessionError", "UnsafeSessionLinkError", "SessionH5Writer", "SessionH5Reader", "SessionH5Loader", "load_session_h5"]
+__all__ = ["SCHEMA_NAME", "SCHEMA_VERSION", "EXTENDED_SCHEMA_VERSION", "SOURCE_TYPES", "EXTENDED_SOURCE_TYPES", "SessionH5Error", "IncompleteSessionError", "UnsafeSessionLinkError", "SessionH5Writer", "SessionH5Reader", "SessionH5Loader", "load_session_h5"]

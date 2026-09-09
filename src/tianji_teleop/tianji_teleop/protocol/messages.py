@@ -114,6 +114,18 @@ def _nullable_integer(value: Any, field: str) -> int | None:
     return None if value is None else _integer(value, field)
 
 
+def _boolean(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ProtocolError(f"{field} must be boolean")
+    return value
+
+
+def _boolean_vector(value: Any, size: int, field: str) -> list[bool]:
+    if not isinstance(value, (list, tuple)) or len(value) != size:
+        raise ProtocolError(f"{field} must have shape [{size}]")
+    return [_boolean(item, f"{field}[{index}]") for index, item in enumerate(value)]
+
+
 def _finite(value: Any, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
         raise ProtocolError(f"{field} must be finite")
@@ -295,6 +307,7 @@ class ArmTargetCommand:
     position_m: list[float]
     orientation_xyzw: list[float]
     elbow_reference_direction: list[float]
+    tracking_valid: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.envelope, ProtocolEnvelope):
@@ -307,16 +320,20 @@ class ArmTargetCommand:
         self.position_m = _vector(self.position_m, 3, "position_m")
         self.orientation_xyzw = _quaternion(self.orientation_xyzw, "orientation_xyzw")
         self.elbow_reference_direction = _elbow(self.elbow_reference_direction, "elbow_reference_direction")
+        _boolean(self.tracking_valid, "tracking_valid")
 
     def to_dict(self) -> dict[str, Any]:
         return {**self.envelope.to_dict(), "source_timestamp_ns": self.source_timestamp_ns, "source": self.source,
                 "side": self.side, "frame_id": self.frame_id, "position_m": self.position_m,
-                "orientation_xyzw": self.orientation_xyzw, "elbow_reference_direction": self.elbow_reference_direction}
+                "orientation_xyzw": self.orientation_xyzw, "elbow_reference_direction": self.elbow_reference_direction,
+                **({"tracking_valid": False} if not self.tracking_valid else {})}
 
     @classmethod
     def from_dict(cls, data: Any) -> "ArmTargetCommand":
         value = _mapping(data)
         payload = {"source_timestamp_ns", "source", "side", "frame_id", "position_m", "orientation_xyzw", "elbow_reference_direction"}
+        if 'tracking_valid' in value:
+            payload.add('tracking_valid')
         _keys(value, {"schema_version", "publisher_instance_id", "router_zid", "sequence", "timestamp_ns"} | payload)
         envelope = ProtocolEnvelope.from_dict({key: value[key] for key in ("schema_version", "publisher_instance_id", "router_zid", "sequence", "timestamp_ns")})
         _vector(value["position_m"], 3, "position_m")
@@ -485,6 +502,113 @@ class HandTargetCommand:
     def from_dict(cls, data: Any) -> "HandTargetCommand":
         schema, instance, router, sequence, timestamp, value = _parse_wire(data, {"source_timestamp_ns", "source", "side", "frame_id", "keypoints_m"})
         return cls(schema, sequence, timestamp, value["source_timestamp_ns"], value["source"], value["side"], value["frame_id"], value["keypoints_m"], instance, router)
+
+
+@dataclass(eq=True)
+class HandSkeletonObservation:
+    """Receive-only canonical 21-point hand observation."""
+
+    schema_version: int
+    sequence: int
+    timestamp_ns: int
+    source_timestamp_ns: int | None
+    received_timestamp_ns: int
+    source: str
+    side: str
+    source_instance_id: str
+    source_sequence: int | None
+    receiver_instance_id: str
+    receiver_frame_sequence: int
+    coordinate_frame: str
+    mapping_version: str
+    keypoints_m: list[list[float]]
+    joint_valid: list[bool]
+    valid: bool
+    wrist_pose: list[float] | None
+    frame_association_id: str
+    publisher_instance_id: str
+    router_zid: str
+
+    def __post_init__(self) -> None:
+        _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns")
+        _nullable_integer(self.source_timestamp_ns, "source_timestamp_ns"); _integer(self.received_timestamp_ns, "received_timestamp_ns")
+        _string(self.source, "source"); _side(self.side); _identity(self.source_instance_id, "source_instance_id")
+        _nullable_integer(self.source_sequence, "source_sequence"); _identity(self.receiver_instance_id, "receiver_instance_id")
+        _integer(self.receiver_frame_sequence, "receiver_frame_sequence"); _identity(self.coordinate_frame, "coordinate_frame")
+        _identity(self.mapping_version, "mapping_version"); self.keypoints_m = _matrix(self.keypoints_m, 21, 3, "keypoints_m")
+        self.joint_valid = _boolean_vector(self.joint_valid, 21, "joint_valid"); self.valid = _boolean(self.valid, "valid")
+        if self.valid and not all(self.joint_valid): raise ProtocolError("valid hand observation requires all joints valid")
+        self.wrist_pose = None if self.wrist_pose is None else _pose(self.wrist_pose, "wrist_pose")
+        _identity(self.frame_association_id, "frame_association_id"); _identity(self.publisher_instance_id, "publisher_instance_id"); _identity(self.router_zid, "router_zid")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**_wire_fields(self.schema_version, self.publisher_instance_id, self.router_zid, self.sequence, self.timestamp_ns),
+                "source_timestamp_ns": self.source_timestamp_ns, "received_timestamp_ns": self.received_timestamp_ns,
+                "source": self.source, "side": self.side, "source_instance_id": self.source_instance_id,
+                "source_sequence": self.source_sequence, "receiver_instance_id": self.receiver_instance_id,
+                "receiver_frame_sequence": self.receiver_frame_sequence, "coordinate_frame": self.coordinate_frame,
+                "mapping_version": self.mapping_version, "keypoints_m": self.keypoints_m,
+                "joint_valid": self.joint_valid, "valid": self.valid, "wrist_pose": self.wrist_pose,
+                "frame_association_id": self.frame_association_id}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "HandSkeletonObservation":
+        payload = {"source_timestamp_ns", "received_timestamp_ns", "source", "side", "source_instance_id", "source_sequence", "receiver_instance_id", "receiver_frame_sequence", "coordinate_frame", "mapping_version", "keypoints_m", "joint_valid", "valid", "wrist_pose", "frame_association_id"}
+        schema, instance, router, sequence, timestamp, value = _parse_wire(data, payload)
+        _matrix(value["keypoints_m"], 21, 3, "keypoints_m"); _boolean_vector(value["joint_valid"], 21, "joint_valid")
+        if value["wrist_pose"] is not None: _pose(value["wrist_pose"], "wrist_pose", parse=True)
+        return cls(schema, sequence, timestamp, value["source_timestamp_ns"], value["received_timestamp_ns"], value["source"], value["side"], value["source_instance_id"], value["source_sequence"], value["receiver_instance_id"], value["receiver_frame_sequence"], value["coordinate_frame"], value["mapping_version"], value["keypoints_m"], value["joint_valid"], value["valid"], value["wrist_pose"], value["frame_association_id"], instance, router)
+
+
+@dataclass(eq=True)
+class ArmInputObservation:
+    """Receive-only tracked palm/wrist pose before TCP mapping."""
+
+    schema_version: int
+    sequence: int
+    timestamp_ns: int
+    source_timestamp_ns: int | None
+    received_timestamp_ns: int
+    source: str
+    side: str
+    tracked_frame: str
+    reference_frame: str
+    source_instance_id: str
+    source_sequence: int | None
+    receiver_instance_id: str
+    receiver_frame_sequence: int
+    mapping_version: str
+    pose: list[float] | None
+    valid: bool
+    frame_association_id: str
+    publisher_instance_id: str
+    router_zid: str
+
+    def __post_init__(self) -> None:
+        _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns")
+        _nullable_integer(self.source_timestamp_ns, "source_timestamp_ns"); _integer(self.received_timestamp_ns, "received_timestamp_ns")
+        _string(self.source, "source"); _side(self.side); _identity(self.tracked_frame, "tracked_frame"); _identity(self.reference_frame, "reference_frame")
+        _identity(self.source_instance_id, "source_instance_id"); _nullable_integer(self.source_sequence, "source_sequence"); _identity(self.receiver_instance_id, "receiver_instance_id")
+        _integer(self.receiver_frame_sequence, "receiver_frame_sequence"); _identity(self.mapping_version, "mapping_version")
+        self.pose = None if self.pose is None else _pose(self.pose, "pose"); self.valid = _boolean(self.valid, "valid")
+        if self.valid and self.pose is None: raise ProtocolError("valid arm observation requires pose")
+        _identity(self.frame_association_id, "frame_association_id"); _identity(self.publisher_instance_id, "publisher_instance_id"); _identity(self.router_zid, "router_zid")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**_wire_fields(self.schema_version, self.publisher_instance_id, self.router_zid, self.sequence, self.timestamp_ns),
+                "source_timestamp_ns": self.source_timestamp_ns, "received_timestamp_ns": self.received_timestamp_ns,
+                "source": self.source, "side": self.side, "tracked_frame": self.tracked_frame,
+                "reference_frame": self.reference_frame, "source_instance_id": self.source_instance_id,
+                "source_sequence": self.source_sequence, "receiver_instance_id": self.receiver_instance_id,
+                "receiver_frame_sequence": self.receiver_frame_sequence, "mapping_version": self.mapping_version,
+                "pose": self.pose, "valid": self.valid, "frame_association_id": self.frame_association_id}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ArmInputObservation":
+        payload = {"source_timestamp_ns", "received_timestamp_ns", "source", "side", "tracked_frame", "reference_frame", "source_instance_id", "source_sequence", "receiver_instance_id", "receiver_frame_sequence", "mapping_version", "pose", "valid", "frame_association_id"}
+        schema, instance, router, sequence, timestamp, value = _parse_wire(data, payload)
+        if value["pose"] is not None: _pose(value["pose"], "pose", parse=True)
+        return cls(schema, sequence, timestamp, value["source_timestamp_ns"], value["received_timestamp_ns"], value["source"], value["side"], value["tracked_frame"], value["reference_frame"], value["source_instance_id"], value["source_sequence"], value["receiver_instance_id"], value["receiver_frame_sequence"], value["mapping_version"], value["pose"], value["valid"], value["frame_association_id"], instance, router)
 
 
 @dataclass(eq=True)
@@ -852,6 +976,6 @@ __all__ = [
     "ArmSolvedPose", "ArmJointCommand", "ArmJointState", "HandTargetCommand",
     "HandJointCommand", "HandJointState", "SessionIntent", "SessionState",
     "LatchedBool", "ComponentStatus", "HandExecutorStatus", "SafetyStopRequest",
-    "SafetyStopAck", "RawMocapLiveSample",
+    "SafetyStopAck", "HandSkeletonObservation", "ArmInputObservation", "RawMocapLiveSample",
     "RawH5ReplaySample", "Frame0HandSkeleton",
 ]

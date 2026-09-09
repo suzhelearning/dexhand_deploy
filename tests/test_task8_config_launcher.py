@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -43,6 +45,7 @@ class Task8ConfigTreeTest(unittest.TestCase):
             "executors/wuji_hand2.yaml",
             "executors/wuji_hand2_regrind.yaml",
             "recording/session.yaml",
+            "recording/session_hand_tracking.yaml",
             "replay/target.yaml",
             "replay/joint.yaml",
             "diagnostics/mocap_calibration.yaml",
@@ -54,6 +57,14 @@ class Task8ConfigTreeTest(unittest.TestCase):
             "sessions/target_replay_sim.yaml",
             "sessions/joint_replay_sim.yaml",
             "sessions/diagnostic_mocap_calibration_sim.yaml",
+            "sources/hand_tracking_observation.yaml",
+            "sources/hand_tracking_observation_manus.yaml",
+            "sources/hand_tracking_target.yaml",
+            "sources/hand_tracking_target_manus.yaml",
+            "sessions/hand_tracking_observation.yaml",
+            "sessions/hand_tracking_observation_manus.yaml",
+            "sessions/hand_tracking_sim.yaml",
+            "sessions/hand_tracking_sim_manus.yaml",
         )
         self.assertTrue(all((CONFIG / path).is_file() for path in required))
 
@@ -148,6 +159,56 @@ class Task8ConfigTreeTest(unittest.TestCase):
         self.assertIn("if (params_.linear_interpolation) direct_interpolator_.accept", bridge)
         self.assertIn("params_.linear_interpolation ? direct_interpolator_.sample(current) : direct_command_", bridge)
 
+    def test_hand_tracking_profiles_are_receive_only_and_select_one_input_profile(self) -> None:
+        pico = yaml.safe_load((CONFIG / "sessions/hand_tracking_observation.yaml").read_text())
+        manus = yaml.safe_load((CONFIG / "sessions/hand_tracking_observation_manus.yaml").read_text())
+        self.assertEqual(pico["input_profile"], "pico")
+        self.assertEqual(manus["input_profile"], "manus")
+        self.assertNotIn("manus", pico)
+        self.assertNotIn("legacy_pico", pico)
+        self.assertNotIn("pico", manus)
+        self.assertTrue(yaml.safe_load((CONFIG / "sources/hand_tracking_observation.yaml").read_text())["observation_only"])
+        self.assertTrue(yaml.safe_load((CONFIG / "sources/hand_tracking_observation_manus.yaml").read_text())["observation_only"])
+        self.assertEqual(pico["required_capability"], "observation_only")
+        self.assertEqual(manus["required_capability"], "observation_only")
+        launcher = (SCRIPTS / "run_session.sh").read_text(encoding="utf-8")
+        self.assertIn("hand_tracking_observation_manus", launcher)
+        self.assertIn("TIANJI_REQUIRED_OBSERVATION_PROFILE=pico", launcher)
+        self.assertIn("--observation-config", launcher)
+        self.assertIn('|| -n "${playback_speed}"', launcher)
+        observation_launcher = (SCRIPTS / "run_observation_session.sh").read_text(encoding="utf-8")
+        self.assertNotIn("run_coordinator", observation_launcher)
+        self.assertNotIn("run_executor", observation_launcher)
+        self.assertNotIn("tianji/command/", observation_launcher)
+
+    def test_hand_tracking_sim_profiles_split_observation_and_target_authority(self) -> None:
+        pico = yaml.safe_load((CONFIG / "sessions/hand_tracking_sim.yaml").read_text())
+        manus = yaml.safe_load((CONFIG / "sessions/hand_tracking_sim_manus.yaml").read_text())
+        self.assertEqual(pico["observation_config"], "sources/hand_tracking_observation.yaml")
+        self.assertEqual(pico["source_config"], "sources/hand_tracking_target.yaml")
+        self.assertEqual(pico["hand_overlay"], "mujoco", "PICO retarget commands must reach both simulated hands")
+        self.assertEqual(manus["observation_config"], "sources/hand_tracking_observation_manus.yaml")
+        self.assertEqual(manus["source_config"], "sources/hand_tracking_target_manus.yaml")
+        for profile in (pico, manus):
+            self.assertEqual(profile["required_capability"], "simulation")
+            self.assertEqual(profile["hand_mode"], "retarget")
+            self.assertEqual(profile["hand_executor"], "wuji_hand2")
+            self.assertEqual(profile["arm_producer_config"], "producers/ik.yaml")
+        launcher = (SCRIPTS / "run_session.sh").read_text(encoding="utf-8")
+        self.assertIn("hand_tracking_sim_manus", launcher)
+        self.assertIn("TIANJI_OBSERVATION_PUBLISHER_INSTANCE_ID", launcher)
+        self.assertIn("--suppress-status", launcher)
+        self.assertIn("simulation-only profile，不接受 --confirm-real", launcher)
+        self.assertIn("recording/session_hand_tracking.yaml", launcher)
+        self.assertIn('record_source_type="${profile}"', launcher)
+        self.assertIn('TIANJI_RECORD_INPUT_PROFILE=', launcher)
+        source_launcher = (SCRIPTS / "run_source.sh").read_text(encoding="utf-8")
+        self.assertIn("hand_tracking_target", source_launcher)
+        self.assertNotIn('source_id}" != hand_tracking_target', source_launcher)
+        self.assertIn("scripts/hand_tracking_target", (ROOT / "src/tianji_teleop/CMakeLists.txt").read_text(encoding="utf-8"))
+        pixi = (ROOT / "pixi.toml").read_text(encoding="utf-8")
+        self.assertIn("hand_tracking_sim_manus", pixi)
+
     def test_regrind_real_uses_direct_wuji_and_existing_arm_ik(self) -> None:
         profile = yaml.safe_load((CONFIG / "sessions/regrind_real.yaml").read_text())
         self.assertEqual(profile["required_capability"], "real")
@@ -195,7 +256,12 @@ class Task8ConfigTreeTest(unittest.TestCase):
         for script in (deploy, doctor):
             self.assertIn("arm_ik_producer", script)
             self.assertIn("mujoco_executor", script)
-            self.assertNotIn("legacy", script.lower())
+        # Deployment rejects entries outside the canonical allow-list;
+        # incidental wording in comments is not an executable entry.
+        self.assertIn('for allowed in "${RUNTIME_PROGRAMS[@]}"', deploy)
+        self.assertIn('[[ "${keep}" == true ]] || rm -f -- "${stale}"', deploy)
+        self.assertIn('case " ${allowed_programs[*]} " in', doctor)
+        self.assertIn('非 canonical entry', doctor)
         cmake = (ROOT / "src" / "tianji_teleop" / "CMakeLists.txt").read_text(encoding="utf-8")
         python_install = cmake.split("install(\n  DIRECTORY tianji_teleop", 1)[1].split("install(\n  DIRECTORY assets", 1)[0]
         self.assertIn('PATTERN "__pycache__" EXCLUDE', python_install)
@@ -341,7 +407,7 @@ class Task8LauncherTest(unittest.TestCase):
                 )
 
 
-    def test_home_wrapper_runs_previous_speed_dual_arm_recovery(self) -> None:
+    def test_return_home_requires_explicit_real_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             bin_dir = root / "bin"
@@ -359,7 +425,7 @@ class Task8LauncherTest(unittest.TestCase):
                 "CAPTURE": str(capture),
             }
             result = subprocess.run(
-                ["bash", str(ROOT / "home.sh")],
+                ["bash", str(SCRIPTS / "return_home.sh")],
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
@@ -371,19 +437,9 @@ class Task8LauncherTest(unittest.TestCase):
                 else []
             )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            arguments,
-            [
-                "run",
-                "bash",
-                "scripts/return_home.sh",
-                "--confirm-real",
-                "--side",
-                "both",
-                "--recover-outside-limits",
-            ],
-        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("--confirm-real", result.stderr)
+        self.assertEqual(arguments, [])
 
 
 
@@ -484,6 +540,13 @@ class Task8LauncherTest(unittest.TestCase):
     ) -> list[list[str]]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            # Exercise the real launcher in an isolated mock bundle. No
+            # dependency directories or processes are added to the live tree.
+            bundle = root / "bundle"
+            shutil.copytree(SCRIPTS, bundle / "scripts")
+            (bundle / "src").symlink_to(ROOT / "src", target_is_directory=True)
+            (bundle / "vendor" / "python").mkdir(parents=True)
+            (bundle / "vendor" / "zenoh" / "lib").mkdir(parents=True)
             bin_dir = root / "bin"
             bin_dir.mkdir()
             capture = root / "launches.tsv"
@@ -515,8 +578,14 @@ class Task8LauncherTest(unittest.TestCase):
                 "#!/bin/sh\n"
                 "{ printf 'CALL'; for arg in \"$@\"; do "
                 "printf '\\t%s' \"$arg\"; done; "
+                "printf '\\tENV_TRAJECTORY=%s\\tENV_CLIPPING=%s\\tENV_TARGET=%s' "
+                "\"${TIANJI_JOINT_TRAJECTORY_PROCESSOR-unset}\" "
+                "\"${TIANJI_COMMAND_STEP_CLIPPING-unset}\" "
+                "\"${TIANJI_ARM_TARGET_PROCESSOR-unset}\"; "
                 "printf '\\n'; } >> \"$CAPTURE\"\n"
                 "case \" $* \" in\n"
+                "  *'--source hand_tracking_observation '*) "
+                "exec /usr/bin/setsid /bin/sleep 2 ;;\n"
                 "  *'/run_source.sh '*) "
                 "exec /usr/bin/setsid /bin/sleep 0.05 ;;\n"
                 "  *) exec /usr/bin/setsid /bin/sleep 2 ;;\n"
@@ -547,7 +616,7 @@ class Task8LauncherTest(unittest.TestCase):
                 }
             )
             arguments = [
-                str(SCRIPTS / "run_session.sh"),
+                str(bundle / "scripts" / "run_session.sh"),
                 "--profile",
                 profile,
             ]
@@ -565,10 +634,45 @@ class Task8LauncherTest(unittest.TestCase):
                 timeout=10,
             )
             self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(capture.exists(), result.stdout + result.stderr)
             return [
                 line.split("\t")[1:]
                 for line in capture.read_text(encoding="utf-8").splitlines()
             ]
+
+    def test_manus_session_launches_canonical_target_source(self) -> None:
+        launches = self._run_session_until_components_are_wired("hand_tracking_sim_manus", "--headless")
+        source = next(args for args in launches if "--source" in args and
+                      args[args.index("--source") + 1] == "hand_tracking_target")
+        self.assertTrue(source[source.index("--config") + 1].endswith("hand_tracking_target_manus.yaml"))
+        self.assertIn("TIANJI_SOURCE_LOGICAL_ID=hand_tracking_target", source)
+
+    def test_old_session_does_not_inherit_new_processing_overrides(self) -> None:
+        for profile in ("h5_sim", "regrind_real"):
+            with self.subTest(profile=profile), patch.dict(os.environ, {
+                "TIANJI_JOINT_TRAJECTORY_PROCESSOR": "passthrough",
+                "TIANJI_COMMAND_STEP_CLIPPING": "false",
+                "TIANJI_ARM_TARGET_PROCESSOR": "passthrough",
+            }):
+                display_args = ("--headless",) if profile == "h5_sim" else ()
+                launches = self._run_session_until_components_are_wired(profile, *display_args)
+                for args in launches:
+                    self.assertIn("ENV_TRAJECTORY=unset", args)
+                    self.assertIn("ENV_CLIPPING=unset", args)
+                    self.assertIn("ENV_TARGET=unset", args)
+
+    def test_pico_explicit_processing_overrides_are_preserved(self) -> None:
+        launches = self._run_session_until_components_are_wired(
+            "hand_tracking_sim", "--viewer", "--disable-hands",
+            "--ik-backend", "pico_ee_dexhand_qp",
+            "--arm-target-processor", "passthrough",
+            "--joint-trajectory", "passthrough",
+            "--command-step-clipping", "false", "--joint-limit-source", "urdf",
+            "--pico-overlay", "--ik-target-overlay")
+        for args in launches:
+            self.assertIn("ENV_TRAJECTORY=passthrough", args)
+            self.assertIn("ENV_CLIPPING=false", args)
+            self.assertIn("ENV_TARGET=passthrough", args)
 
     def test_h5_session_selects_default_viewer_and_explicit_headless(
         self,

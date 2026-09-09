@@ -9,6 +9,7 @@ from pathlib import Path
 from ..config_loader import load_component_config, require_finite_positive
 from ..zenoh_util import open_session, require_single_router
 from .recorder import SessionRecorderNode
+from .session_h5 import EXTENDED_SCHEMA_VERSION, SCHEMA_NAME, SCHEMA_VERSION
 
 _RECORDING_CONFIG_KEYS = {"flush_interval_s", "schema_name", "schema_version"}
 
@@ -19,7 +20,10 @@ def _load_recording_config(path: str) -> dict[str, object]:
         allowed_keys=_RECORDING_CONFIG_KEYS,
         required_keys=_RECORDING_CONFIG_KEYS,
     )
-    if config["schema_name"] != "tianji-teleop-session" or config["schema_version"] != "1.0":
+    if config["schema_name"] != SCHEMA_NAME or config["schema_version"] not in {
+        SCHEMA_VERSION,
+        EXTENDED_SCHEMA_VERSION,
+    }:
         raise ValueError("unsupported session recording schema")
     config["flush_interval_s"] = require_finite_positive(
         config["flush_interval_s"], "recording.flush_interval_s"
@@ -63,6 +67,7 @@ def main() -> int:
             router_zid=router,
             publisher_instance_id=instance,
             recording_config=recording_config,
+            input_profile=os.environ.get("TIANJI_RECORD_INPUT_PROFILE") or None,
         )
         while not stop_event.wait(1.0):
             node.flush()

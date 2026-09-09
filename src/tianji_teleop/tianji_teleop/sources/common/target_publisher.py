@@ -110,6 +110,7 @@ class TargetPublisher:
         source_timestamp_ns: int | None = None,
         source: str | None = None,
         frame_id: str | None = None,
+        tracking_valid: bool = True,
     ) -> ArmTargetCommand:
         envelope = self._envelope()
         command = ArmTargetCommand(
@@ -121,6 +122,7 @@ class TargetPublisher:
             position_m=np.asarray(position_m, dtype=np.float64).tolist(),
             orientation_xyzw=np.asarray(orientation_xyzw, dtype=np.float64).tolist(),
             elbow_reference_direction=np.asarray(elbow_reference_direction, dtype=np.float64).tolist(),
+            tracking_valid=tracking_valid,
         )
         self._publisher(topics.arm_target(side)).put_json(command.to_dict())
         return command

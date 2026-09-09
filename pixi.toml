@@ -32,6 +32,12 @@ h5_real = { cmd = "bash scripts/run_session.sh --profile h5_real" }
 target_replay_sim = { cmd = "bash scripts/run_session.sh --profile target_replay_sim" }
 joint_replay_sim = { cmd = "bash scripts/run_session.sh --profile joint_replay_sim" }
 diagnostic-mocap-calibration-sim = { cmd = "bash scripts/run_session.sh --profile diagnostic_mocap_calibration_sim" }
+pico_capture = { cmd = "bash scripts/run_source.sh --source pico_capture" }
+manus_capture = { cmd = "bash scripts/run_source.sh --source manus_capture" }
+hand_tracking_observation = { cmd = "bash scripts/run_session.sh --profile hand_tracking_observation" }
+hand_tracking_observation_manus = { cmd = "bash scripts/run_session.sh --profile hand_tracking_observation_manus" }
+hand_tracking_sim = { cmd = "bash scripts/run_session.sh --profile hand_tracking_sim" }
+hand_tracking_sim_manus = { cmd = "bash scripts/run_session.sh --profile hand_tracking_sim_manus" }
 wuji_hand2_dry = { cmd = "bash scripts/run_session.sh --profile h5_sim" }
 wuji_hand2_real = { cmd = "bash scripts/run_session.sh --profile h5_real" }
 validation-run = "python scripts/validation/run_case.py"
@@ -45,6 +51,8 @@ regrind_hand_sim = "PYTHONPATH=src/tianji_teleop:vendor/python python scripts/re
 # 编译器使用 Ubuntu 24.04 系统 GCC 13；脚本会在编译前严格检查它们与
 # runtime 的 ABI 版本。
 [feature.ik-build.dependencies]
+mujoco = "==3.10.0"
+qpoases = ">=3.2,<4"
 python = "3.12.*"
 numpy = ">=2,<3"
 packaging = ">=24,<26"
@@ -58,6 +66,8 @@ pin = "==4.0.0"
 eclipse-zenoh = ">=1.10,<2"
 
 [feature.ik-build.tasks]
+build-ik-sim = "bash scripts/build_ik_sim.sh"
+check-ik-trajectory = "staging/ik/lib/tianji_teleop/joint_trajectory_limiter_probe src/tianji_teleop/assets/marvin_m6_ccs/urdf/marvin_m6_s_ccs_696_v4.urdf"
 check-ik-build-env = "bash scripts/check_ik_build_env.sh"
 build-ik = { cmd = "bash scripts/build_ik.sh", depends-on = ["check-ik-build-env"] }
 deploy-ik = "bash scripts/deploy_ik_runtime.sh"

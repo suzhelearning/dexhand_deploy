@@ -41,6 +41,25 @@ int main(int argc, char ** argv)
   }
   require(result.state.velocity.cwiseAbs().maxCoeff() < 1.0e-8, "Ruckig did not stop");
 
+  // Independent model references can outrun the optional output limiter. All
+  // lost displacement must be recovered, not just the terminal velocity.
+  require(limiter.reset(ArmMotionState{}), "position test reset failed");
+  ArmJointVector model_position = ArmJointVector::Zero();
+  for (int tick = 0; tick < 1000; ++tick) {
+    if (tick < 80) model_position[0] += 2.0 * 0.005;
+    result = limiter.update_position(model_position);
+    require(result.accepted, "position reference rejected");
+    require(result.velocity_ratio <= 1.0 + limits.validation_tolerance, "position velocity limit");
+    require(result.acceleration_ratio <= 1.0 + limits.validation_tolerance, "position acceleration limit");
+    require(result.jerk_ratio <= 1.0 + limits.validation_tolerance, "position jerk limit");
+  }
+  require((result.state.position-model_position).norm()<1e-8,
+    "position reference lost displacement after velocity saturation");
+  const auto previous = limiter.state().position;
+  model_position[0] = 2.0;
+  require(!limiter.update_position(model_position).accepted, "out-of-bounds position accepted");
+  require((limiter.state().position-previous).norm()==0, "invalid target changed trajectory state");
+
   ConsecutiveFailureWindow failures(150000000);
   require(!failures.failed(1000000000), "failure window expired immediately");
   require(!failures.failed(1149999999), "failure window expired early");

@@ -276,6 +276,9 @@ class MujocoExecutor:
         hand_config: WujiHandConfig | Mapping[str, Any] | str | os.PathLike[str] | None = None,
         hand_sides: tuple[str, ...] = SIDES,
         hand_overlay: bool = False,
+        pico_overlay: bool = False,
+        ik_target_overlay: bool = False,
+        overlay_urdf: Path | None = None,
         run_id: str | None = None,
         safety_supervisor_instance_id: str | None = None,
         command_timeout_s: float = 0.2,
@@ -356,7 +359,16 @@ class MujocoExecutor:
         self._healthy = True
         self._last_error: str | None = None
         self._frame0_overlay: Frame0Overlay | None = None
+        self._pico_overlay = None
+        if pico_overlay:
+            from .pico_overlay import PicoRawOverlay
+            self._pico_overlay = PicoRawOverlay(router_zid)
         self._frame0_sequence = -1
+        self._ik_target_overlay = None
+        if ik_target_overlay:
+            from .ik_target_overlay import IkTargetOverlay
+            asset = overlay_urdf or Path(__file__).resolve().parents[3] / 'assets/tianji_wuji2/tianji_wuji2.urdf'
+            self._ik_target_overlay = IkTargetOverlay(asset, router_zid, self.source_instance_id)
         self._home_wrist_frame: tuple[np.ndarray, np.ndarray] | None = None
         self._frame0_geometry_error: str | None = None
         self._subscriptions: list[Any] = []
@@ -424,6 +436,14 @@ class MujocoExecutor:
     def _setup_transport(self) -> None:
         if self.session is None:
             return
+        if self._ik_target_overlay is not None:
+            for side in SIDES:
+                self._subscriptions.append(_declare_subscriber(
+                    self.session, topics.arm_target(side), self.on_ik_target))
+        if self._pico_overlay is not None:
+            self._subscriptions.append(_declare_subscriber(
+                self.session, topics.RAW_PICO_HAND_TRACKING, self.on_pico_raw
+            ))
         # State/safety subscribers are deliberately declared before ready status.
         self._subscriptions.extend([
             _declare_subscriber(self.session, topics.SESSION_STATE, self.on_session_state),
@@ -758,7 +778,12 @@ class MujocoExecutor:
         return ComponentStatus(
             1, self._status_sequence, int(self.clock()), "executor_arm", "mujoco",
             phase, ready and self._healthy, healthy and self._healthy, ["simulation"], self._last_error,
-            {"headless": True, "safety_locked": self._safety_locked, "hand_overlay": self.hand_overlay, "commands_sent": self._command_count},
+            {"headless": True, "safety_locked": self._safety_locked,
+             "hand_overlay": self.hand_overlay, "commands_sent": self._command_count,
+             "ik_target_overlay": ({"state": "disabled"} if self._ik_target_overlay is None
+                                   else self._ik_target_overlay.diagnostics(int(self.clock()))),
+             "pico_overlay": ({"state": "disabled"} if self._pico_overlay is None
+                              else self._pico_overlay.snapshot(int(self.clock()))[1])},
             self.publisher_instance_id, self.router_zid,
         )
 
@@ -840,6 +865,40 @@ class MujocoExecutor:
         self._publish_states()
         return applied
 
+    def on_ik_target(self, sample: Any) -> bool:
+        if self._ik_target_overlay is None:
+            return False
+        try:
+            return self._ik_target_overlay.ingest(_sample_payload(sample), int(self.clock()))
+        except (ValueError, TypeError, KeyError):
+            return False
+
+    def on_pico_raw(self, sample: Any) -> bool:
+        if self._pico_overlay is None:
+            return False
+        try:
+            payload = _sample_payload(sample)
+        except (ValueError, TypeError) as exc:
+            self._pico_overlay.reject(str(exc))
+            return False
+        return self._pico_overlay.ingest(payload, int(self.clock()))
+
+    def update_viewer_overlays(self, viewer: Any, *, mujoco_module: Any = None) -> None:
+        if mujoco_module is None:
+            import mujoco as mujoco_module
+        # Frame0 retains its legacy API and owns its own lock; append raw only
+        # after it finishes. A single clear prevents accumulation or wiping it.
+        if self._frame0_overlay is None:
+            with viewer.lock():
+                viewer.user_scn.ngeom = 0
+        self.update_frame0_viewer_overlay(viewer, mujoco_module=mujoco_module)
+        if self._pico_overlay is not None:
+            with viewer.lock():
+                self._pico_overlay.append(viewer.user_scn, mujoco_module, int(self.clock()))
+        if self._ik_target_overlay is not None:
+            with viewer.lock():
+                self._ik_target_overlay.append(viewer.user_scn, mujoco_module, int(self.clock()))
+
     def update_frame0_viewer_overlay(
         self,
         viewer: Any,
@@ -920,7 +979,7 @@ class MujocoExecutor:
             while viewer.is_running():
                 started = time.monotonic()
                 self.tick()
-                self.update_frame0_viewer_overlay(
+                self.update_viewer_overlays(
                     viewer, mujoco_module=mujoco
                 )
                 viewer.sync()
@@ -953,6 +1012,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="canonical MuJoCo executor")
     parser.add_argument("--headless", action="store_true", help="run without mujoco.viewer")
     parser.add_argument("--hand-overlay", action="store_true", help="consume hand commands without publishing hand authority")
+    parser.add_argument("--pico-overlay", action="store_true", help="display passive raw PICO headset, wrists and 26-joint hands")
+    parser.add_argument("--ik-target-overlay", action="store_true", help="display actual IK input TCP targets in robot world coordinates")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--urdf", type=Path, default=None)
     parser.add_argument("--rate", type=float, default=60.0)
@@ -1005,6 +1066,9 @@ def main(argv: list[str] | None = None) -> int:
             source_instance_id=os.environ.get("TIANJI_SOURCE_INSTANCE_ID"),
             hand_sides=hand_sides,
             hand_overlay=args.hand_overlay,
+            pico_overlay=args.pico_overlay or configured.get("pico_overlay") is True,
+            ik_target_overlay=args.ik_target_overlay or configured.get("ik_target_overlay") is True,
+            overlay_urdf=urdf,
             run_id=args.run_id or None,
             safety_supervisor_instance_id=os.environ.get("TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID"),
         )

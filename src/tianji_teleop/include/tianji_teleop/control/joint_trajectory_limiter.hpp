@@ -48,11 +48,14 @@ public:
 
   bool reset(const ArmMotionState & state) noexcept;
   JointTrajectoryResult update(const ArmJointVector & target_velocity);
+  // Follow an independently integrated model without losing limited displacement.
+  JointTrajectoryResult update_position(const ArmJointVector & target_position);
   const ArmMotionState & state() const noexcept {return state_;}
   bool initialized() const noexcept {return initialized_;}
 
 private:
   bool valid_state(const ArmMotionState & state) const noexcept;
+  JointTrajectoryResult update_target(const ArmJointVector & target, bool position_mode);
 
   JointTrajectoryLimits limits_;
   double control_period_s_;
