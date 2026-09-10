@@ -150,6 +150,18 @@ value = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
 print("true" if value.get("linear_interpolation") is True else "false")
 PY
     )"
+    retarget_backend="$(
+      pixi run python - "${config}" <<'PY'
+import sys
+import yaml
+value = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+print(value.get("retarget_backend", "geometry"))
+PY
+    )"
+    case "${retarget_backend}" in
+      geometry|official_wuji_hand2) ;;
+      *) printf '错误：未知 Wuji retarget backend: %s\n' "${retarget_backend}" >&2; exit 2 ;;
+    esac
     args=(--mode "${mode}" --side "${side}" --rate "${rate}")
     if [[ "${required_capability}" == real && "${side}" == right ]]; then
       wuji_serial="${TIANJI_WUJI_SERIAL:-$(device_config_value wuji_hand2 right serial)}"
@@ -168,7 +180,7 @@ PY
       if [[ -n "${native}" ]]; then
         exec "${native}" "${native_args[@]}" --dry-run "$@"
       fi
-      exec python "${entry}" "${args[@]}" --dry-run "$@"
+      exec python "${entry}" "${args[@]}" --retarget-backend "${retarget_backend}" --dry-run "$@"
     fi
     if [[ -z "${native}" ]]; then
       printf '%s\n' '错误：real Wuji executor requires the native wuji_hand2_bridge with SDK support; refusing Python no-op fallback.' >&2

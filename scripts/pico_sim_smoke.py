@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import pty
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -28,14 +29,73 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src/tianji_teleop'))
 from tests.test_pico_mujoco_pipeline import packet
 
+def official_packet(displacement, bend):
+    """Nondegenerate official-hand fixture, preserving the old arm input."""
+    from tests.test_pico_hand_service import wire_frame
+    template = wire_frame()
+    result = bytearray(packet(displacement, bend))
+    for side_index, side in enumerate(('left', 'right')):
+        start = 14 + 32 + side_index * (32 + 26 * 36)
+        wrist = np.asarray(struct.unpack_from('<3f', result, start + 4))
+        hand = template.hands[side]
+        for index, joint in enumerate(hand.joints):
+            point = np.asarray(joint.pose[:3]) - np.asarray(hand.wrist_pose[:3])
+            point[2] += bend * (index % 5)
+            struct.pack_into('<3f', result, start + 32 + index * 36 + 4, *(wrist + point))
+    return bytes(result)
 
-def main():
+
+def gesture_packet(displacement, bend, opened):
+    from tests.test_gesture_recognition import hand_points
+    from tianji_teleop.hand_tracking.pico import PICO_TO_MEDIAPIPE
+    points = hand_points(curled=not opened)
+    result = bytearray(official_packet(displacement, bend))
+    for side_index in range(2):
+        start = 14 + 32 + side_index * (32 + 26 * 36)
+        wrist = np.asarray(struct.unpack_from('<3f', result, start + 4))
+        for index, raw_index in enumerate(PICO_TO_MEDIAPIPE):
+            point = points[index] + [0, 0, bend * (index % 4)]
+            struct.pack_into('<3f', result, start + 32 + raw_index * 36 + 4, *(wrist + point))
+    return bytes(result)
+
+
+def observed_gesture_release(rows, *, since_ns, now_ns):
+    """Smoke stimulus acknowledgement, not a production authorization gate.
+
+    A short wall-time Event pulse can be missed entirely by the TCP feeder
+    under scheduling delay. Require three fresh, contiguous observed fists.
+    """
+    tail = list(rows)[-3:]
+    if len(tail) != 3:
+        return False
+    identity = (tail[0]['receiver_instance_id'], tail[0]['connection_generation'])
+    for row in tail:
+        if (not since_ns <= row['received_timestamp_ns'] <= now_ns or
+                now_ns - row['received_timestamp_ns'] > 200_000_000 or
+                (row['receiver_instance_id'], row['connection_generation']) != identity or
+                set(row['hands']) != {'left', 'right'} or
+                not all(hand['available'] and hand['gesture'] == 'fist' for hand in row['hands'].values())):
+            return False
+    return all(b['receiver_frame_sequence'] == a['receiver_frame_sequence'] + 1 and
+               b['received_timestamp_ns'] > a['received_timestamp_ns']
+               for a, b in zip(tail, tail[1:]))
+
+
+def main(*, test_router_endpoint=None, test_runtime_directory=None):
+    # Only an explicit in-process test caller may supply its own isolated router.
+    # Never reuse TIANJI_ROUTER_ENDPOINT implicitly for synthetic control input.
     arms_only = '--disable-hands' in sys.argv[1:]
+    official_profile = '--official-hands-profile' in sys.argv
+    gesture_start_test = '--gesture-start-test' in sys.argv
+    if gesture_start_test and not official_profile:
+        raise ValueError('gesture-start-test requires explicit new official-hands profile')
     tracking_loss_test = '--tracking-loss-test' in sys.argv
-    if tracking_loss_test and not arms_only:
+    if tracking_loss_test and not arms_only and not official_profile:
         raise ValueError('tracking-loss-test requires --disable-hands')
     loss_mask = 0
     overrides = []
+    if gesture_start_test:
+        overrides += ['--operator-input', 'gesture']
     if '--pico-overlay' in sys.argv:
         overrides.append('--pico-overlay')
     if '--ik-target-overlay' in sys.argv:
@@ -48,6 +108,7 @@ def main():
     processes = []
     stop = threading.Event()
     moving = threading.Event()
+    gesture_released = threading.Event()
     latest = {}
     counts = collections.Counter()
     samples = collections.defaultdict(lambda: collections.deque(maxlen=500))
@@ -74,7 +135,9 @@ def main():
                 while not stop.is_set():
                     value = (1 - math.cos((time.monotonic() - started) * 1.5)) / 2 if moving.is_set() else 0
                     try:
-                        frame = bytearray(packet(0.015 * value, 0.01 * value))
+                        frame = bytearray(gesture_packet(0.015 * value, .01 * value, not gesture_released.is_set())
+                            if gesture_start_test else
+                            (official_packet if official_profile else packet)(0.015 * value, 0.01 * value))
                         frame[15] &= ~loss_mask  # PICO v1 validity flags; TCP stays live
                         connection.sendall(frame)
                     except OSError:
@@ -87,10 +150,13 @@ def main():
         except (ValueError, UnicodeError):
             return
         key = str(sample.key_expr)
+        if key == 'tianji/producer/status' and value.get('component_role') == 'producer_hand':
+            key += '/hand'  # separate diagnostic slot; never alter the actual topic
         with lock:
             latest[key] = value
             counts[key] += 1
-            if '/state/' in key or '/command/' in key or '/proposal/' in key:
+            if ('/state/' in key or '/command/' in key or '/proposal/' in key or
+                    key == 'tianji/observation/operator/pico_gestures'):
                 samples[key].append(value)
 
     def wait_for(predicate, timeout, label):
@@ -109,10 +175,11 @@ def main():
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
             port = probe.getsockname()[1]
-        endpoint = f'tcp/127.0.0.1:{port}'
-        with (output / 'router.log').open('wb') as log:
-            processes.append(subprocess.Popen([str(ROOT / 'vendor/zenoh-router/zenohd'), '-l', endpoint,
-                                               '--no-multicast-scouting'], stdout=log, stderr=log))
+        endpoint = test_router_endpoint or f'tcp/127.0.0.1:{port}'
+        if test_router_endpoint is None:
+            with (output / 'router.log').open('wb') as log:
+                processes.append(subprocess.Popen([str(ROOT / 'vendor/zenoh-router/zenohd'), '-l', endpoint,
+                                                   '--no-multicast-scouting'], stdout=log, stderr=log))
         time.sleep(1)
         config = zenoh.Config()
         config.insert_json5('mode', '"client"')
@@ -132,8 +199,9 @@ def main():
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
         env = dict(os.environ, TIANJI_ROUTER_ENDPOINT=endpoint,
-                   TIANJI_TELEOP_RUNTIME_DIR=str(output / 'runtime'))
-        launcher = subprocess.Popen(['bash', 'scripts/run_session.sh', '--profile', 'hand_tracking_sim',
+                   TIANJI_TELEOP_RUNTIME_DIR=str(test_runtime_directory or output / 'runtime'))
+        launcher = subprocess.Popen(['bash', 'scripts/run_session.sh', '--profile',
+                                     'pico2_hands_sim' if official_profile else 'hand_tracking_sim',
                                      '--headless', '--observation-config', str(config_path),
                                      '--record', str(output / 'session.h5'),
                                      *(['--disable-hands'] if arms_only else []), *overrides], cwd=ROOT, env=env,
@@ -178,7 +246,19 @@ def main():
             result['height_calibration_retry_recovered'] = True
             assert latest['tianji/session/state']['state'] != 'teleop'
             result['height_calibration'] = latest['tianji/source/status']['diagnostics']['height_calibration']
-        os.write(master, b's')
+        if gesture_start_test:
+            assert latest.get('tianji/session/state', {}).get('state') != 'teleop', 'held-open startup authorized'
+            released_since = time.monotonic_ns()
+            gesture_released.set()
+            try:
+                wait_for(lambda: observed_gesture_release(
+                    samples['tianji/observation/operator/pico_gestures'],
+                    since_ns=released_since, now_ns=time.monotonic_ns()),
+                    10, 'synthetic fist release received')
+            finally:
+                gesture_released.clear()
+        else:
+            os.write(master, b's')
         wait_for(lambda: latest.get('tianji/session/state', {}).get('state') == 'teleop', 30, 'teleop authorization')
         print('Teleop authorized; exercising synthetic movement', flush=True)
         if '--ik-target-overlay' in overrides:
@@ -187,7 +267,7 @@ def main():
                 for side in ('left', 'right')), 10, 'IK target overlay receiver')
             result['ik_target_overlay'] = latest['tianji/executor/status']['diagnostics']['ik_target_overlay']
         if '--joint-limit-source' in overrides and overrides[overrides.index('--joint-limit-source') + 1] == 'urdf':
-            snapshots = list((output / 'runtime').glob('*-arm-limits.yaml'))
+            snapshots = list(Path(env['TIANJI_TELEOP_RUNTIME_DIR']).glob('*-arm-limits.yaml'))
             assert len(snapshots) == 1, 'missing shared URDF arm config'
             limits = yaml.safe_load(snapshots[0].read_text())
             assert limits['upper_limits_rad'][5] == 1.0472
@@ -295,6 +375,13 @@ def main():
                                     if v['timestamp_ns'] >= boundary]
                         assert len(commands) > 20, 'missing hold heartbeat commands'
                         assert np.max(np.ptp(np.array(commands), axis=0)) == 0, 'arm drifted during tracking loss'
+                        if official_profile and not arms_only:
+                            hands = [v['position_rad'] for v in samples[f'tianji/state/hand/{side}']
+                                     if v['timestamp_ns'] >= boundary]
+                            assert len(hands) > 20, 'missing actual hand hold feedback'
+                            assert np.max(np.ptp(np.asarray(hands), axis=0)) == 0, 'lost hand moved'
+                            assert not any(v['timestamp_ns'] >= boundary
+                                           for v in samples[f'tianji/command/hand/{side}']), 'fabricated lost-hand command'
                     if len(sides) == 1:
                         commands = [v['position_rad'] for v in samples['tianji/command/arm/right']
                                     if v['timestamp_ns'] >= boundary]
@@ -348,6 +435,32 @@ def main():
                         assert raw[f'hands/{side}/joint_poses'].shape == (frames, 26, 7)
                     assert len(raw['raw_packet']) == frames
                     result['raw_pico_frames'] = frames
+                if official_profile:
+                    from tianji_teleop.recording.session_h5 import SessionH5Reader
+                    with SessionH5Reader(output / 'session.h5') as reader:
+                        assert reader.file.attrs['source_type'] == 'pico2_hands_sim'
+                        metadata = reader.read_hand_tracking_metadata()
+                        assert metadata['resolved_configuration']['profile'] == 'pico2_hands_sim'
+                        assert metadata['pico_hand_adapter'] == 'pico26_to_official_hand2_yflip_scale_v2'
+                        assert reader.read_manus_callbacks() == []
+                        gestures = [row for row in reader.read_dual_audit()
+                                    if row['kind'] == 'operator_observation']
+                        assert len(gestures) > 10, 'missing passive gesture observations'
+                        assert all(row['payload']['algorithm'] == 'pico21_geometry_v1' for row in gestures)
+                        status_topics = {row['payload']['topic'] for row in reader.read_dual_audit()
+                                         if row['kind'] == 'component_status'}
+                        assert {'tianji/source/status', 'tianji/coordinator/status',
+                                'tianji/producer/status', 'tianji/executor/status'} <= status_topics
+                        if gesture_start_test:
+                            results = [row['payload'] for row in reader.read_dual_audit()
+                                       if row['kind'] == 'operator_result']
+                            assert len(results) == 1 and results[0]['request_forwarded'], 'missing/duplicate gesture request'
+                    if not arms_only:
+                        from tianji_teleop.recording.pico_hand_command_check import check_pico_hand_commands
+                        reconstruction = check_pico_hand_commands(output / 'session.h5', root=ROOT)
+                        assert reconstruction['passed'], reconstruction['first_difference']
+                        assert reconstruction['matched_commands'] > 10, 'insufficient reconstructed hand commands'
+                        result['hand_recording_reconstruction'] = reconstruction
             except Exception as error:
                 result.update(passed=False, error=f'HDF5 verification: {error}')
         (output / 'result.json').write_text(json.dumps(result, indent=2))

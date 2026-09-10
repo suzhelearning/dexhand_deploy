@@ -1,0 +1,19 @@
+{
+  "source_commit": null,
+  "reason": "source Manus directory has no Git metadata",
+  "transformation": "one package-relative import only",
+  "files": [
+    {
+      "destination": "manus_hand_input.py",
+      "source": "manus/manus_hand_input.py",
+      "source_sha256": "3036934217296295ba4d87df393fe717d9e701e13142caaf1ea0b43585b1887c",
+      "sha256": "d68f0f601ad47cc6ec6ba1cca253f6c4176b2711616359f1a00ace404db4a884"
+    },
+    {
+      "destination": "wuji2_hand_input.py",
+      "source": "manus/wuji2_hand_input.py",
+      "source_sha256": "23ffe81fe04451a43876a79b849cbafb200461b4957ce29d561e81913cef3d96",
+      "sha256": "23ffe81fe04451a43876a79b849cbafb200461b4957ce29d561e81913cef3d96"
+    }
+  ]
+}

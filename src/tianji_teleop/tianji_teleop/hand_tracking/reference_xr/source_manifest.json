@@ -1,0 +1,55 @@
+{
+  "source_commit": "59028470b8be4abfdd052ff35a06ca73413d9590",
+  "scope": "XR incremental math only; no ROS, SDK acquisition or robot execution",
+  "files": [
+    {
+      "destination": "incremental_controller.py",
+      "source": "src/input_devices/pico_input/pico_input/incremental_controller.py",
+      "source_sha256": "9d1a802806789529e850a1ceb6de9af3bbbbf9cee8cc21ee4c8e5ba180c41c45",
+      "replacements": [
+        [
+          "from tianji_world_output.config_loader import",
+          "from .config_loader import"
+        ],
+        [
+          "from tianji_world_output.transform_utils import",
+          "from .transform_utils import"
+        ],
+        [
+          "from pico_input.one_euro_filter import",
+          "from .one_euro_filter import"
+        ]
+      ]
+    },
+    {
+      "destination": "one_euro_filter.py",
+      "source": "src/input_devices/pico_input/pico_input/one_euro_filter.py",
+      "source_sha256": "1eb92687aada73800584315da4b4f703ee1ff273b592ae47ff187a164c8e12fc",
+      "replacements": []
+    },
+    {
+      "destination": "transform_utils.py",
+      "source": "src/output_devices/tianji_world_output/tianji_world_output/transform_utils.py",
+      "source_sha256": "73c80515502b557a1164f56abbdb380276bd39385cfc28824ac0e4071ba6ed82",
+      "replacements": []
+    },
+    {
+      "destination": "config_loader.py",
+      "source": "src/output_devices/tianji_world_output/tianji_world_output/config_loader.py",
+      "source_sha256": "48dc4939e0d11b58eb85da9a9c88e9dfdf65ffeced27004562fd6a7da34cb9c3",
+      "replacements": []
+    },
+    {
+      "destination": "config/tianji_robot.yaml",
+      "source": "src/output_devices/tianji_world_output/config/tianji_robot.yaml",
+      "source_sha256": "8645eefe788c903e9de48cb19e2b69b9f1f4cda589b541061413704a408b6aa8",
+      "replacements": []
+    },
+    {
+      "destination": "LICENSE",
+      "source": "LICENSE",
+      "source_sha256": "2fd3d9ab96c90f9af4b7ca85cfdeaa9ff0f8cdb43f243533786a4d8f38a137f9",
+      "replacements": []
+    }
+  ]
+}

@@ -55,9 +55,11 @@ class HandTrackingModelTest(unittest.TestCase):
             receiver_frame_sequence=3,
             mapping_version="pico_head_current_v1",
             frame_association_id="receiver:1:3",
+            elbow_pose=np.array([0.4, 0.5, 0.6, 0.0, 0.0, 0.0, 1.0]),
         )
 
         self.assertEqual(observation.to_dict()["reference_frame"], PICO_HEAD_CURRENT_FRAME)
+        np.testing.assert_allclose(observation.to_dict()["elbow_pose"], [0.4, 0.5, 0.6, 0, 0, 0, 1])
         with self.assertRaises(ValueError):
             ArmInputObservation(
                 source="pico",

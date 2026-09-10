@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""termios 原始模式键盘监听（模式同 /home/current/syz/mocap/acquisition）。
+"""termios 原始模式键盘监听（模式同采集端约定）。
 
 用法（后台线程）:
 

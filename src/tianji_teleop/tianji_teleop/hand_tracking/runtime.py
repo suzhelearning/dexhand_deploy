@@ -38,6 +38,9 @@ from .models import (
     PicoRawFrame,
     PicoRawHand,
 )
+from .reference_manus_process import ManusCallback
+from .xr_input import XrBindingConfig, XrFrame
+from .xr_manus_runtime import encode_manus_callback, xr_frame_arm_observations
 from .pico import HEADER, MAGIC, MESSAGE_TYPE, PAYLOAD_BYTES, pico_to_mediapipe, parse_pico_packet, tracking_pose_to_current_head
 
 
@@ -190,16 +193,20 @@ class ObservationRuntime:
         router_zid: str,
         session_writer: Any = None,
         clock: Callable[[], int] = time.monotonic_ns,
+        run_id: str | None = None,
     ) -> None:
         if not callable(publish):
             raise TypeError("publish must be callable")
         if not publisher_instance_id or not router_zid:
             raise ValueError("publisher_instance_id and router_zid are required")
+        if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
+            raise ValueError("run_id must be a non-empty string when supplied")
         self._publish = publish
         self.publisher_instance_id = publisher_instance_id
         self.router_zid = router_zid
         self.session_writer = session_writer
         self._clock = clock
+        self.run_id = run_id.strip() if run_id is not None else None
         self._sequence = 0
         self._manus_frame_sequence = 0
 
@@ -243,6 +250,12 @@ class ObservationRuntime:
             self.session_writer.append_hand_observation(observation)
         return wire
 
+    def publish_hand_observation(self, observation: HandObservation) -> HandSkeletonObservation:
+        """Publish one already validated canonical hand observation."""
+        if not isinstance(observation, HandObservation):
+            raise TypeError("observation must be HandObservation")
+        return self._publish_hand(observation)
+
     def _publish_arm(self, observation: ArmInputObservation) -> ArmInputObservationWire:
         envelope = self._next_envelope(observation.received_timestamp_ns)
         wire = ArmInputObservationWire(
@@ -265,11 +278,123 @@ class ObservationRuntime:
             frame_association_id=observation.frame_association_id,
             publisher_instance_id=envelope.publisher_instance_id,
             router_zid=envelope.router_zid,
+            elbow_pose=None if observation.elbow_pose is None else observation.elbow_pose.tolist(),
         )
         self._publish(topics.arm_input_observation(observation.side), wire.to_dict())
         if self.session_writer is not None:
             self.session_writer.append_arm_input_observation(observation)
         return wire
+
+    def publish_arm_observation(self, observation: ArmInputObservation) -> ArmInputObservationWire:
+        """Publish one already validated canonical arm observation."""
+        if not isinstance(observation, ArmInputObservation):
+            raise TypeError("observation must be ArmInputObservation")
+        return self._publish_arm(observation)
+
+    def ingest_xr(
+        self,
+        frame: XrFrame,
+        binding: XrBindingConfig,
+        *,
+        tracked_frame: str | None = None,
+        reference_frame: str = "xr_tracking",
+    ) -> dict[str, ArmInputObservationWire]:
+        """Publish one raw XR snapshot and its two canonical arm inputs."""
+        if not isinstance(frame, XrFrame) or not isinstance(binding, XrBindingConfig):
+            raise TypeError("frame and binding are required")
+        selected_frame = tracked_frame or (
+            "controller" if binding.arm_input == "xr_controller" else "wrist_tracker"
+        )
+        if self.session_writer is not None:
+            self.session_writer.append_raw_xr(frame)
+        self._publish(
+            topics.RAW_XR_INPUT,
+            {**frame.to_dict(), "router_zid": self.router_zid,
+             "receiver_instance_id": frame.receiver_instance_id},
+        )
+        observations = xr_frame_arm_observations(
+            frame,
+            binding=binding,
+            tracked_frame=selected_frame,
+            reference_frame=reference_frame,
+            receiver_instance_id=frame.receiver_instance_id,
+            source_instance_id=frame.receiver_instance_id,
+        )
+        return {side: self._publish_arm(observation) for side, observation in observations.items()}
+
+    def _publish_manus_audit(self, payload: dict[str, Any], *, received_timestamp_ns: int) -> None:
+        """Publish one managed rawviz audit row without changing data flow."""
+        if self.run_id is None:
+            return
+        message = {
+            "schema_version": 1,
+            "router_zid": self.router_zid,
+            "run_id": self.run_id,
+            "received_timestamp_ns": received_timestamp_ns,
+            **payload,
+        }
+        self._publish(topics.MANUS_INPUT_AUDIT, message)
+        if self.session_writer is not None and hasattr(self.session_writer, "append_dual_audit"):
+            stored = dict(message)
+            stored.pop("router_zid")
+            self.session_writer.append_dual_audit(
+                message["kind"], stored, received_timestamp_ns=received_timestamp_ns
+            )
+
+    def publish_manus_rawviz_line(
+        self, text: str, *, line_sequence: int, received_timestamp_ns: int
+    ) -> None:
+        """Publish one rawviz stdout line before the reference parser consumes it."""
+        if self.run_id is None:
+            raise ValueError("run_id is required for rawviz audit")
+        if type(line_sequence) is not int or not 0 < line_sequence < 2**63:
+            raise ValueError("rawviz line sequence must be a positive int64")
+        if type(received_timestamp_ns) is not int or not 0 < received_timestamp_ns < 2**63:
+            raise ValueError("rawviz receive timestamp must be a positive int64")
+        if not isinstance(text, str) or "\n" in text:
+            raise ValueError("rawviz line must be a single text line")
+        try:
+            encoded_length = len(text.encode("utf-8"))
+        except UnicodeError as exc:
+            raise ValueError("rawviz line must be valid UTF-8") from exc
+        if encoded_length > 65536:
+            raise ValueError("rawviz line exceeds 65536 bytes")
+        self._publish_manus_audit(
+            {
+                "kind": "manus_rawviz_line",
+                "line_sequence": line_sequence,
+                "text": text,
+                "terminator": "LF",
+                "input_stage": "rawviz_stdout_before_parser",
+            },
+            received_timestamp_ns=received_timestamp_ns,
+        )
+
+    def publish_manus_callback(self, callback: ManusCallback) -> None:
+        """Publish and optionally record one complete rawviz callback."""
+        if not isinstance(callback, ManusCallback):
+            raise TypeError("callback must be ManusCallback")
+        payload = encode_manus_callback(callback, self.router_zid)
+        self._publish(topics.RAW_MANUS_CALLBACK, payload)
+        if self.session_writer is not None:
+            self.session_writer.append_manus_callback(
+                callback.points,
+                callback_sequence=callback.sequence,
+                received_timestamp_ns=callback.received_timestamp_ns,
+                receiver_instance_id=callback.receiver_instance_id,
+                source_sequences=callback.source_sequences,
+                source_timestamps_ns=callback.source_timestamps_ns,
+            )
+        self._publish_manus_audit(
+            {
+                "kind": "manus_callback_metadata",
+                "callback_sequence": callback.sequence,
+                "receiver_instance_id": callback.receiver_instance_id,
+                "source_sequences": dict(callback.source_sequences),
+                "source_timestamps_ns": dict(callback.source_timestamps_ns),
+            },
+            received_timestamp_ns=callback.received_timestamp_ns,
+        )
 
     def ingest_pico(self, frame: PicoRawFrame) -> dict[str, tuple[HandSkeletonObservation, ArmInputObservationWire]]:
         if not isinstance(frame, PicoRawFrame):

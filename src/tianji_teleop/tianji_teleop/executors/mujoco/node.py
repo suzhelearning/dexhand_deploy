@@ -13,12 +13,15 @@ import logging
 import os
 from pathlib import Path
 import time
+from threading import RLock
 from typing import Any, Mapping
 
 import numpy as np
 
 from ...coordination.arm_command_coordinator import ArmRobotConfig
+from ...coordination.bilateral_robot import BilateralArmRobotConfig
 from ...protocol import topics
+from ...protocol.bilateral import ArmBilateralCommand, ARM_BILATERAL_COMMAND
 from ...protocol.messages import (
     ALL_ARM_JOINT_NAMES,
     ARM_JOINT_NAMES,
@@ -273,10 +276,13 @@ class MujocoExecutor:
         router_zid: str,
         coordinator_instance_id: str,
         source_instance_id: str | None = None,
+        robot_config: ArmRobotConfig | BilateralArmRobotConfig | None = None,
+        bilateral_session: Mapping[str, Any] | None = None,
         hand_config: WujiHandConfig | Mapping[str, Any] | str | os.PathLike[str] | None = None,
         hand_sides: tuple[str, ...] = SIDES,
         hand_overlay: bool = False,
         pico_overlay: bool = False,
+        xr_overlay: bool = False,
         ik_target_overlay: bool = False,
         overlay_urdf: Path | None = None,
         run_id: str | None = None,
@@ -288,6 +294,19 @@ class MujocoExecutor:
             raise ValueError("executor, router, and coordinator identities are required")
         if command_timeout_s <= 0.0:
             raise ValueError("command_timeout_s must be positive")
+        self._bilateral_session = None
+        if bilateral_session is not None:
+            if (not isinstance(bilateral_session, Mapping) or set(bilateral_session) != {'run_id', 'execution_epoch'} or
+                    not isinstance(bilateral_session['run_id'], str) or not bilateral_session['run_id'].strip() or
+                    type(bilateral_session['execution_epoch']) is not int or not 0 < bilateral_session['execution_epoch'] < 2**63):
+                raise ValueError('invalid bilateral executor session binding')
+            self._bilateral_session = dict(bilateral_session)
+            if run_id is not None and run_id != bilateral_session['run_id']:
+                raise ValueError('bilateral executor run_id mismatch')
+            run_id = bilateral_session['run_id']
+        self._bilateral_lock = RLock() if self._bilateral_session is not None else None
+        self._bilateral_faulted = False
+        self._bilateral_sequence = -1
         self.session = session
         self.model = model
         self.data = data
@@ -299,7 +318,9 @@ class MujocoExecutor:
         self.safety_supervisor_instance_id = safety_supervisor_instance_id
         self.command_timeout_ns = int(float(command_timeout_s) * 1e9)
         self.clock = clock
-        self.robot = ArmRobotConfig.load()
+        if robot_config is not None and not isinstance(robot_config, (ArmRobotConfig, BilateralArmRobotConfig)):
+            raise ValueError("robot_config must be a validated arm robot configuration")
+        self.robot = robot_config if robot_config is not None else ArmRobotConfig.load()
         self.hand_config = (
             hand_config if isinstance(hand_config, WujiHandConfig)
             else WujiHandConfig.from_mapping(hand_config)
@@ -314,8 +335,7 @@ class MujocoExecutor:
             side: _validate_model_joints(
                 model,
                 tuple(getattr(self.robot, f"{side}_joint_names")),
-                self.robot.lower_limits_rad,
-                self.robot.upper_limits_rad,
+                *self.robot.limits(side),
             )
             for side in SIDES
         }
@@ -353,6 +373,7 @@ class MujocoExecutor:
         self._latest_received_ns: dict[tuple[str, str], int] = {}
         self._state_sequence = 0
         self._command_count = 0
+        self._hand_commands_applied = 0
         self._status_sequence = 0
         self._safety_locked = False
         self._safety_ack: SafetyStopAck | None = None
@@ -363,6 +384,10 @@ class MujocoExecutor:
         if pico_overlay:
             from .pico_overlay import PicoRawOverlay
             self._pico_overlay = PicoRawOverlay(router_zid)
+        self._xr_overlay = None
+        if xr_overlay:
+            from .xr_overlay import XrRawOverlay
+            self._xr_overlay = XrRawOverlay(router_zid)
         self._frame0_sequence = -1
         self._ik_target_overlay = None
         if ik_target_overlay:
@@ -444,6 +469,10 @@ class MujocoExecutor:
             self._subscriptions.append(_declare_subscriber(
                 self.session, topics.RAW_PICO_HAND_TRACKING, self.on_pico_raw
             ))
+        if self._xr_overlay is not None:
+            self._subscriptions.append(_declare_subscriber(
+                self.session, topics.RAW_XR_INPUT, self.on_xr_raw
+            ))
         # State/safety subscribers are deliberately declared before ready status.
         self._subscriptions.extend([
             _declare_subscriber(self.session, topics.SESSION_STATE, self.on_session_state),
@@ -456,10 +485,13 @@ class MujocoExecutor:
                 self.on_frame0_hand_skeleton,
             ),
         ])
-        self._subscriptions.extend([
-            _declare_subscriber(self.session, topics.arm_command("left"), self.on_arm_command),
-            _declare_subscriber(self.session, topics.arm_command("right"), self.on_arm_command),
-        ])
+        if self._bilateral_session is not None:
+            self._subscriptions.append(_declare_subscriber(self.session, ARM_BILATERAL_COMMAND, self.on_bilateral_command))
+        else:
+            self._subscriptions.extend([
+                _declare_subscriber(self.session, topics.arm_command("left"), self.on_arm_command),
+                _declare_subscriber(self.session, topics.arm_command("right"), self.on_arm_command),
+            ])
         for side in self.hand_sides:
             self._subscriptions.append(_declare_subscriber(self.session, topics.hand_command(side), self.on_hand_command))
         self._publishers = {
@@ -709,14 +741,13 @@ class MujocoExecutor:
         baseline[side] = (instance, sequence)
 
     def on_arm_command(self, value: ArmJointCommand | Mapping[str, Any] | Any) -> bool:
+        if self._bilateral_session is not None:
+            with self._bilateral_lock:
+                self._fail_bilateral('unpaired arm command on bilateral executor')
+            return False
         try:
             command = value if isinstance(value, ArmJointCommand) else ArmJointCommand.from_dict(_sample_payload(value))
-            if command.router_zid != self.router_zid or command.producer != "coordinator" or command.publisher_instance_id != self.coordinator_instance_id:
-                raise ProtocolError("arm command coordinator identity mismatch")
-            lower = getattr(self.robot, "lower_limits_rad")
-            upper = getattr(self.robot, "upper_limits_rad")
-            if any(value < lo or value > hi for value, lo, hi in zip(command.position_rad, lower, upper)):
-                raise ProtocolError("arm command exceeds robot hard limits")
+            self._validate_arm_command(command)
             self._accept_sequence("arm", command.side, command.publisher_instance_id, command.sequence)
             received = int(self.clock())
             self._pending_arm[command.side] = _Pending(command, received)
@@ -727,6 +758,51 @@ class MujocoExecutor:
             self._last_error = f"invalid arm command: {exc}"
             self._publish_status()
             return False
+
+    def _validate_arm_command(self, command):
+        if command.router_zid != self.router_zid or command.producer != 'coordinator' or command.publisher_instance_id != self.coordinator_instance_id:
+            raise ProtocolError('arm command coordinator identity mismatch')
+        lower, upper = self.robot.limits(command.side)
+        if any(value < lo or value > hi for value, lo, hi in zip(command.position_rad, lower, upper)):
+            raise ProtocolError('arm command exceeds robot hard limits')
+
+    def _fail_bilateral(self, reason):
+        self._bilateral_faulted = True
+        self._healthy = False
+        self._last_error = reason
+        # Discard even a previously valid but not-yet-applied pair: hold qpos,
+        # not a queued trajectory, until a new authorized session is created.
+        self._pending_arm.clear()
+        self._publish_status()
+
+    def on_bilateral_command(self, value) -> bool:
+        if self._bilateral_session is None:
+            return False
+        with self._bilateral_lock:
+            if self._bilateral_faulted or self._safety_locked:
+                return False
+            try:
+                pair = ArmBilateralCommand.from_dict(value.to_dict() if isinstance(value, ArmBilateralCommand)
+                                                     else _sample_payload(value))
+                if (pair.run_id != self._bilateral_session['run_id'] or
+                        pair.execution_epoch != self._bilateral_session['execution_epoch'] or
+                        pair.left.sequence <= self._bilateral_sequence):
+                    return False
+                received = int(self.clock())
+                if not 0 <= received - pair.left.timestamp_ns <= self.command_timeout_ns:
+                    raise ProtocolError('paired command timestamp stale or future-dated')
+                for side in SIDES:
+                    self._validate_arm_command(getattr(pair, side))
+                # Both validated BEFORE either side can become visible to tick.
+                self._pending_arm = {side: _Pending(getattr(pair, side), received) for side in SIDES}
+                for side in SIDES:
+                    self._arm_baseline[side] = (pair.left.publisher_instance_id, pair.left.sequence)
+                    self._latest_received_ns[('arm', side)] = received
+                self._bilateral_sequence = pair.left.sequence
+                return True
+            except (ProtocolError, TypeError, ValueError) as exc:
+                self._fail_bilateral(f'invalid paired command: {exc}')
+                return False
 
     def on_hand_command(self, value: HandJointCommand | Mapping[str, Any] | Any) -> bool:
         try:
@@ -746,6 +822,12 @@ class MujocoExecutor:
             return False
 
     def on_safety_stop(self, value: SafetyStopRequest | Mapping[str, Any] | Any) -> bool:
+        if self._bilateral_lock is not None:
+            with self._bilateral_lock:
+                return self._on_safety_stop(value)
+        return self._on_safety_stop(value)
+
+    def _on_safety_stop(self, value: SafetyStopRequest | Mapping[str, Any] | Any) -> bool:
         if self.safety_supervisor_instance_id is None or self.run_id is None:
             self._last_error = "safety stop rejected: authorization is not configured"
             return False
@@ -780,10 +862,13 @@ class MujocoExecutor:
             phase, ready and self._healthy, healthy and self._healthy, ["simulation"], self._last_error,
             {"headless": True, "safety_locked": self._safety_locked,
              "hand_overlay": self.hand_overlay, "commands_sent": self._command_count,
+             "hand_commands_applied": self._hand_commands_applied,
              "ik_target_overlay": ({"state": "disabled"} if self._ik_target_overlay is None
                                    else self._ik_target_overlay.diagnostics(int(self.clock()))),
              "pico_overlay": ({"state": "disabled"} if self._pico_overlay is None
-                              else self._pico_overlay.snapshot(int(self.clock()))[1])},
+                              else self._pico_overlay.snapshot(int(self.clock()))[1]),
+             "xr_overlay": ({"state": "disabled"} if self._xr_overlay is None
+                             else self._xr_overlay.snapshot(int(self.clock()))[1])},
             self.publisher_instance_id, self.router_zid,
         )
 
@@ -823,6 +908,12 @@ class MujocoExecutor:
             )
 
     def tick(self, *, now_ns: int | None = None) -> dict[str, Any]:
+        if self._bilateral_lock is not None:
+            with self._bilateral_lock:
+                return self._tick(now_ns=now_ns)
+        return self._tick(now_ns=now_ns)
+
+    def _tick(self, *, now_ns: int | None = None) -> dict[str, Any]:
         now_ns = int(self.clock()) if now_ns is None else int(now_ns)
         self._state_sequence += 1
         if not self._snapshot_ready:
@@ -857,6 +948,7 @@ class MujocoExecutor:
                 self._qpos[address] = value
             applied["hand"][side] = command
         self._command_count += len(applied["arm"]) + len(applied["hand"])
+        self._hand_commands_applied += len(applied["hand"])
         try:
             import mujoco
             mujoco.mj_forward(self.model, self.data)
@@ -883,6 +975,16 @@ class MujocoExecutor:
             return False
         return self._pico_overlay.ingest(payload, int(self.clock()))
 
+    def on_xr_raw(self, sample: Any) -> bool:
+        if self._xr_overlay is None:
+            return False
+        try:
+            payload = _sample_payload(sample)
+        except (ValueError, TypeError) as exc:
+            self._xr_overlay.reject(str(exc))
+            return False
+        return self._xr_overlay.ingest(payload, int(self.clock()))
+
     def update_viewer_overlays(self, viewer: Any, *, mujoco_module: Any = None) -> None:
         if mujoco_module is None:
             import mujoco as mujoco_module
@@ -895,6 +997,9 @@ class MujocoExecutor:
         if self._pico_overlay is not None:
             with viewer.lock():
                 self._pico_overlay.append(viewer.user_scn, mujoco_module, int(self.clock()))
+        if self._xr_overlay is not None:
+            with viewer.lock():
+                self._xr_overlay.append(viewer.user_scn, mujoco_module, int(self.clock()))
         if self._ik_target_overlay is not None:
             with viewer.lock():
                 self._ik_target_overlay.append(viewer.user_scn, mujoco_module, int(self.clock()))
@@ -1012,7 +1117,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="canonical MuJoCo executor")
     parser.add_argument("--headless", action="store_true", help="run without mujoco.viewer")
     parser.add_argument("--hand-overlay", action="store_true", help="consume hand commands without publishing hand authority")
+    parser.add_argument("--official-hand-producer-instance", default=None,
+                        help="opt-in simulation-only official hand command authority")
     parser.add_argument("--pico-overlay", action="store_true", help="display passive raw PICO headset, wrists and 26-joint hands")
+    parser.add_argument("--xr-overlay", action="store_true", help="display passive raw XR HMD, controllers and Trackers")
     parser.add_argument("--ik-target-overlay", action="store_true", help="display actual IK input TCP targets in robot world coordinates")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--urdf", type=Path, default=None)
@@ -1022,6 +1130,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--publisher-instance-id", default=os.environ.get("TIANJI_COMPONENT_INSTANCE_ID", "mujoco"))
     parser.add_argument("--coordinator-instance-id", default=os.environ.get("TIANJI_COORDINATOR_INSTANCE_ID", "coordinator"))
     return parser.parse_args(argv)
+
+def _select_executor(args):
+    if args.official_hand_producer_instance is None:
+        return MujocoExecutor, {}
+    if (os.environ.get('TIANJI_REQUIRED_CAPABILITY') != 'simulation' or args.hand_overlay or
+            not args.official_hand_producer_instance.strip() or '/' in args.official_hand_producer_instance or
+            not args.hand_sides):
+        raise ValueError('official hands require explicit simulation, active sides and sole executor authority')
+    from .authorized_hand import AuthorizedHandMujoco
+    return AuthorizedHandMujoco, dict(hand_producer_id='official_wuji_hand2',
+                                    hand_producer_instance_id=args.official_hand_producer_instance)
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
@@ -1046,6 +1165,7 @@ def main(argv: list[str] | None = None) -> int:
     hand_sides = tuple(side.strip() for side in str(args.hand_sides).split(",") if side.strip())
     if any(side not in SIDES for side in hand_sides):
         raise SystemExit("--hand-sides must contain only left/right")
+    executor_class, executor_options = _select_executor(args)
     try:
         import mujoco
     except ImportError as exc:
@@ -1056,9 +1176,10 @@ def main(argv: list[str] | None = None) -> int:
     model = mujoco.MjModel.from_xml_string(xml, assets)
     data = mujoco.MjData(model)
     session = open_session()
+    hand_tokens = []
     try:
         router = require_single_router(session, os.environ.get("TIANJI_ROUTER_ZID"))
-        executor = MujocoExecutor(
+        executor = executor_class(
             session=session, model=model, data=data,
             publisher_instance_id=args.publisher_instance_id,
             router_zid=router,
@@ -1067,17 +1188,26 @@ def main(argv: list[str] | None = None) -> int:
             hand_sides=hand_sides,
             hand_overlay=args.hand_overlay,
             pico_overlay=args.pico_overlay or configured.get("pico_overlay") is True,
+            xr_overlay=args.xr_overlay or configured.get("xr_overlay") is True,
             ik_target_overlay=args.ik_target_overlay or configured.get("ik_target_overlay") is True,
             overlay_urdf=urdf,
             run_id=args.run_id or None,
             safety_supervisor_instance_id=os.environ.get("TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID"),
+            **executor_options,
         )
+        if executor_options:
+            for side in hand_sides:
+                hand_tokens.append(declare_component_liveliness(session, role='executor/hand',
+                    logical_id='wuji_' + side, instance_id=args.publisher_instance_id))
         executor.run(headless=args.headless, rate_hz=args.rate)
     except KeyboardInterrupt:
         return 0
     finally:
         if "executor" in locals():
             executor.close()
+        for token in reversed(hand_tokens):
+            if token is not None:
+                token.undeclare()
         session.close()
     return 0
 

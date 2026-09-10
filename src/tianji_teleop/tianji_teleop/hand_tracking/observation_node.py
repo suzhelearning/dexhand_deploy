@@ -196,7 +196,11 @@ class _StatusReporter:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Receive-only Manus/PICO hand tracking publisher")
     parser.add_argument("--config", required=True, help="canonical hand-tracking observation YAML")
+    parser.add_argument("--receiver-instance-id", default=None,
+                        help="explicit per-run raw receiver identity; default remains YAML identity")
     parser.add_argument("--record", help="optional schema-1.1 session HDF5 path")
+    parser.add_argument('--gesture-observations', action='store_true',
+                        help='PICO geometry labels only; no action bindings (managed schema-1.2 recorder)')
     parser.add_argument("--no-adb-forward", action="store_true", help="PICO: use an externally managed TCP forward")
     parser.add_argument(
         "--suppress-status",
@@ -208,9 +212,28 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _runtime_config(args):
+    config = _load_config(args.config)
+    if args.receiver_instance_id is not None:
+        if not args.receiver_instance_id.strip() or '/' in args.receiver_instance_id:
+            raise ValueError('receiver instance must be a nonempty path component')
+        config['receiver_instance_id'] = args.receiver_instance_id
+    return config
+
+
+def _runtime_class(args, config):
+    if not args.gesture_observations:
+        return ObservationRuntime
+    if config['input_profile'] != 'pico' or args.record:
+        raise ValueError('gesture observations require PICO and a separate schema-1.2 session recorder')
+    from .pico_gestures import PicoGestureRuntime
+    return PicoGestureRuntime
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    config = _load_config(args.config)
+    config = _runtime_config(args)
+    runtime_class = _runtime_class(args, config)
     required_profile = os.environ.get("TIANJI_REQUIRED_OBSERVATION_PROFILE")
     if required_profile is not None and config["input_profile"] != required_profile:
         raise ValueError(
@@ -293,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
                     "config": config,
                 },
             )
-        runtime = ObservationRuntime(
+        runtime = runtime_class(
             publish=zenoh_publisher,
             publisher_instance_id=os.environ.get("TIANJI_COMPONENT_INSTANCE_ID", "hand-tracking-observation"),
             router_zid=router_zid,

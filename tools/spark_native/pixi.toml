@@ -1,0 +1,23 @@
+[workspace]
+name = "tianji-spark-native"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+cmake = ">=3.24"
+ninja = ">=1.11"
+cxx-compiler = ">=1.9"
+libmujoco = ">=3.6,<4"
+glfw = ">=3.4,<4"
+eigen = ">=3.4,<4"
+libpinocchio = ">=3.8,<4"
+libosqp = ">=1.0,<2"
+qpoases = ">=3.2,<4"
+yaml-cpp = ">=0.8,<1"
+gtest = ">=1.15,<2"
+matplotlib = ">=3.10,<4"
+
+[tasks]
+configure = "cmake -S ../../src/tianji_teleop/src/ik/spark_headroom -B ../../build/spark-native -G Ninja -DCMAKE_BUILD_TYPE=Release"
+build = "cmake --build ../../build/spark-native --parallel 2"
+test = "ctest --test-dir ../../build/spark-native --output-on-failure"

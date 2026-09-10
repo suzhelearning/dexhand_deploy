@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 profile=""
+resolve_only=false
 record_path=""
 input_path=""
 confirm_real=false
@@ -14,6 +15,7 @@ playback_speed=""
 observation_config_override=""
 disable_hands=false
 pico_overlay=false
+xr_overlay=false
 ik_target_overlay=false
 ik_backend_override=""
 joint_trajectory_override=""
@@ -21,12 +23,28 @@ command_clipping_override=""
 target_processor_override=""
 pose_mapper_override=""
 joint_limit_source=""
+operator_input_override=""
+arm_input_override=""
+xr_manus_rawviz_override=""
+xr_manus_user_override=""
+xr_manus_library_dir_override=""
+xr_manus_right_glove_override=""
+xr_manus_left_glove_override=""
+xr_sdk_pythonpath_override=""
 extra_args=()
+dual_runtime_args=()
 while (($#)); do
   case "$1" in
     --profile) profile="${2:-}"; shift 2 ;;
+    --resolve-only) resolve_only=true; shift ;;
     --disable-hands) disable_hands=true; shift ;;
+    --spark-overlay) dual_runtime_args+=("$1"); shift ;;
+    --manus-rawviz|--manus-user|--manus-library-dir|--right-glove|--left-glove|--tjvr-bind|--tjvr-port|--duration-s)
+      dual_runtime_args+=("$1" "${2:?missing dual-input runtime value}"); shift 2 ;;
+    --xr-sdk-pythonpath)
+      xr_sdk_pythonpath_override="${2:?missing XR SDK Python path}"; shift 2 ;;
     --pico-overlay) pico_overlay=true; shift ;;
+    --xr-overlay) xr_overlay=true; shift ;;
     --ik-target-overlay) ik_target_overlay=true; shift ;;
     --ik-backend) ik_backend_override="${2:?missing IK backend}"; shift 2 ;;
     --joint-trajectory) joint_trajectory_override="${2:?missing trajectory processor}"; shift 2 ;;
@@ -34,6 +52,8 @@ while (($#)); do
     --arm-target-processor) target_processor_override="${2:?missing target processor}"; shift 2 ;;
     --arm-pose-mapper) pose_mapper_override="${2:?missing pose mapper}"; shift 2 ;;
     --joint-limit-source) joint_limit_source="${2:?missing joint limit source}"; shift 2 ;;
+    --operator-input) operator_input_override="${2:?missing operator input}"; shift 2 ;;
+    --arm-input) arm_input_override="${2:?missing arm input}"; shift 2 ;;
     --record) record_path="${2:-}"; shift 2 ;;
     --h5|--input) input_path="${2:-}"; shift 2 ;;
     --speed) playback_speed="${2:-}"; shift 2 ;;
@@ -59,6 +79,13 @@ while (($#)); do
       printf '%s\n' \
         '用法: run_session.sh --profile PROFILE [--record PATH] [--observation-config PATH] [--disable-hands] [--confirm-real] [--h5 PATH] [--speed RATE] [--viewer|--headless]' \
         '显示模式：h5_sim 默认打开 MuJoCo viewer；追加 --headless 可显式启用无窗口模式。' \
+        '新双输入配置只读检查：--profile {pico2_hands_sim|vr_manus_sim|vr_manus_xr_sim} --resolve-only。' \
+        '仅新PICO入口可选：--operator-input gesture（armed下双手先释放再张开0.8秒请求启动，默认keyboard）。' \
+        'VR+Manus仿真：--profile vr_manus_sim --manus-rawviz PATH --manus-user USER；仅双臂使用 --disable-hands。' \
+        'XR+Manus仿真：--profile vr_manus_xr_sim --manus-rawviz PATH --manus-user USER [--arm-input {xr_tracker|xr_controller}]。' \
+        'XR原生SDK路径：可选 --xr-sdk-pythonpath PATH（仅注入 XR 采集进程，也可用 TIANJI_XR_SDK_PYTHONPATH）。' \
+        'XR原始可视化：--profile vr_manus_xr_sim --viewer --xr-overlay（仅显示头显、控制器和Tracker）。' \
+        'VR诊断/录制：--spark-overlay --record NEW.h5（父目录须存在）；h 回Home，r 联合重置，再用新输入和 s 启动。' \
         'hand_tracking 仿真可选：--ik-backend NAME --joint-trajectory {passthrough|ruckig} --command-step-clipping {true|false} --arm-target-processor {passthrough|conditioned}' \
         'PICO 仿真位姿映射：--arm-pose-mapper {relative_home|head_direct|head_palm_direct}（默认 relative_home）' \
         'PICO 原始头显/手腕/26点骨架显示：--profile hand_tracking_sim --viewer --pico-overlay（兼容 --disable-hands）' \
@@ -76,18 +103,149 @@ if [[ -z "${profile}" ]]; then
   printf '%s\n' '错误：必须指定 --profile。' >&2
   exit 2
 fi
+hand_tracking_simulation=false
+if [[ -n "${operator_input_override}" && "${profile}" != pico2_hands_sim &&
+      "${profile}" != vr_manus_xr_sim ]]; then
+  printf '%s\n' '错误：--operator-input 仅支持 pico2_hands_sim 或 vr_manus_xr_sim。' >&2
+  exit 2
+fi
+if [[ -n "${arm_input_override}" && "${profile}" != vr_manus_xr_sim ]]; then
+  printf '%s\n' '错误：--arm-input 仅支持 vr_manus_xr_sim。' >&2
+  exit 2
+fi
+if [[ -n "${xr_sdk_pythonpath_override}" && "${profile}" != vr_manus_xr_sim ]]; then
+  printf '%s\n' '错误：--xr-sdk-pythonpath 仅支持 vr_manus_xr_sim。' >&2
+  exit 2
+fi
+pico_simulation=false
+xr_manus_simulation=false
+[[ "${profile}" != hand_tracking_sim && "${profile}" != hand_tracking_sim_manus && "${profile}" != pico2_hands_sim ]] || hand_tracking_simulation=true
+[[ "${profile}" != hand_tracking_sim && "${profile}" != pico2_hands_sim ]] || pico_simulation=true
+[[ "${profile}" != vr_manus_xr_sim ]] || xr_manus_simulation=true
+if [[ "${profile}" == pico2_hands_sim || "${profile}" == vr_manus_sim ||
+      "${profile}" == vr_manus_xr_sim ]]; then
+  if [[ "${resolve_only}" == true ]] && { [[ -n "${record_path}${input_path}${display_mode}${playback_speed}${observation_config_override}" ||
+        "${confirm_real}" == true || "${pico_overlay}" == true || "${ik_target_overlay}" == true ||
+        "${xr_overlay}" == true ||
+        ${#extra_args[@]} -gt 0 || ${#dual_runtime_args[@]} -gt 0 ||
+        -n "${xr_sdk_pythonpath_override}" ]]; }; then
+    printf '%s\n' '错误：--resolve-only 不接受采集、录制、显示或未识别的运行参数。' >&2
+    exit 2
+  fi
+  resolve_args=(--profile "${profile}")
+  [[ "${disable_hands}" != true ]] || resolve_args+=(--disable-hands)
+  [[ -z "${ik_backend_override}" ]] || resolve_args+=(--ik-backend "${ik_backend_override}")
+  [[ -z "${pose_mapper_override}" ]] || resolve_args+=(--arm-pose-mapper "${pose_mapper_override}")
+  [[ -z "${target_processor_override}" ]] || resolve_args+=(--arm-target-processor "${target_processor_override}")
+  [[ -z "${joint_trajectory_override}" ]] || resolve_args+=(--joint-trajectory "${joint_trajectory_override}")
+  [[ -z "${command_clipping_override}" ]] || resolve_args+=(--command-step-clipping "${command_clipping_override}")
+  [[ -z "${joint_limit_source}" ]] || resolve_args+=(--joint-limit-source "${joint_limit_source}")
+  [[ -z "${operator_input_override}" ]] || resolve_args+=(--operator-input "${operator_input_override}")
+  [[ -z "${arm_input_override}" ]] || resolve_args+=(--arm-input "${arm_input_override}")
+  if [[ "${resolve_only}" == true ]]; then
+    exec python "${SCRIPT_DIR}/resolve_dual_session.py" "${resolve_args[@]}"
+  fi
+  if [[ "${profile}" == pico2_hands_sim ]]; then
+    if [[ "${confirm_real}" == true || -n "${input_path}${playback_speed}" ||
+          ${#extra_args[@]} -gt 0 || ${#dual_runtime_args[@]} -gt 0 ]]; then
+      printf '%s\n' '错误：pico2_hands_sim 为 simulation-only，不接受真机、VR/Manus、回放或未知参数。' >&2
+      exit 2
+    fi
+    pico_resolved="$(python "${SCRIPT_DIR}/resolve_dual_session.py" "${resolve_args[@]}")"
+    pico_settings="$(python - "${pico_resolved}" "${BUNDLE_ROOT}/src/tianji_teleop" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[2])
+from tianji_teleop.hand_tracking.session_config import validate_pico_runtime
+value = json.loads(sys.argv[1])['config']
+validate_pico_runtime(value)
+for key in ('ik_backend', 'arm_pose_mapper', 'arm_target_processor', 'joint_trajectory',
+            'command_step_clipping', 'joint_limit_source', 'operator_input'):
+    item = value[key]
+    print(str(item).lower() if isinstance(item, bool) else item)
+PY
+)"
+    mapfile -t pico_settings_array <<< "${pico_settings}"
+    ik_backend_override="${pico_settings_array[0]}"
+    pose_mapper_override="${pico_settings_array[1]}"
+    target_processor_override="${pico_settings_array[2]}"
+    joint_trajectory_override="${pico_settings_array[3]}"
+    command_clipping_override="${pico_settings_array[4]}"
+    joint_limit_source="${pico_settings_array[5]}"
+    operator_input_override="${pico_settings_array[6]}"
+    if [[ "${disable_hands}" != true && ! -x "${BUNDLE_ROOT}/tools/wuji_hand_native/.pixi/envs/default/bin/python" ]]; then
+      printf '%s\n' '错误：缺少官方 Hand2 独立运行环境。' >&2; exit 2
+    fi
+  elif [[ "${profile}" == vr_manus_sim ]]; then
+  if [[ -n "${input_path}${playback_speed}${observation_config_override}" ||
+        "${confirm_real}" == true || "${pico_overlay}" == true || "${ik_target_overlay}" == true ||
+        "${xr_overlay}" == true ||
+        ${#extra_args[@]} -gt 0 ]]; then
+    printf '%s\n' '错误：vr_manus_sim live 当前不接受回放、旧PICO overlay、真机或未识别参数。' >&2
+    exit 2
+  fi
+  [[ -z "${display_mode}" ]] || resolve_args+=("--${display_mode}")
+  [[ -z "${record_path}" ]] || resolve_args+=(--record "${record_path}")
+    exec bash "${SCRIPT_DIR}/run_vr_manus_session.sh" "${resolve_args[@]}" "${dual_runtime_args[@]}"
+  fi
+fi
+xr_resolved=""
+if [[ "${profile}" == vr_manus_xr_sim ]]; then
+  xr_resolved="$(python "${SCRIPT_DIR}/resolve_dual_session.py" "${resolve_args[@]}")"
+  xr_settings="$(python - "${xr_resolved}" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])['config']
+print(value['arm_input'])
+print(value['operator_input'])
+PY
+)"
+  mapfile -t xr_settings_array <<< "${xr_settings}"
+  arm_input_override="${xr_settings_array[0]}"
+  operator_input_override="${xr_settings_array[1]}"
+fi
+if ((${#dual_runtime_args[@]})); then
+  if [[ "${profile}" != vr_manus_xr_sim ]]; then
+    printf '%s\n' '错误：新增采集参数仅用于 vr_manus_sim 或 vr_manus_xr_sim。' >&2
+    exit 2
+  fi
+  for ((dual_index = 0; dual_index < ${#dual_runtime_args[@]}; dual_index += 1)); do
+    case "${dual_runtime_args[dual_index]}" in
+      --manus-rawviz)
+        xr_manus_rawviz_override="${dual_runtime_args[dual_index + 1]}"; dual_index=$((dual_index + 1)) ;;
+      --manus-user)
+        xr_manus_user_override="${dual_runtime_args[dual_index + 1]}"; dual_index=$((dual_index + 1)) ;;
+      --manus-library-dir)
+        xr_manus_library_dir_override="${dual_runtime_args[dual_index + 1]}"; dual_index=$((dual_index + 1)) ;;
+      --right-glove)
+        xr_manus_right_glove_override="${dual_runtime_args[dual_index + 1]}"; dual_index=$((dual_index + 1)) ;;
+      --left-glove)
+        xr_manus_left_glove_override="${dual_runtime_args[dual_index + 1]}"; dual_index=$((dual_index + 1)) ;;
+      *) printf '错误：vr_manus_xr_sim 不支持运行参数: %s\n' "${dual_runtime_args[dual_index]}" >&2; exit 2 ;;
+    esac
+  done
+fi
+if [[ "${resolve_only}" == true ]]; then
+  printf '%s\n' '错误：--resolve-only 仅用于新的双输入配置；旧 profile 启动行为保持不变。' >&2
+  exit 2
+fi
 case "${profile}" in
-  mocap_live_sim|mocap_live_real|h5_sim|h5_real|regrind_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim|hand_tracking_observation|hand_tracking_observation_manus|hand_tracking_sim|hand_tracking_sim_manus) ;;
+  mocap_live_sim|mocap_live_real|h5_sim|h5_real|regrind_real|target_replay_sim|joint_replay_sim|wuji_direct_real|diagnostic_mocap_calibration_sim|hand_tracking_observation|hand_tracking_observation_manus|hand_tracking_sim|hand_tracking_sim_manus|pico2_hands_sim|vr_manus_xr_sim) ;;
   *) printf '错误：未知 session profile: %s\n' "${profile}" >&2; exit 2 ;;
 esac
 if [[ -n "${pose_mapper_override}" ]]; then
-  if [[ "${profile}" != hand_tracking_sim ]]; then
-    printf '%s\n' '错误：--arm-pose-mapper 仅支持 PICO hand_tracking_sim。' >&2; exit 2
+  if [[ "${xr_manus_simulation}" == true ]]; then
+    [[ "${pose_mapper_override}" == xr_incremental ]] || {
+      printf '%s\n' '错误：vr_manus_xr_sim 的 --arm-pose-mapper 必须为 xr_incremental。' >&2; exit 2;
+    }
+  else
+    if [[ "${pico_simulation}" != true ]]; then
+      printf '%s\n' '错误：--arm-pose-mapper 仅支持 PICO hand_tracking_sim。' >&2; exit 2
+    fi
+    case "${pose_mapper_override}" in
+      relative_home|head_direct|head_palm_direct) ;;
+      *) printf '%s\n' '错误：--arm-pose-mapper 必须为 relative_home、head_direct 或 head_palm_direct。' >&2; exit 2 ;;
+    esac
   fi
-  case "${pose_mapper_override}" in
-    relative_home|head_direct|head_palm_direct) ;;
-    *) printf '%s\n' '错误：--arm-pose-mapper 必须为 relative_home、head_direct 或 head_palm_direct。' >&2; exit 2 ;;
-  esac
 fi
 # No inherited override may silently change another profile's mapping.
 unset TIANJI_ARM_POSE_MAPPER
@@ -98,22 +256,26 @@ if [[ -n "${joint_limit_source}" ]]; then
     yaml|urdf) ;;
     *) printf '%s\n' '错误：--joint-limit-source 必须为 yaml 或 urdf。' >&2; exit 2 ;;
   esac
-  if [[ "${profile}" != hand_tracking_sim && "${profile}" != hand_tracking_sim_manus ]]; then
-    printf '%s\n' '错误：--joint-limit-source 仅支持 hand_tracking 仿真。' >&2; exit 2
+  if [[ "${hand_tracking_simulation}" != true && "${xr_manus_simulation}" != true ]]; then
+    printf '%s\n' '错误：--joint-limit-source 仅支持 hand_tracking 或 XR/Manus 仿真。' >&2; exit 2
   fi
   if [[ "${joint_limit_source}" == urdf && "${ik_backend_override}" != pico_ee_dexhand_qp ]]; then
     printf '%s\n' '错误：--joint-limit-source urdf 需要 --ik-backend pico_ee_dexhand_qp。' >&2; exit 2
   fi
 fi
-if [[ "${pico_overlay}" == true && "${profile}" != hand_tracking_sim ]]; then
+if [[ "${pico_overlay}" == true && "${pico_simulation}" != true ]]; then
   printf '%s\n' '错误：--pico-overlay 仅支持 hand_tracking_sim。' >&2
   exit 2
 fi
-if [[ "${ik_target_overlay}" == true && "${profile}" != hand_tracking_sim && "${profile}" != hand_tracking_sim_manus ]]; then
+if [[ "${xr_overlay}" == true && "${profile}" != vr_manus_xr_sim ]]; then
+  printf '%s\n' '错误：--xr-overlay 仅支持 vr_manus_xr_sim。' >&2
+  exit 2
+fi
+if [[ "${ik_target_overlay}" == true && "${hand_tracking_simulation}" != true ]]; then
   printf '%s\n' '错误：--ik-target-overlay 仅支持 hand_tracking 仿真。' >&2
   exit 2
 fi
-if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]]; then
+if [[ "${hand_tracking_simulation}" == true || "${xr_manus_simulation}" == true ]]; then
   [[ "${confirm_real}" != true ]] || {
     printf '%s\n' '错误：hand_tracking_sim 是 simulation-only profile，不接受 --confirm-real。' >&2
     exit 2
@@ -160,6 +322,8 @@ if [[ "${profile}" == regrind_real && -n "${record_path}" ]]; then
   exit 2
 fi
 profile_config="$(canonical_config "sessions/${profile}.yaml")"
+[[ "${profile}" != pico2_hands_sim ]] || profile_config="$(canonical_config sessions/pico2_hands_runtime.yaml)"
+[[ "${profile}" != vr_manus_xr_sim ]] || profile_config="$(canonical_config sessions/vr_manus_xr_runtime.yaml)"
 profile_value() {
   local key="$1"
   pixi run python - "${profile_config}" "${key}" <<'PY'
@@ -201,8 +365,8 @@ if [[ "${TIANJI_VALIDATION_PRODUCER:-}" == policy_hold && "${TIANJI_VALIDATION_C
 fi
 forced_hand_mode="${TIANJI_VALIDATION_HAND_MODE:-}"
 if [[ -n "${ik_backend_override}${joint_trajectory_override}${command_clipping_override}${target_processor_override}" ]]; then
-  [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]] || {
-    printf '%s\n' '错误：IK/处理链覆盖参数只支持 hand_tracking 仿真。' >&2; exit 2;
+  [[ "${hand_tracking_simulation}" == true || "${xr_manus_simulation}" == true ]] || {
+    printf '%s\n' '错误：IK/处理链覆盖参数只支持 hand_tracking 或 XR/Manus 仿真。' >&2; exit 2;
   }
   case "${ik_backend_override}" in ""|pinocchio_qp|pinocchio_cpp|tianji_official|pico_ee_dexhand_qp) ;; *) exit 2 ;; esac
   case "${joint_trajectory_override}" in ""|passthrough|ruckig) ;; *) exit 2 ;; esac
@@ -220,8 +384,8 @@ fi
 [[ -z "${command_clipping_override}" ]] || export TIANJI_COMMAND_STEP_CLIPPING="${command_clipping_override}"
 [[ -z "${target_processor_override}" ]] || export TIANJI_ARM_TARGET_PROCESSOR="${target_processor_override}"
 if [[ "${disable_hands}" == true ]]; then
-  [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]] || {
-    printf '%s\n' '错误：--disable-hands 仅支持 hand_tracking 仿真。' >&2; exit 2;
+  [[ "${hand_tracking_simulation}" == true || "${xr_manus_simulation}" == true ]] || {
+    printf '%s\n' '错误：--disable-hands 仅支持 hand_tracking 或 XR/Manus 仿真。' >&2; exit 2;
   }
   forced_hand_mode=disabled
 fi
@@ -238,7 +402,7 @@ if [[ -n "${forced_hand_mode}" ]]; then hand_mode="${forced_hand_mode}"; fi
   printf '%s\n' '错误：session profile 缺少 source/executor/coordinator config。' >&2
   exit 2
 }
-if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]]; then
+if [[ "${hand_tracking_simulation}" == true || "${xr_manus_simulation}" == true ]]; then
   if [[ -n "${observation_config_override}" ]]; then
     observation_config="${observation_config_override}"
     [[ -f "${observation_config}" ]] || { printf '错误：缺少 observation config: %s\n' "${observation_config}" >&2; exit 2; }
@@ -249,11 +413,53 @@ if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_man
     printf '%s\n' '错误：hand_tracking_sim profile 缺少 observation_config。' >&2
     exit 2
   }
-  [[ "${required_capability}" == simulation && ( "${hand_mode}" == disabled ||
-     ( "${hand_mode}" == retarget && "${hand_executor}" == wuji_hand2 ) ) ]] || {
-    printf '%s\n' '错误：hand_tracking_sim 只允许 simulation + (disabled 或 retarget + wuji_hand2)。' >&2
-    exit 2
+  if [[ "${hand_tracking_simulation}" == true ]]; then
+    [[ "${required_capability}" == simulation && ( "${hand_mode}" == disabled ||
+       ( "${hand_mode}" == retarget && "${hand_executor}" == wuji_hand2 ) ||
+       ( "${profile}" == pico2_hands_sim && "${hand_mode}" == direct && "${hand_executor}" == mujoco ) ) ]] || {
+      printf '%s\n' '错误：hand_tracking_sim 只允许 simulation + (disabled 或 retarget + wuji_hand2)。' >&2
+      exit 2
+    }
+  else
+    [[ "${required_capability}" == simulation && ( "${hand_mode}" == disabled ||
+       ( "${hand_mode}" == retarget && "${hand_executor}" == wuji_hand2 ) ) ]] || {
+      printf '%s\n' '错误：vr_manus_xr_sim 只允许 simulation + (disabled 或 retarget + wuji_hand2)。' >&2
+      exit 2
+    }
+  fi
+fi
+if [[ "${xr_manus_simulation}" == true && "${hand_mode}" != disabled ]]; then
+  retarget_python="${TIANJI_WUJI_RETARGET_PYTHON:-${BUNDLE_ROOT}/tools/wuji_hand_native/.pixi/envs/default/bin/python}"
+  retarget_worker="${TIANJI_WUJI_RETARGET_WORKER:-${BUNDLE_ROOT}/scripts/wuji_hand_worker.py}"
+  [[ -x "${retarget_python}" && -f "${retarget_worker}" ]] || {
+    printf '%s\n' '错误：XR+Manus 仿真需要官方 Wuji2 retarget worker；请先准备 tools/wuji_hand_native 环境。' >&2
+    exit 1
   }
+  PYTHONPATH="${BUNDLE_ROOT}/src/tianji_teleop${PYTHONPATH:+:${PYTHONPATH}}" pixi run python - \
+    "${observation_config}" "${xr_manus_rawviz_override}" "${xr_manus_user_override}" \
+    "${xr_manus_library_dir_override}" "${xr_manus_right_glove_override}" \
+    "${xr_manus_left_glove_override}" <<'PY'
+import sys
+from tianji_teleop.hand_tracking.xr_manus_observation import _load_config, validate_manus_runtime
+
+config = _load_config(sys.argv[1])
+manus = dict(config.get('manus') or {})
+for field, value in zip(('rawviz', 'user', 'library_dir', 'right_glove', 'left_glove'), sys.argv[2:]):
+    if value:
+        manus[field] = value
+validate_manus_runtime(manus)
+PY
+fi
+if [[ "${xr_manus_simulation}" == true ]]; then
+  xr_sdk_pythonpath="${xr_sdk_pythonpath_override:-${TIANJI_XR_SDK_PYTHONPATH:-}}"
+  if ! TIANJI_XR_SDK_PYTHONPATH="${xr_sdk_pythonpath}" \
+       PYTHONPATH="${BUNDLE_ROOT}/src/tianji_teleop${PYTHONPATH:+:${PYTHONPATH}}" \
+       pixi run python "${SCRIPT_DIR}/check_xr_sdk.py"; then
+    printf '%s\n' \
+      '错误：XRoboToolkit SDK 预检失败；请安装兼容 Pybind 并通过 --xr-sdk-pythonpath 或 TIANJI_XR_SDK_PYTHONPATH 指定。' \
+      >&2
+    exit 1
+  fi
 fi
 if [[ -z "${display_mode}" ]]; then
   if [[ "${profile}" == h5_sim ]]; then
@@ -335,12 +541,12 @@ if [[ -n "${record_path}" ]]; then
 fi
 source_name="$(basename -- "${source_config}" .yaml)"
 case "${source_name}" in
-  mocap_live|h5_replay|regrind_policy|hand_tracking_target|hand_tracking_target_manus|target|joint|joint_real) ;;
+  mocap_live|h5_replay|regrind_policy|hand_tracking_target|hand_tracking_target_manus|hand_tracking_target_xr_manus|target|joint|joint_real) ;;
   mocap_calibration) ;;
   *) printf '错误：source config 不在 canonical source/replay/diagnostic 树: %s\n' "${source_config}" >&2; exit 2 ;;
 esac
 case "${source_name}" in
-  hand_tracking_target_manus) source_id=hand_tracking_target ;;
+  hand_tracking_target_manus|hand_tracking_target_xr_manus) source_id=hand_tracking_target ;;
   target) source_id=target_replay ;;
   joint|joint_real) source_id=joint_replay ;;
   mocap_calibration) source_id=diagnostic_mocap_calibration ;;
@@ -386,9 +592,9 @@ coordinator_id="${TIANJI_COORDINATOR_INSTANCE_ID:-$(new_instance_id)}"
 source_instance="${TIANJI_SOURCE_INSTANCE_ID:-$(new_instance_id)}"
 observation_instance=""
 observation_profile=""
-if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]]; then
+if [[ "${hand_tracking_simulation}" == true || "${xr_manus_simulation}" == true ]]; then
   observation_instance="${TIANJI_OBSERVATION_INSTANCE_ID:-$(new_instance_id)}"
-  if [[ "${profile}" == hand_tracking_sim_manus ]]; then
+  if [[ "${profile}" == hand_tracking_sim_manus || "${xr_manus_simulation}" == true ]]; then
     observation_profile=manus
   else
     observation_profile=pico
@@ -422,6 +628,8 @@ declare -a hand_side_array=()
 declare -a hand_producer_id_array=()
 declare -a hand_producer_instance_array=()
 declare -a hand_executor_instance_array=()
+pico_hand_instance=""
+[[ "${profile}" != pico2_hands_sim ]] || pico_hand_instance="$(new_instance_id)"
 lookup_instance() {
   local mapping="$1"
   local wanted_side="$2"
@@ -446,8 +654,15 @@ if [[ -n "${active_hand_sides}" ]]; then
     }
     mapped_hand_executor=""
     mapped_hand_executor="$(lookup_instance "${TIANJI_HAND_EXECUTOR_INSTANCES:-}" "${hand_side}" || true)"
-    hand_executor_instance_array+=("${mapped_hand_executor:-$(new_instance_id)}")
-    if [[ "${source_id}" == h5_replay && "${hand_mode}" == direct ]]; then
+    if [[ "${profile}" == pico2_hands_sim ]]; then
+      hand_executor_instance_array+=("${arm_executor_instance}")
+    else
+      hand_executor_instance_array+=("${mapped_hand_executor:-$(new_instance_id)}")
+    fi
+    if [[ "${profile}" == pico2_hands_sim ]]; then
+      hand_producer_id_array+=(official_wuji_hand2)
+      hand_producer_instance_array+=("${pico_hand_instance}")
+    elif [[ "${source_id}" == h5_replay && "${hand_mode}" == direct ]]; then
       hand_producer_id_array+=("h5_direct")
       hand_producer_instance_array+=("${source_instance}")
     elif [[ "${source_id}" == regrind_policy && "${hand_mode}" == direct ]]; then
@@ -669,6 +884,23 @@ base_env=(
   "TIANJI_REAL_PREFLIGHT_FD=${TIANJI_REAL_PREFLIGHT_FD:-}"
   "TIANJI_REAL_PREFLIGHT_SCANNER_FD=${TIANJI_REAL_PREFLIGHT_SCANNER_FD:-}"
 )
+# XR/Manus retarget executors publish a passive target-to-command audit used
+# only by the dual-input recording checker.  PICO2 keeps the legacy hand path
+# and does not receive this extra transport stream.
+if [[ "${profile}" == vr_manus_xr_sim ]]; then
+  base_env+=("TIANJI_HAND_OUTPUT_AUDIT=1")
+fi
+if [[ "${profile}" == pico2_hands_sim ]]; then
+  base_env+=("TIANJI_RESOLVED_DUAL_SESSION=${pico_resolved}" "TIANJI_PICO_OPERATOR_INPUT=${operator_input_override}")
+elif [[ "${profile}" == vr_manus_xr_sim ]]; then
+  base_env+=(
+    "TIANJI_RESOLVED_DUAL_SESSION=${xr_resolved}"
+    "TIANJI_XR_OPERATOR_INPUT=${operator_input_override}"
+    "TIANJI_XR_ARM_INPUT=${arm_input_override}"
+    "TIANJI_MANUS_RIGHT_GLOVE=${xr_manus_right_glove_override}"
+    "TIANJI_MANUS_LEFT_GLOVE=${xr_manus_left_glove_override}"
+  )
+fi
 if [[ "${required_capability}" == real ]]; then
   # Real admission is process-issued and fail-closed.  Speed/yaw are fixed by
   # the profile; deadman and preflight remain false unless an authorized
@@ -683,7 +915,7 @@ if [[ -n "${record_path}" ]]; then
   record_source_type="${source_id}"
   record_input_profile=""
   recording_config_path="$(canonical_config recording/session.yaml)"
-  if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]]; then
+  if [[ "${hand_tracking_simulation}" == true || "${xr_manus_simulation}" == true ]]; then
     # A hand-tracking simulation has two source processes: the observation
     # receiver and the target bridge.  The recorder is passive and owns the
     # only HDF5 writer, while the session profile identifies the extended
@@ -691,6 +923,9 @@ if [[ -n "${record_path}" ]]; then
     record_source_type="${profile}"
     record_input_profile="${observation_profile}"
     recording_config_path="$(canonical_config recording/session_hand_tracking.yaml)"
+    if [[ "${profile}" == pico2_hands_sim || "${profile}" == vr_manus_xr_sim ]]; then
+      recording_config_path="$(canonical_config recording/dual_input.yaml)"
+    fi
   fi
   launch recorder "${base_env[@]}" \
     TIANJI_COMPONENT_INSTANCE_ID="${recorder_instance}" \
@@ -717,7 +952,11 @@ if [[ "${profile}" == h5_real && "${hand_overlay}" == mujoco ]]; then
   }
   launch h5_wrist_overlay "${base_env[@]}" python "${overlay_entry}" "${input_path}" --viewer
 fi
-source_args=("${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${source_instance}" TIANJI_SOURCE_INSTANCE_ID="${source_instance}" TIANJI_PRODUCER_INSTANCE_ID="${arm_producer_instance:-${hand_producer_instance}}" bash "${SCRIPT_DIR}/run_source.sh" --source "${source_id}" --config "$(canonical_config "${source_config}")")
+source_hand_mode="${hand_mode}"
+# Official hands own raw PICO processing independently. The legacy target
+# bridge owns arms only, preserving its existing visual-loss hold semantics.
+[[ "${profile}" != pico2_hands_sim ]] || source_hand_mode=disabled
+source_args=("${base_env[@]}" TIANJI_HAND_MODE="${source_hand_mode}" TIANJI_COMPONENT_INSTANCE_ID="${source_instance}" TIANJI_SOURCE_INSTANCE_ID="${source_instance}" TIANJI_PRODUCER_INSTANCE_ID="${arm_producer_instance:-${hand_producer_instance}}" bash "${SCRIPT_DIR}/run_source.sh" --source "${source_id}" --config "$(canonical_config "${source_config}")")
 if [[ "${source_id}" == h5_replay ]]; then
   source_args+=(-- "${input_path}")
   if [[ "${required_capability}" == real ]]; then
@@ -732,7 +971,7 @@ elif [[ "${source_id}" == target_replay || "${source_id}" == joint_replay ]]; th
 fi
 source_args+=("${extra_args[@]}")
 observation_args=()
-if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_manus ]]; then
+if [[ "${hand_tracking_simulation}" == true ]]; then
   observation_args=(
     "${base_env[@]}"
     "TIANJI_COMPONENT_INSTANCE_ID=${observation_instance}"
@@ -742,16 +981,33 @@ if [[ "${profile}" == hand_tracking_sim || "${profile}" == hand_tracking_sim_man
     --config "${observation_config}"
     --suppress-status
   )
+  [[ "${profile}" != pico2_hands_sim ]] || observation_args+=(--receiver-instance-id "${observation_instance}" --gesture-observations)
+elif [[ "${xr_manus_simulation}" == true ]]; then
+  observation_args=(
+    "${base_env[@]}"
+    "TIANJI_XR_SDK_PYTHONPATH=${xr_sdk_pythonpath_override:-${TIANJI_XR_SDK_PYTHONPATH:-}}"
+    "TIANJI_COMPONENT_INSTANCE_ID=${observation_instance}"
+    "TIANJI_SOURCE_INSTANCE_ID=${observation_instance}"
+    bash "${SCRIPT_DIR}/run_source.sh"
+    --source xr_manus_observation
+    --config "${observation_config}"
+    --arm-input "${arm_input_override}"
+  )
+  observation_args+=("${dual_runtime_args[@]}")
+  [[ "${hand_mode}" != disabled ]] || observation_args+=(--no-manus)
 fi
 launch_arm_executor() {
   local hand_args=()
-  if [[ "${hand_overlay}" == mujoco && -n "${active_hand_sides}" ]]; then
+  if [[ "${profile}" == pico2_hands_sim && -n "${active_hand_sides}" ]]; then
+    hand_args+=(--hand-sides "${active_hand_sides}" --official-hand-producer-instance "${hand_producer_instance}")
+  elif [[ "${hand_overlay}" == mujoco && -n "${active_hand_sides}" ]]; then
     hand_args+=(--hand-sides "${active_hand_sides}" --hand-overlay)
   else
     # Wuji is the sole hand executor authority for hand-enabled sim/replay.
     hand_args+=(--hand-sides "")
   fi
   [[ "${pico_overlay}" != true ]] || hand_args+=(--pico-overlay)
+  [[ "${xr_overlay}" != true ]] || hand_args+=(--xr-overlay)
   [[ "${ik_target_overlay}" != true ]] || hand_args+=(--ik-target-overlay)
   if [[ "${arm_executor_config}" == executors/mujoco.yaml ]]; then
     launch arm_executor "${base_env[@]}" TIANJI_COMPONENT_INSTANCE_ID="${arm_executor_instance}" bash "${SCRIPT_DIR}/run_executor.sh" --executor mujoco --config "$(canonical_config "${arm_executor_config}")" "${arm_display_args[@]}" "${hand_args[@]}"
@@ -760,6 +1016,11 @@ launch_arm_executor() {
   fi
 }
 launch_hand_executor() {
+  if [[ "${profile}" == pico2_hands_sim && "${hand_mode}" != disabled ]]; then
+    launch pico_official_hands "${base_env[@]}" TIANJI_PICO_HAND_MANAGED=1 \
+      python "${SCRIPT_DIR}/pico_hand_live.py"
+    return 0
+  fi
   [[ "${hand_mode}" != disabled && "${hand_executor}" == wuji_hand2 ]] || return 0
   for hand_index in "${!hand_side_array[@]}"; do
     launch "hand_executor_${hand_side_array[hand_index]}" "${base_env[@]}" \
@@ -779,7 +1040,11 @@ launch_arm_producer() {
 }
 launch_hand_tracking_observation() {
   [[ -n "${observation_config}" ]] || return 0
-  launch hand_tracking_observation "${observation_args[@]}"
+  if [[ "${xr_manus_simulation}" == true ]]; then
+    launch xr_manus_observation "${observation_args[@]}"
+  else
+    launch hand_tracking_observation "${observation_args[@]}"
+  fi
 }
 if [[ "${required_capability}" == real ]]; then
   launch_arm_producer

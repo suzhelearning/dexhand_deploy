@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ...zenoh_util import open_session, require_single_router
 from .node import WujiHandExecutor
+from .retarget import RETARGET_BACKENDS
 
 
 def _native_bridge() -> Path | None:
@@ -34,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--side", choices=("left", "right"), required=True)
     parser.add_argument("--config", default=None)
     parser.add_argument("--rate", type=_positive_finite_rate, default=100.0)
+    parser.add_argument("--retarget-backend", choices=RETARGET_BACKENDS, default="geometry")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     if not args.dry_run:
@@ -57,8 +59,10 @@ def main(argv: list[str] | None = None) -> int:
         if not args.dry_run:
             from ..marvin.preflight import trusted_real_capability
             real_capability = trusted_real_capability
-        executor = WujiHandExecutor(
-            config=args.config,
+        executor_kwargs = dict(
+            # The launcher config controls executor behavior; the robot joint
+            # contract is injected separately through TIANJI_HAND_CONFIG.
+            config=os.environ.get("TIANJI_HAND_CONFIG") or args.config,
             mode=args.mode,
             side=args.side,
             publisher_instance_id=os.environ.get("TIANJI_COMPONENT_INSTANCE_ID", ""),
@@ -76,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
             run_id=os.environ.get("TIANJI_RUN_ID"),
             safety_supervisor_instance_id=os.environ.get("TIANJI_SAFETY_SUPERVISOR_INSTANCE_ID"),
         )
+        if args.retarget_backend != "geometry":
+            executor_kwargs["retarget_backend"] = args.retarget_backend
+        executor = WujiHandExecutor(**executor_kwargs)
         executor.run(rate_hz=args.rate)
     except KeyboardInterrupt:
         return 0

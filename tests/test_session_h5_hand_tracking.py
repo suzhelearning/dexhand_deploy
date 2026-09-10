@@ -101,6 +101,7 @@ class SessionH5HandTrackingTest(unittest.TestCase):
             receiver_frame_sequence=9,
             mapping_version="pico_head_current_v1",
             frame_association_id=pico.association_id,
+            elbow_pose=np.array([0.4, 0.5, 0.6, 0.0, 0.0, 0.0, 1.0]),
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -135,6 +136,7 @@ class SessionH5HandTrackingTest(unittest.TestCase):
                 self.assertEqual(file["raw/pico_hand_tracking/hands/right/joint_poses"].shape, (1, 26, 7))
                 self.assertEqual(file["raw/manus_hand_tracking/node_positions"].shape, (1, 64, 3))
                 self.assertEqual(file["observation/hand_tracking/right/keypoints_m"].shape, (1, 21, 3))
+                self.assertEqual(file["observation/arm_input/right/elbow_pose"].shape, (1, 7))
                 metadata = json.loads(file["meta/hand_tracking"].attrs["metadata_json"])
                 self.assertEqual(metadata["input_profile"], "pico")
 
@@ -152,6 +154,7 @@ class SessionH5HandTrackingTest(unittest.TestCase):
             np.testing.assert_allclose(hand_row["keypoints_m"], hand.keypoints_m)
             self.assertEqual(hand_row["source_sequence"], hand.source_sequence)
             np.testing.assert_allclose(arm_row["pose"], arm.pose)
+            np.testing.assert_allclose(arm_row["elbow_pose"], arm.elbow_pose)
             self.assertEqual(arm_row["reference_frame"], "pico_head_current")
             self.assertEqual(metadata["receiver_instance_id"], "pico-receiver")
 

@@ -69,6 +69,7 @@ class MappedArmPose:
     backend: str
     mapping_version: str
     frame_association_id: str
+    elbow_reference_direction: tuple[float, float, float] | None = None
 
     def __post_init__(self) -> None:
         if self.side not in SIDES:
@@ -80,7 +81,14 @@ class MappedArmPose:
             raise ValueError("valid mapped pose requires pose")
         if not self.backend or not self.mapping_version or not self.frame_association_id:
             raise ValueError("mapped pose metadata is required")
+        elbow = None if self.elbow_reference_direction is None else np.asarray(
+            self.elbow_reference_direction, dtype=np.float64
+        )
+        if elbow is not None:
+            if elbow.shape != (3,) or not np.isfinite(elbow).all() or np.linalg.norm(elbow) < 1.0e-12:
+                raise ValueError("mapped elbow direction must be a finite non-zero 3-vector")
         object.__setattr__(self, "pose", value)
+        object.__setattr__(self, "elbow_reference_direction", None if elbow is None else tuple(float(item) for item in elbow))
 
 
 class ArmPoseMapper(Protocol):
@@ -313,6 +321,9 @@ def create_arm_pose_mapper(backend: str, config: Any) -> ArmPoseMapper:
         return DirectPoseMapper(config)
     if backend == "relative_home":
         return RelativeHomeMapper(config)
+    if backend == "xr_incremental":
+        from .xr_incremental import XrIncrementalMapper
+        return XrIncrementalMapper(config)
     raise ValueError("unknown arm pose mapping backend: " + str(backend))
 
 

@@ -35,6 +35,8 @@ from .target_bridge import (
 from ..sources.common.pose_mapping import create_arm_pose_mapper, HeadPalmDirectMapper
 from .height_calibration import HeightCalibration, horizontal_reference
 from ..sources.common.target_processing import create_arm_target_processor
+from .xr_operator import XrControllerOperatorConfig
+from .xr_input import XR_ARM_INPUTS
 
 
 LOG = logging.getLogger("hand_tracking_target")
@@ -64,6 +66,7 @@ _CONFIG_KEYS = frozenset(
         "head_palm_direct_mapper_config",
         "arm_target_processor",
         "arm_target_processor_config",
+        "operator_config",
     }
 )
 
@@ -142,9 +145,12 @@ def _load_config(path: str | os.PathLike[str]) -> dict[str, Any]:
             raise ValueError(f"elbow_reference_direction.{side} must be a finite non-zero 3-vector")
 
     expected_arm_source = _SOURCE_BY_PROFILE[profile]
-    if config["arm_input_source"] != expected_arm_source:
+    allowed_arm_sources = {expected_arm_source}
+    if profile == "manus":
+        allowed_arm_sources.add("xr")
+    if config["arm_input_source"] not in allowed_arm_sources:
         raise ValueError(
-            f"input_profile={profile!r} requires arm_input_source={expected_arm_source!r}"
+            f"input_profile={profile!r} requires arm_input_source in {sorted(allowed_arm_sources)!r}"
         )
     hand_adapter_config = _mapping(config["hand_adapter_config"], "hand_adapter_config")
     _ensure_fields(
@@ -163,6 +169,13 @@ def _load_config(path: str | os.PathLike[str]) -> dict[str, Any]:
         )
     _validate_rotation_config(hand_adapter_config)
 
+    if "operator_config" in config:
+        if profile != "manus" or config["arm_input_source"] != "xr":
+            raise ValueError("operator_config is only valid for the XR/Manus target source")
+        operator_config = _mapping(config["operator_config"], "operator_config")
+        XrControllerOperatorConfig.from_mapping(operator_config)
+        config["operator_config"] = operator_config
+
     mapper_name = config["arm_pose_mapper"]
     mapper_config = _mapping(config["arm_pose_mapper_config"], "arm_pose_mapper_config")
     mapper_fields = {
@@ -172,16 +185,27 @@ def _load_config(path: str | os.PathLike[str]) -> dict[str, Any]:
         "tracked_to_tcp_pose",
         "expected_reference_frame",
         "expected_tracked_frame",
+        "dynamic_elbow_direction",
+        "require_elbow_tracking",
     }
-    if mapper_name not in {"relative_home", "direct_pose", "head_direct", "head_palm_direct"}:
-        raise ValueError("arm_pose_mapper must be relative_home, direct_pose, head_direct or head_palm_direct")
+    if mapper_name not in {"relative_home", "direct_pose", "head_direct", "head_palm_direct", "xr_incremental"}:
+        raise ValueError("arm_pose_mapper must be relative_home, direct_pose, head_direct, head_palm_direct or xr_incremental")
     if mapper_name in {"head_direct", "head_palm_direct"} and profile != "pico":
         raise ValueError("head mapping requires PICO input")
     if mapper_name == "head_palm_direct":
         mapper_fields.update({"head_height_offset_m", "head_forward_offset_m", "tcp_local_z_correction_deg"})
     if mapper_name == "relative_home":
         mapper_fields.add("ik_tcp_to_control_pose")
+    if mapper_name == "xr_incremental":
+        if profile != "manus" or config["arm_input_source"] != "xr":
+            raise ValueError("xr_incremental requires input_profile='manus' and arm_input_source='xr'")
+        mapper_fields.update({"reference_config_path", "tracked_to_wrist_pose", "rate_hz",
+                              "min_cutoff", "beta", "elbow_min_cutoff",
+                              "dynamic_elbow_direction", "require_elbow_tracking",
+                              "controller_to_wrist_pose"})
     _ensure_fields(mapper_config, mapper_fields, "arm_pose_mapper_config")
+    if mapper_name == "xr_incremental":
+        create_arm_pose_mapper("xr_incremental", mapper_config)
     if "head_direct_mapper_config" in config:
         fixed = _mapping(config["head_direct_mapper_config"], "head_direct_mapper_config")
         _ensure_fields(fixed, {"input_to_base_rotation", "input_origin_in_base_m",
@@ -246,8 +270,16 @@ def select_arm_pose_mapper(config: dict[str, Any], backend: str | None) -> None:
     """Select a startup mapping without reusing incompatible geometry fields."""
     if backend is None:
         return
-    if config['input_profile'] != 'pico' or config['simulation_only'] is not True:
-        raise ValueError('--arm-pose-mapper requires PICO simulation')
+    if config['simulation_only'] is not True:
+        raise ValueError('--arm-pose-mapper requires simulation')
+    if backend == 'xr_incremental':
+        if config['input_profile'] != 'manus' or config['arm_input_source'] != 'xr':
+            raise ValueError('xr_incremental requires the XR/Manus target source')
+        config['arm_pose_mapper'] = backend
+        create_arm_pose_mapper(backend, config['arm_pose_mapper_config'])
+        return
+    if config['input_profile'] != 'pico':
+        raise ValueError('--arm-pose-mapper requires PICO simulation or explicit XR/Manus mapper')
     if backend not in ('relative_home', 'head_direct', 'head_palm_direct'):
         raise ValueError('invalid --arm-pose-mapper')
     if backend == config['arm_pose_mapper']:
@@ -260,6 +292,46 @@ def select_arm_pose_mapper(config: dict[str, Any], backend: str | None) -> None:
         config['arm_pose_mapper'] = backend
     else:
         raise ValueError('relative_home requires a relative_home source config')
+
+
+def select_xr_arm_input(config: dict[str, Any], arm_input: str | None) -> None:
+    """Select the tracked object used by the isolated XR/Manus arm source.
+
+    Tracker and controller poses share the same incremental mapper and
+    reference frame.  Only the expected tracked-frame label changes; the
+    PICO2 target configs intentionally reject this selector.
+    """
+    if arm_input is None:
+        return
+    if arm_input not in XR_ARM_INPUTS:
+        raise ValueError("XR/Manus arm input must be xr_tracker or xr_controller")
+    if (
+        config.get("input_profile") != "manus"
+        or config.get("arm_input_source") != "xr"
+        or config.get("arm_pose_mapper") != "xr_incremental"
+    ):
+        raise ValueError("XR/Manus arm input selection requires the XR/Manus target config")
+    mapper_config = dict(config["arm_pose_mapper_config"])
+    # Keep the Tracker calibration as the canonical fallback.  Selecting the
+    # controller must not overwrite it permanently because this function is
+    # also used by tests/tools that resolve more than one input variant in the
+    # same process.  Older configs without a controller-specific extrinsic
+    # retain the historical shared transform.
+    tracker_pose = config.get("_xr_tracker_to_wrist_pose")
+    if tracker_pose is None:
+        tracker_pose = mapper_config.get("tracked_to_wrist_pose")
+        config["_xr_tracker_to_wrist_pose"] = tracker_pose
+    if arm_input == "xr_controller":
+        controller_pose = mapper_config.get("controller_to_wrist_pose", tracker_pose)
+        mapper_config["tracked_to_wrist_pose"] = controller_pose
+    else:
+        mapper_config["tracked_to_wrist_pose"] = tracker_pose
+    mapper_config["expected_tracked_frame"] = (
+        "controller" if arm_input == "xr_controller" else "wrist_tracker"
+    )
+    create_arm_pose_mapper("xr_incremental", mapper_config)
+    config["arm_pose_mapper_config"] = mapper_config
+    config["xr_arm_input"] = arm_input
 
 
 def create_bridge_from_config(
@@ -293,7 +365,8 @@ def create_bridge_from_config(
         arm_input_max_age_s=float(config["arm_input_max_age_s"]),
         period_s=float(config["period_s"]),
         clock=clock,
-        hold_on_tracking_loss=config['input_profile'] == 'pico' and not config['active_hand_sides'],
+        hold_on_tracking_loss=(config['input_profile'] == 'pico' and not config['active_hand_sides'])
+        or config['arm_input_source'] == 'xr',
     )
 
 
@@ -337,6 +410,7 @@ class HandTrackingTargetNode:
         self._return_deadline_ns: int | None = None
         self._target_processor_name = str(config['arm_target_processor']) if config is not None else 'injected'
         self._pose_mapper_name = str(config['arm_pose_mapper']) if config is not None else 'injected'
+        self._xr_operator_config = config.get('operator_config') if config is not None else None
         if config is not None:
             resolved_active_sides = tuple(config["active_sides"])
             resolved_active_hand_sides = tuple(config["active_hand_sides"])
@@ -436,6 +510,8 @@ class HandTrackingTargetNode:
     def _publish_status(self) -> None:
         try:
             startup_ready = bool(getattr(self._session_client, "startup_ready", False))
+            snapshot_complete = getattr(self._session_client, "snapshot_complete", None)
+            snapshot_timed_out = getattr(self._session_client, "snapshot_timed_out", None)
             error = self._last_error or self._calibration_input_error
             self._publisher.publish_source_status(
                 component_id=TARGET_SOURCE_ID,
@@ -453,6 +529,15 @@ class HandTrackingTargetNode:
                     "active_sides": list(self.active_sides),
                     "active_hand_sides": list(self.active_hand_sides),
                     "tracking_hold_sides": list(getattr(self.bridge, 'tracking_hold_sides', ())),
+                    "session_snapshot_complete": (
+                        None if snapshot_complete is None else bool(snapshot_complete)
+                    ),
+                    "session_snapshot_timed_out": (
+                        None if snapshot_timed_out is None else bool(snapshot_timed_out)
+                    ),
+                    "session_coordinator_instance_id": getattr(
+                        self._session_client, "coordinator_instance_id", None
+                    ),
                     "target_topics": [topics.arm_target(side) for side in self.active_sides]
                     + [topics.hand_target(side) for side in self.active_hand_sides],
                 },
@@ -557,7 +642,7 @@ class HandTrackingTargetNode:
                 LOG.warning('Height calibration failed: %s; previous calibration retained', calibration.error)
             self._height_reported_state = calibration.state
 
-    def request_start(self) -> bool:
+    def request_start(self, *, reason: str = 'hand_tracking_target_s') -> bool:
         with self._lock:
             if self._closed or self._phase != "armed":
                 return False
@@ -577,7 +662,7 @@ class HandTrackingTargetNode:
                 self.bridge.start(now_ns=now_ns)
                 if self._height_calibration:
                     self._publish_status()
-                self._session_client.request_start("hand_tracking_target_s")
+                self._session_client.request_start(reason)
             except Exception as exc:
                 self._set_error(f"target start rejected: {exc}")
                 try:
@@ -598,6 +683,21 @@ class HandTrackingTargetNode:
             self._request_return_locked(reason)
             self._publish_status()
             return self._phase == "returning"
+
+    def set_clutch(self, side: str, pressed: bool) -> bool:
+        """Forward a validated XR clutch edge to the selected pose mapper."""
+        with self._lock:
+            mapper = getattr(self.bridge, "pose_mapper", None)
+            setter = getattr(mapper, "set_clutch", None)
+            if not callable(setter) or side not in _SIDES:
+                return False
+            try:
+                setter(side, bool(pressed))
+            except Exception as exc:
+                self._set_error(f"XR clutch rejected: {exc}")
+                self._publish_status()
+                return False
+            return True
 
     def on_key(self, value: str) -> None:
         if value == 'c':
@@ -739,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     config = _load_config(args.config)
     select_arm_pose_mapper(config, os.environ.get('TIANJI_ARM_POSE_MAPPER'))
+    select_xr_arm_input(config, os.environ.get("TIANJI_XR_ARM_INPUT"))
     processor_override = os.environ.get('TIANJI_ARM_TARGET_PROCESSOR')
     if processor_override is not None:
         if processor_override not in ('passthrough', 'conditioned'):
@@ -758,6 +859,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     session = open_session()
     node: HandTrackingTargetNode | None = None
+    gesture_binding = None
+    xr_operator_binding = None
     stop_event = threading.Event()
     old_handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
 
@@ -784,6 +887,12 @@ def main(argv: list[str] | None = None) -> int:
             publisher_instance_id=component_instance_id,
             observation_publisher_instance_id=observation_instance_id,
             coordinator_instance_id=coordinator_instance_id,
+        )
+        from .pico_gesture_start import bind_from_environment
+        gesture_binding = bind_from_environment(os.environ, session=session, node=node)
+        from .xr_operator import bind_from_environment as bind_xr_operator_from_environment
+        xr_operator_binding = bind_xr_operator_from_environment(
+            os.environ, session=session, node=node, config=config
         )
 
         def on_key(value: str) -> None:
@@ -814,8 +923,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         stop_event.set()
-        if node is not None:
-            node.close()
+        try:
+            if gesture_binding is not None:
+                gesture_binding.close()
+            if xr_operator_binding is not None:
+                xr_operator_binding.close()
+        finally:
+            if node is not None:
+                node.close()
         if keyboard_thread is not None:
             keyboard_thread.join(timeout=1.0)
         if duration_thread is not None:
@@ -830,6 +945,7 @@ __all__ = [
     "TARGET_SOURCE_ID",
     "_load_config",
     "create_bridge_from_config",
+    "select_xr_arm_input",
     "main",
 ]
 

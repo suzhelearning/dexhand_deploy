@@ -1,0 +1,53 @@
+# Native XRoboToolkit + Manus rawviz observation process settings.
+input_profile: xr_manus
+observation_only: true
+receiver_instance_id: xr-manus-observation
+print_interval_s: 1.0
+
+xr:
+  host: 127.0.0.1
+  port: 60061
+  reconnect_seconds: 1.0
+  arm_input: xr_tracker
+  tracker_serials:
+    left: "190058"
+    right: "190600"
+  elbow_tracker_serials:
+    left: "190046"
+    right: "190023"
+  controller_sides:
+    left: left
+    right: right
+  poll_hz: 90.0
+  reference_frame: xr_tracking
+  tracker_frame: wrist_tracker
+  controller_frame: controller
+  tracked_to_wrist_pose:
+    left: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    right: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+  start:
+    side: right
+    control: grip
+    threshold: 0.8
+  home:
+    side: left
+    control: grip
+    threshold: 0.8
+  clutch:
+    side: right
+    control: trigger
+    threshold: 0.5
+
+manus:
+  # Supply these at launch with --manus-rawviz/--manus-user.  No checkout
+  # outside this repository is assumed by the canonical config.
+  rawviz: null
+  user: null
+  # If omitted, the SDK directory is resolved next to the supplied rawviz.
+  library_dir: null
+  # These are runtime glove IDs, not .mcal paths.  Leave them unset unless
+  # the connected gloves need explicit serial-number binding.
+  right_glove: null
+  left_glove: null
+  sides: [left, right]
+  callback_capacity: 256

@@ -28,7 +28,7 @@
 | `fault_recovery_sim` | `mocap_live_sim`、故障注入器 | simulation | disabled | 0.1/0.1 |
 | `fault_recovery_real` | `fault_recovery_sim`、Marvin real | real | disabled | 0.1/0.1 |
 
-先启动 `/home/current/syz/mocap/acquisition` 的唯一 router，并让两个仓库使用同一 `TIANJI_ROUTER_ENDPOINT`。统一运行形式：
+先启动由 `TIANJI_ACQUISITION_ROOT` 指定的采集端唯一 router，并让两个仓库使用同一 `TIANJI_ROUTER_ENDPOINT`。统一运行形式：
 
 ```bash
 pixi run validation-run -- --case CASE_ID --output ROOT [--input INPUT]

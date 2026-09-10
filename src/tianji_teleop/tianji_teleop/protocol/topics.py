@@ -31,8 +31,13 @@ RAW_H5_REPLAY = "tianji/raw/h5_replay"
 RAW_PICO_HAND_TRACKING = "tianji/raw/pico_hand_tracking"
 RAW_MANUS_HAND_TRACKING = "tianji/raw/manus_hand_tracking"
 RAW_LEGACY_PICO_PALM = "tianji/raw/legacy_pico_palm"
+RAW_XR_INPUT = "tianji/raw/xr_input"
+RAW_MANUS_CALLBACK = "tianji/raw/manus_callback"
+MANUS_INPUT_AUDIT = "tianji/audit/manus_input"
+HAND_OUTPUT_AUDIT = "tianji/audit/hand_output"
 HAND_OBSERVATION = "tianji/observation/hand/{side}"
 ARM_INPUT_OBSERVATION = "tianji/observation/arm_input/{side}"
+XR_OPERATOR_OBSERVATION = "tianji/observation/operator/xr"
 FRAME0_HAND_SKELETON = "tianji/diagnostics/h5/frame0_hand_skeleton"
 
 MOCAP_ALIGNED_HANDS = "mocap/aligned/hands"
@@ -98,8 +103,9 @@ __all__ = [
     "HAND_COMMAND", "ARM_STATE", "HAND_STATE", "EXECUTOR_STATUS",
     "HAND_EXECUTOR_STATUS", "SAFETY_STOP", "SAFETY_ACK",
     "RAW_MOCAP_LIVE", "RAW_H5_REPLAY", "RAW_PICO_HAND_TRACKING",
-    "RAW_MANUS_HAND_TRACKING", "RAW_LEGACY_PICO_PALM", "HAND_OBSERVATION",
-    "ARM_INPUT_OBSERVATION",
+    "RAW_MANUS_HAND_TRACKING", "RAW_LEGACY_PICO_PALM", "RAW_XR_INPUT", "RAW_MANUS_CALLBACK",
+    "MANUS_INPUT_AUDIT", "HAND_OUTPUT_AUDIT", "HAND_OBSERVATION",
+    "ARM_INPUT_OBSERVATION", "XR_OPERATOR_OBSERVATION",
     "FRAME0_HAND_SKELETON", "MOCAP_ALIGNED_HANDS", "MOCAP_HANDS_FRAME",
     "MOCAP_RIGID_BODY_NAMES", "arm_target", "hand_target", "hand_observation",
     "arm_input_observation", "arm_proposal",

@@ -12,7 +12,7 @@ while (($#)); do
     --source|--profile) source_id="${2:-}"; shift 2 ;;
     --config) config_override="${2:-}"; shift 2 ;;
     --help|-h)
-      printf '%s\n' '用法: run_source.sh --source {mocap_live|h5_replay|regrind_policy|hand_tracking_observation|hand_tracking_target|pico_capture|manus_capture} [--config PATH] [参数...]'
+      printf '%s\n' '用法: run_source.sh --source {mocap_live|h5_replay|regrind_policy|hand_tracking_observation|hand_tracking_target|xr_manus_observation|pico_capture|manus_capture} [--config PATH] [参数...]'
       exit 0 ;;
     --) shift; break ;;
     *) break ;;
@@ -35,6 +35,9 @@ case "${source_id}" in
   hand_tracking_target)
     entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/hand_tracking_target"
     default_config="sources/hand_tracking_target.yaml" ;;
+  xr_manus_observation)
+    entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/xr_manus_observation"
+    default_config="sources/xr_manus_observation.yaml" ;;
   pico_capture)
     entry="${BUNDLE_ROOT}/src/tianji_teleop/scripts/pico_capture"
     default_config="sources/hand_tracking_observation.yaml" ;;
@@ -56,7 +59,8 @@ fi
 export TIANJI_ROUTER_ENDPOINT="${TIANJI_ROUTER_ENDPOINT:-tcp/127.0.0.1:7447}"
 export TIANJI_ROUTER_ZID="${TIANJI_ROUTER_ZID:-$(require_router)}"
 export TIANJI_COMPONENT_INSTANCE_ID="${TIANJI_COMPONENT_INSTANCE_ID:-$(new_instance_id)}"
-if [[ "${source_id}" != hand_tracking_observation && "${source_id}" != pico_capture && "${source_id}" != manus_capture ]]; then
+if [[ "${source_id}" != hand_tracking_observation && "${source_id}" != xr_manus_observation &&
+      "${source_id}" != pico_capture && "${source_id}" != manus_capture ]]; then
   export TIANJI_COORDINATOR_INSTANCE_ID="${TIANJI_COORDINATOR_INSTANCE_ID:?必须由run_session注入 TIANJI_COORDINATOR_INSTANCE_ID}"
 fi
 activate_bundle_runtime

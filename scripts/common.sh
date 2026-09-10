@@ -519,7 +519,7 @@ new_instance_id() {
 
 router_unavailable_message() {
   printf '%s\n' \
-    'Zenoh router unavailable; set TIANJI_ROUTER_ENDPOINT and run /home/current/syz/mocap/acquisition: pixi run start-router' >&2
+    'Zenoh router unavailable; set TIANJI_ROUTER_ENDPOINT and start one Zenoh router (for example: ./vendor/zenoh-router/zenohd -l "$TIANJI_ROUTER_ENDPOINT" --no-multicast-scouting).' >&2
 }
 
 require_router() {

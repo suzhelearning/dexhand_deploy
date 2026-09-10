@@ -113,8 +113,8 @@ PICO原始腕部位姿保留在其初始化参考系中，机械臂观察通道�
 
 参考代码：
 
-- `/home/zj/current_robotics/pico-manus-teleop/manus`
-- `/home/zj/current_robotics/pico-manus-teleop/wuji_teleop`
+- `${PICO_MANUS_TELEOP_ROOT}/manus`
+- `${PICO_MANUS_TELEOP_ROOT}/wuji_teleop`
 
 订阅现有 JSON Zenoh 主题：
 
@@ -143,7 +143,7 @@ manus/raw_skeleton/right_hand
 
 ## 5. PICO 接收与26→21转换
 
-参考代码：`/home/zj/current_robotics/PICO_Hand_Tracking/PICO_2`。
+参考代码由 `PICO2_REFERENCE_ROOT` 注入；部署代码不依赖固定 checkout 路径。
 
 复用其 ADB 转发和 TCP 数据接收协议：设备端口10002，头部格式 `<BBqI`，magic为 `0xAB`，消息类型为 `0x40`；已知版本1包含26个手部关节，标准负载为1968字节。
 

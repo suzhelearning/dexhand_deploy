@@ -136,6 +136,33 @@ class ArmCommandCoordinatorTest(unittest.TestCase):
         coordinator.update_component(_status("source", "unexpected", 1_000_000_000))
         self.assertEqual(coordinator.state.state, "fault")
 
+    def test_observation_only_source_status_is_not_a_control_authority(self):
+        authorities = {
+            "source": {"logical_id": "src", "publisher_instance_id": "src-instance", "router_zid": "router-1"},
+            "producer_arm": {"logical_id": "ik", "publisher_instance_id": "ik-instance", "router_zid": "router-1"},
+            "producer_hand": {"left": {"logical_id": "disabled", "publisher_instance_id": "disabled", "router_zid": "router-1", "enabled": False},
+                               "right": {"logical_id": "disabled", "publisher_instance_id": "disabled", "router_zid": "router-1", "enabled": False}},
+            "coordinator_arm": {"logical_id": "arm", "publisher_instance_id": "coord-1", "router_zid": "router-1"},
+            "executor_arm": {"logical_id": "mujoco", "publisher_instance_id": "mujoco-instance", "router_zid": "router-1"},
+            "executor_hand": {"left": {"logical_id": "disabled", "publisher_instance_id": "disabled", "router_zid": "router-1", "enabled": False},
+                               "right": {"logical_id": "disabled", "publisher_instance_id": "disabled", "router_zid": "router-1", "enabled": False}},
+        }
+        coordinator = ArmCommandCoordinator(
+            session=None,
+            publisher_instance_id="coord-1",
+            router_zid="router-1",
+            profile={"active_sides": ["left", "right"], "required_capability": "simulation", "authorities": authorities},
+            clock=lambda: 1_000_000_000,
+        )
+        observation_status = ComponentStatus(
+            1, 1, 1_000_000_000, "source", "hand_tracking_observation", "receiving",
+            True, True, ["simulation"], None, {"observation_only": True},
+            "observation-instance", "router-1",
+        )
+        coordinator.update_component(observation_status)
+        self.assertEqual(coordinator.state.state, "idle")
+        self.assertNotIn(("source", "hand_tracking_observation"), coordinator._statuses)
+
     def test_reject_keeps_idle_and_correlates_intent(self):
         result = self.coordinator.handle_intent(SimpleNamespace(action="start", sequence=9, source="src", reason="run"))
         self.assertFalse(result.accepted)

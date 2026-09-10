@@ -41,8 +41,8 @@ the legacy portable build independent of MuJoCo/qpOASES.
 
 Commands: pixi run -e ik-build bash scripts/build_ik_sim.sh;
 pixi run -e ik-build check-ik-trajectory;
-pixi run python scripts/compare_v131_reference.py --reference-root
-/home/zj/current_robotics/TJ_arm_control_pico_ee_ik;
+export V131_REFERENCE_ROOT="${V131_REFERENCE_ROOT:?set V131_REFERENCE_ROOT}"
+pixi run python scripts/compare_v131_reference.py --reference-root "${V131_REFERENCE_ROOT}";
 PYTHONPATH=src/tianji_teleop:tests pixi run python -m unittest test_v131_model
 test_v131_profile test_arm_coordinator test_pico_arm_only test_joint_limit_source.
 

@@ -106,6 +106,12 @@ def require_finite_positive(value: Any, field: str) -> float:
     return result
 
 
+def resolve_dual_session_config(value: Mapping[str, Any], *, disable_hands: bool = False) -> dict[str, Any]:
+    """Resolve only the new explicit input contracts; legacy parsers unchanged."""
+    from .hand_tracking.session_config import resolve_session
+    return resolve_session(value, disable_hands=disable_hands)
+
+
 __all__ = [
     "DEFAULT_ROUTER_ENDPOINT",
     "ROUTER_ENDPOINT_ENV",
@@ -115,4 +121,5 @@ __all__ = [
     "load_yaml",
     "require_finite_positive",
     "router_endpoint",
+    "resolve_dual_session_config",
 ]

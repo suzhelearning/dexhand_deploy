@@ -19,6 +19,7 @@ class ProcessedArmTarget:
     mapping_backend: str
     frame_association_id: str
     diagnostics: TargetConditioningDiagnostics | None = None
+    elbow_reference_direction: tuple[float, float, float] | None = None
 
     def __post_init__(self) -> None:
         if self.side not in ("left", "right"):
@@ -30,6 +31,11 @@ class ProcessedArmTarget:
             if value.shape != (7,) or not np.isfinite(value).all() or np.linalg.norm(value[3:]) < 1.0e-12:
                 raise ValueError("processed target pose must be finite and valid")
             object.__setattr__(self, "pose", value.copy())
+        if self.elbow_reference_direction is not None:
+            elbow = np.asarray(self.elbow_reference_direction, dtype=np.float64)
+            if elbow.shape != (3,) or not np.isfinite(elbow).all() or np.linalg.norm(elbow) < 1.0e-12:
+                raise ValueError("processed elbow direction must be a finite non-zero 3-vector")
+            object.__setattr__(self, "elbow_reference_direction", tuple(float(item) for item in elbow))
 
 
 class ArmTargetProcessor(Protocol):
@@ -47,7 +53,7 @@ class PassthroughTargetProcessor:
         if not np.isfinite(float(dt_s)) or float(dt_s) <= 0.0:
             raise ValueError("dt_s must be a positive finite number")
         pose = None if mapped_target.pose is None else mapped_target.pose.copy()
-        return ProcessedArmTarget(mapped_target.side, pose, mapped_target.valid, "passthrough", mapped_target.backend, mapped_target.frame_association_id)
+        return ProcessedArmTarget(mapped_target.side, pose, mapped_target.valid, "passthrough", mapped_target.backend, mapped_target.frame_association_id, elbow_reference_direction=mapped_target.elbow_reference_direction)
 
 
 def _config_value(config: Any, name: str, default: Any = None) -> Any:
@@ -88,9 +94,9 @@ class ConditionedTargetProcessor:
         if not np.isfinite(float(dt_s)) or float(dt_s) <= 0.0:
             raise ValueError("dt_s must be a positive finite number")
         if not mapped_target.valid or mapped_target.pose is None:
-            return ProcessedArmTarget(mapped_target.side, None, False, "conditioned", mapped_target.backend, mapped_target.frame_association_id)
+            return ProcessedArmTarget(mapped_target.side, None, False, "conditioned", mapped_target.backend, mapped_target.frame_association_id, elbow_reference_direction=mapped_target.elbow_reference_direction)
         position, quaternion, diagnostics = self._conditioners[mapped_target.side].condition(mapped_target.pose[:3], mapped_target.pose[3:])
-        return ProcessedArmTarget(mapped_target.side, np.concatenate((position, quaternion)), True, "conditioned", mapped_target.backend, mapped_target.frame_association_id, diagnostics)
+        return ProcessedArmTarget(mapped_target.side, np.concatenate((position, quaternion)), True, "conditioned", mapped_target.backend, mapped_target.frame_association_id, diagnostics, mapped_target.elbow_reference_direction)
 
 
 def create_arm_target_processor(backend: str, config: Any) -> ArmTargetProcessor:

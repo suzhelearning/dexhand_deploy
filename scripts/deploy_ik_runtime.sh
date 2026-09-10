@@ -29,10 +29,10 @@ RUNTIME_PROGRAMS=(
   joint_watcher
 )
 BACKUP_DIR="${BUNDLE_ROOT}/staging/runtime-backup"
-SDK_SOURCE_ROOT="${TIANJI_OFFICIAL_SDK_ROOT:-/home/ice/TJ_FX_ROBOT_CONTRL_SDK}"
+SDK_SOURCE_ROOT="${TIANJI_OFFICIAL_SDK_ROOT:-}"
 SDK_RUNTIME_ROOT="${BUNDLE_ROOT}/runtime/tianji_official"
-SDK_LIBRARY="${SDK_SOURCE_ROOT}/kinematicsSDK/libKine.so"
-SDK_CONFIG="${SDK_SOURCE_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
+SDK_LIBRARY=""
+SDK_CONFIG=""
 RUNTIME_SHARE="${BUNDLE_ROOT}/runtime/tianji_teleop/share/tianji_teleop"
 SOURCE_CONFIG="${BUNDLE_ROOT}/src/tianji_teleop/config"
 STAGING_CONFIG="${BUNDLE_ROOT}/staging/ik/share/tianji_teleop/config"
@@ -67,6 +67,12 @@ for program in "${RUNTIME_PROGRAMS[@]}"; do
     exit 1
   fi
 done
+if [[ -z "${SDK_SOURCE_ROOT}" ]]; then
+  printf '%s\n' '错误：请设置 TIANJI_OFFICIAL_SDK_ROOT 指向官方 SDK checkout；部署包不内置主机 SDK。' >&2
+  exit 1
+fi
+SDK_LIBRARY="${SDK_SOURCE_ROOT}/kinematicsSDK/libKine.so"
+SDK_CONFIG="${SDK_SOURCE_ROOT}/CommonConfig/ccs_m6_40.MvKDCfg"
 for sdk_file in "${SDK_LIBRARY}" "${SDK_CONFIG}"; do
   if [[ ! -f "${sdk_file}" ]]; then
     printf '错误：天机官方 SDK 文件不存在：%s\n' "${sdk_file}" >&2

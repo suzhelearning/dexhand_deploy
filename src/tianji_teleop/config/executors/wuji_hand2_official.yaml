@@ -1,0 +1,8 @@
+# Official Hand 2 retargeting for the XR + Manus simulation profile.
+# The robot joint contract remains in robot/wuji_hand2.yaml.
+mode: retarget
+rate_hz: 60.0
+input_timeout_s: 0.5
+linear_interpolation: false
+hand_config: robot/wuji_hand2.yaml
+retarget_backend: official_wuji_hand2

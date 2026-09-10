@@ -10,14 +10,18 @@ from tianji_teleop.sources.common.target_processing import (
 )
 
 
-def _mapped(pose=None) -> MappedArmPose:
+def _mapped(pose=None, elbow=None) -> MappedArmPose:
     return MappedArmPose(
         side="right",
-        pose=np.asarray(pose or [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0], dtype=np.float64),
+        pose=np.asarray(
+            [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0] if pose is None else pose,
+            dtype=np.float64,
+        ),
         valid=True,
         backend="direct_pose",
         mapping_version="direct-v1",
         frame_association_id="frame-1",
+        elbow_reference_direction=elbow,
     )
 
 
@@ -30,6 +34,35 @@ class TargetProcessingFactoryTest(unittest.TestCase):
 
         np.testing.assert_array_equal(result.pose, source.pose)
         self.assertEqual(result.backend, "passthrough")
+
+    def test_elbow_direction_survives_passthrough_and_conditioned_processing(self) -> None:
+        elbow = (-0.25, 0.5, -0.75)
+        source = _mapped(elbow=elbow)
+        conditioned_config = {
+            "rate_hz": 100.0,
+            "translation_gain": [1.0, 1.0, 1.0],
+            "rotation_gain": 1.0,
+            "workspace_relative_radii_m": [10.0, 10.0, 10.0],
+            "workspace_soft_zone_ratio": 0.9,
+            "maximum_linear_speed_m_s": 10.0,
+            "maximum_angular_speed_rad_s": 10.0,
+            "maximum_linear_acceleration_m_s2": 100.0,
+            "maximum_angular_acceleration_rad_s2": 100.0,
+            "initial_position": {"right": [0.0, 0.0, 0.0]},
+            "initial_quaternion": {"right": [0.0, 0.0, 0.0, 1.0]},
+        }
+
+        passthrough = create_arm_target_processor("passthrough", {})
+        conditioned = create_arm_target_processor("conditioned", conditioned_config)
+
+        self.assertEqual(
+            passthrough.process(source, dt_s=0.01).elbow_reference_direction,
+            elbow,
+        )
+        self.assertEqual(
+            conditioned.process(source, dt_s=0.01).elbow_reference_direction,
+            elbow,
+        )
 
     def test_conditioned_processor_reset_does_not_reuse_old_state(self) -> None:
         processor = create_arm_target_processor(

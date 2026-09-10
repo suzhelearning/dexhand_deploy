@@ -292,6 +292,26 @@ class HandTrackingRuntimeTest(unittest.TestCase):
         self.assertFalse(observation.valid)
         self.assertEqual(observation.joint_valid, [False] * 21)
 
+    def test_manus_runtime_publishes_rawviz_audit_with_run_identity(self) -> None:
+        published: list[tuple[str, dict]] = []
+        runtime = ObservationRuntime(
+            publish=lambda key, payload: published.append((key, payload)),
+            publisher_instance_id="publisher",
+            router_zid="router",
+            run_id="run-1",
+        )
+        runtime.publish_manus_rawviz_line(
+            "HAND 1 1",
+            line_sequence=1,
+            received_timestamp_ns=100,
+        )
+
+        payload = next(payload for key, payload in published if key == topics.MANUS_INPUT_AUDIT)
+        self.assertEqual(payload["kind"], "manus_rawviz_line")
+        self.assertEqual(payload["run_id"], "run-1")
+        self.assertEqual(payload["line_sequence"], 1)
+        self.assertEqual(payload["received_timestamp_ns"], 100)
+
     def test_legacy_udp_receiver_validates_and_decodes_datagrams(self) -> None:
         class FakeSocket:
             def __init__(self) -> None:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mocap-acquisition HDF5 文件（v4.0 紧凑 60Hz 布局）的只读加载器。
 
-文件来源：/home/current/syz/mocap/acquisition 采集程序（schema 名
+文件来源：外部 mocap-acquisition 采集程序（schema 名
 ``mocap-acquisition``、布局 ``compact-aligned-60hz-v1``）。本模块只做
 纯数据读取与校验，不依赖 ROS 2，可独立单元测试。
 

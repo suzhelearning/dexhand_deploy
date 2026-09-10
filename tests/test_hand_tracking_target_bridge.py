@@ -27,16 +27,16 @@ def _hand(sequence: int = 1, *, timestamp_ns: int = 1_000_000_000, valid: bool =
     )
 
 
-def _arm(sequence: int = 1, *, timestamp_ns: int = 1_000_000_000, valid: bool = True, publisher: str = "obs", source: str = "pico", reference: str = "pico_head_current", tracked: str = "wrist", pose: list[float] | None = None) -> ArmWire:
+def _arm(sequence: int = 1, *, timestamp_ns: int = 1_000_000_000, valid: bool = True, publisher: str = "obs", source: str = "pico", source_instance: str = "pico-source", reference: str = "pico_head_current", tracked: str = "wrist", pose: list[float] | None = None) -> ArmWire:
     return ArmWire(
         1, sequence, timestamp_ns, timestamp_ns, timestamp_ns, source, "right",
-        tracked, reference, "pico-source", sequence, "receiver", sequence,
+        tracked, reference, source_instance, sequence, "receiver", sequence,
         "pico-arm-v1", pose if valid else None, valid, f"frame-{sequence}",
         publisher, "router",
     )
 
 
-def _bridge(*, mapper_name: str = "relative_home", processor_name: str = "passthrough", profile: str = "pico") -> ObservationTargetBridge:
+def _bridge(*, mapper_name: str = "relative_home", processor_name: str = "passthrough", profile: str = "pico", arm_source: str | None = None) -> ObservationTargetBridge:
     hand = create_hand_target_adapter(
         "fixed_rotation",
         {
@@ -65,7 +65,7 @@ def _bridge(*, mapper_name: str = "relative_home", processor_name: str = "passth
         router_zid="router",
         observation_publisher_instance_id="obs",
         hand_adapter=hand,
-        arm_input_source="pico" if profile == "pico" else "legacy_pico_palm",
+        arm_input_source=arm_source or ("pico" if profile == "pico" else "legacy_pico_palm"),
         pose_mapper=create_arm_pose_mapper(mapper_name, mapper_config),
         target_processor=create_arm_target_processor(processor_name, {}),
         active_sides=("right",),
@@ -131,6 +131,41 @@ class ObservationTargetBridgeTest(unittest.TestCase):
         bridge.ingest_hand_observation(_hand(3, timestamp_ns=1_100_000_000))
         with self.assertRaises(TargetBridgeInputRejected):
             bridge.tick(now_ns=1_600_000_001)
+
+    def test_xr_connection_generation_change_requires_a_new_start(self) -> None:
+        bridge = _bridge(arm_source="xr")
+        bridge.ingest_hand_observation(_hand())
+        bridge.ingest_arm_observation(_arm(source="xr", source_instance="xr-receiver:1", pose=[0, 0, 0, 0, 0, 0, 1]))
+        bridge.start(now_ns=1_000_000_000)
+
+        with self.assertRaisesRegex(TargetBridgeInputRejected, "generation"):
+            bridge.ingest_arm_observation(
+                _arm(
+                    2,
+                    timestamp_ns=1_100_000_000,
+                    source="xr",
+                    source_instance="xr-receiver:2",
+                    pose=[0, 0, 0, 0, 0, 0, 1],
+                )
+            )
+
+    def test_xr_reconnect_before_start_replaces_the_stale_reference(self) -> None:
+        bridge = _bridge(arm_source="xr")
+        bridge.ingest_hand_observation(_hand())
+        bridge.ingest_arm_observation(_arm(source="xr", source_instance="xr-receiver:1", pose=[0, 0, 0, 0, 0, 0, 1]))
+        bridge.ingest_arm_observation(
+            _arm(
+                2,
+                timestamp_ns=1_100_000_000,
+                source="xr",
+                source_instance="xr-receiver:2",
+                pose=[0.1, 0.2, 0.3, 0, 0, 0, 1],
+            )
+        )
+        bridge.start(now_ns=1_100_000_000)
+        result = bridge.tick(now_ns=1_100_000_000)
+        self.assertEqual(len(result.arm), 1)
+        self.assertEqual(result.arm[0].frame_association_id, "frame-2")
 
 
 if __name__ == "__main__":

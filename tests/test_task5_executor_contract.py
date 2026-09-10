@@ -492,6 +492,15 @@ class Task5ExecutorContractTest(unittest.TestCase):
         self.assertNotIn("tianji/state/hand/right", published_topics)
         self.assertNotIn("tianji/executor/hand/right/status", published_topics)
         self.assertIn("tianji/executor/status", published_topics)
+        status_rows = [
+            json.loads(payload)
+            for topic, payload in session.published
+            if topic == "tianji/executor/status"
+        ]
+        self.assertTrue(status_rows)
+        overlay_status = status_rows[-1]
+        self.assertTrue(overlay_status["diagnostics"]["hand_overlay"])
+        self.assertEqual(overlay_status["diagnostics"]["hand_commands_applied"], 1)
 
 
     def test_mujoco_safety_stop_freezes_qpos_and_requires_restart(self):

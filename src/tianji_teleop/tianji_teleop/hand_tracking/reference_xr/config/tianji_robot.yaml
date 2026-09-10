@@ -1,0 +1,166 @@
+# =============================================================================
+# Tianji Robot Unified Configuration File
+# =============================================================================
+# This file is the Single Source of Truth for all Tianji robot parameters
+#
+# Usage:
+#   from tianji_world_output.config_loader import TianjiConfig
+#   config = TianjiConfig.load()
+#   init_pos = config.init_pos['left']
+#
+# Configuration sources:
+#   - INIT_JOINTS: Manually calibrated initial joint angles (arms-extended pose)
+#   - INIT_POS/ROT: Computed via FK(INIT_JOINTS)
+#   - WORLD_TO_CHEST_QUAT: Rotation of ±90 degrees around X axis (experimentally verified)
+# =============================================================================
+
+# Robot connection parameters
+robot_ip: "192.168.1.190"
+
+# Kinematics configuration file (relative to tianji_world_output package config directory)
+kine_config_file: "ccs_m6.MvKDCfg"
+
+# =============================================================================
+# Initial joint angles (degrees)
+# =============================================================================
+# Arms-extended pose, serves as the computation basis for all end-effector pose parameters
+init_joints:
+  left:  [55.0, -65.0, -70.0, -60.0, 60.0, 0.0, 0.0]
+  right: [-55.0, -65.0, 70.0, -60.0, -60.0, 0.0, 0.0]
+
+# =============================================================================
+# Initial end-effector pose (Chest coordinate system)
+# =============================================================================
+# Computed via FK(init_joints), verified using verify_fk_values.py
+
+# End-effector position [x, y, z] meters
+init_pos:
+  left:  [0.5733, 0.2237, 0.2762]
+  right: [0.5733, -0.2237, 0.2762]
+
+# End-effector orientation - rotation matrix (3x3, row-major)
+init_rot:
+  left:
+    - [-0.0573, -0.0055, 0.9983]
+    - [0.0250, 0.9997, 0.0070]
+    - [-0.9980, 0.0254, -0.0571]
+  right:
+    - [-0.0573, 0.0055, 0.9983]
+    - [-0.0250, 0.9997, -0.0070]
+    - [-0.9980, -0.0254, -0.0571]
+
+# End-effector orientation - quaternion [qx, qy, qz, qw] (converted from rotation matrix)
+init_quat:
+  left:  [0.0067, 0.7270, 0.0111, 0.6865]
+  right: [-0.0067, 0.7270, -0.0111, 0.6865]
+
+# =============================================================================
+# World -> Chest Coordinate Transform
+# =============================================================================
+# World coordinate system (ROS REP 103): X=forward, Y=left, Z=up
+# Chest coordinate system:
+#   Left:  X=forward, Y=down, Z=left (rotated +90 deg around World X axis)
+#   Right: X=forward, Y=up, Z=right (rotated -90 deg around World X axis)
+#
+# These quaternions represent the world->chest vector transform direction, consistent with PICO_TELEOP_GUIDE.md:
+#   Left:  world→chest: [x, -z, y] corresponding to +90 deg rotation around X axis
+#   Right: world→chest: [x, z, -y] corresponding to -90 deg rotation around X axis
+#
+# Note: TF visualization requires chest->world direction, use the inverse of these quaternions!
+
+# Quaternion [qx, qy, qz, qw]
+world_to_chest_quat:
+  left:  [0.7071067811865475, 0.0, 0.0, 0.7071067811865475]   # Rotation +90 deg around X axis
+  right: [0.7071067811865475, 0.0, 0.0, -0.7071067811865475]  # Rotation -90 deg around X axis
+
+# Translation (for RViz visualization)
+world_to_chest_trans:
+  left:  [0.0, 0.2, 0.0]
+  right: [0.0, -0.2, 0.0]
+
+# =============================================================================
+# Forearm Tracker Initial Position (Chest Coordinate System) - Physically Correct Values
+# =============================================================================
+# Used for PICO arm tracker incremental control reference position + arm angle geometric direction calculation
+#
+# Physical meaning: elbow 30cm below shoulder + 20cm outward (relaxed elbow + abduction posture)
+#   Left Chest:  Y+=down, Z+=left(outer side)  → [0.2, +0.3, +0.2]
+#   Right Chest: Y-=down, Z+=right(outer side)  → [0.2, -0.3, +0.2]
+#
+# World coordinate verification:
+#   Left:  [0.2, +0.3, +0.2] → World [0.2, +0.2, -0.3] → Z=-0.3 = 30cm below ✓
+#   Right: [0.2, -0.3, +0.2] → World [0.2, -0.2, -0.3] → Z=-0.3 = 30cm below ✓
+#
+# Note: geometrically computed elbow offset direction points toward gravity (down), negate (-direction) before publishing to IK
+#       Because IK zsp_para requires anti-gravity direction (see default_zsp_para)
+arm_init_pos:
+  left:  [0.2, 0.3, 0.2]
+  right: [0.2, -0.3, 0.2]
+
+arm_init_quat:
+  left:  [0.4177, -0.0283, 0.5206, 0.7441]
+  right: [0.7448, -0.5141, 0.0058, 0.4254]
+
+# =============================================================================
+# IK Parameters
+# =============================================================================
+# Nullspace constraint type (1=use elbow direction hint)
+zsp_type: 1
+
+# Default arm angle reference plane parameters [x, y, z, a, b, c]
+# First 3 define reference plane direction (Chest coordinate system), IK selects arm angle solution closest to this plane
+#
+# Note: zsp_para is not the elbow direction!Verified through FK->IK closed-loop (diagnose_zsp_para.py):
+#   - Actual meaning is "reference plane normal vector", Y component direction is opposite to gravity
+#   - Left arm GRV=[0,+9.81,0] (gravity=+Y), zsp_para Y is negative
+#   - Right arm GRV=[0,-9.81,0] (gravity=-Y), zsp_para Y is positive
+#
+# Empirically optimal values (diagnose_zsp_para.py grid search, FK->IK closed-loop error < 0.55 deg):
+default_zsp_para:
+  left:  [0, -0.5, -0.3, 0, 0, 0]
+  right: [0, 0.5, -0.3, 0, 0, 0]
+
+# Arm angle rotation angle (degrees), 0=no extra rotation
+zsp_angle: 0.0
+
+# Singularity tolerance angle range (degrees)
+dgr: [5.0, 5.0, 5.0]
+
+# =============================================================================
+# PICO -> Robot Coordinate Transform
+# =============================================================================
+# PICO coordinate system: +X=right, +Y=up, +Z=toward user (back)
+# Robot coordinate system: +X=forward, +Y=left, +Z=up
+# Transform matrix (3x3):
+#   Robot_X = -PICO_Z
+#   Robot_Y = -PICO_X
+#   Robot_Z = +PICO_Y
+pico_to_robot:
+  - [0, 0, -1]
+  - [-1, 0, 0]
+  - [0, 1, 0]
+
+# =============================================================================
+# Note: Tracker serial number mapping has been moved to pico_input/config/pico_input.yaml
+# =============================================================================
+# tianji_world_output only responsible for receiving standardized control interfaces:
+#   - /left_arm_target_pose (PoseStamped, chest coordinate system)
+#   - /right_arm_target_pose (PoseStamped, chest coordinate system)
+#   - /left_arm_elbow_direction (Vector3Stamped)
+#   - /right_arm_elbow_direction (Vector3Stamped)
+#
+# All input device related configuration (PICO tracker mapping, coordinate transforms, etc.) are in their respective input packages
+#
+# =============================================================================
+# Topic Naming Convention (P4)
+# =============================================================================
+# Arm system (pico_input <-> tianji_world_output):
+#   Format: /{side}_arm_{type}  (Flat style)
+#   Example: /left_arm_target_pose, /right_arm_elbow_direction
+#
+# Dexterous hand system (manus_input <-> wujihand_ik):
+#   Format: /wuji_hand/{side}/{type}  (Hierarchical style)
+#   Example: /wuji_hand/left/joint_command, /wuji_hand/right/joint_state
+#
+# Note: The two systems have different styles, because dexterous hand topics involve multiple unmodifiable packages.
+# Hierarchical style is recommended for future unification: /tianji_arm/{side}/{type}

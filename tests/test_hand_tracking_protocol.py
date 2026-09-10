@@ -86,6 +86,22 @@ class HandTrackingProtocolTest(unittest.TestCase):
         )
         self.assertFalse(parse_message(json.dumps(message.to_dict()), ArmInputObservation).valid)
 
+        valid_message = ArmInputObservation(
+            schema_version=1, sequence=8, timestamp_ns=9, source_timestamp_ns=10,
+            received_timestamp_ns=11, source="xr", side="left", tracked_frame="wrist_tracker",
+            reference_frame="xr_tracking", source_instance_id="xr-source", source_sequence=12,
+            receiver_instance_id="receiver", receiver_frame_sequence=13,
+            mapping_version="xr_tracker_v1", pose=[0, 0, 0, 0, 0, 0, 1], valid=True,
+            frame_association_id="receiver:1:13", publisher_instance_id="publisher",
+            router_zid="router", elbow_pose=[0.1, 0.2, 0.3, 0, 0, 0, 1],
+        )
+        decoded = parse_message(json.dumps(valid_message.to_dict()), ArmInputObservation)
+        self.assertEqual(decoded, valid_message)
+        legacy_payload = valid_message.to_dict()
+        legacy_payload.pop("elbow_pose")
+        legacy_decoded = ArmInputObservation.from_dict(legacy_payload)
+        self.assertIsNone(legacy_decoded.elbow_pose)
+
         payload = message.to_dict()
         payload["pose"] = [0.0] * 7
         with self.assertRaises(ProtocolError):

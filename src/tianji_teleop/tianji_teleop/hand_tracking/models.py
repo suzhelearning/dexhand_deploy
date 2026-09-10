@@ -166,7 +166,7 @@ class HandObservation:
 
 @dataclass(frozen=True)
 class ArmInputObservation:
-    """One tracked palm/wrist pose before TCP mapping."""
+    """One tracked wrist pose plus an optional forearm pose before TCP mapping."""
 
     source: str
     side: str
@@ -182,6 +182,7 @@ class ArmInputObservation:
     frame_association_id: str
     source_sequence: int | None = None
     source_instance_id: str = "unknown"
+    elbow_pose: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         _required_string(self.source, "source")
@@ -202,7 +203,9 @@ class ArmInputObservation:
         _required_string(self.frame_association_id, "frame_association_id")
         _optional_nonnegative_int(self.source_sequence, "source_sequence")
         _required_string(self.source_instance_id, "source_instance_id")
+        elbow_pose = None if self.elbow_pose is None else _pose(self.elbow_pose, "elbow_pose")
         object.__setattr__(self, "pose", pose)
+        object.__setattr__(self, "elbow_pose", elbow_pose)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -220,6 +223,7 @@ class ArmInputObservation:
             "receiver_frame_sequence": self.receiver_frame_sequence,
             "mapping_version": self.mapping_version,
             "frame_association_id": self.frame_association_id,
+            "elbow_pose": None if self.elbow_pose is None else self.elbow_pose.tolist(),
         }
 
 

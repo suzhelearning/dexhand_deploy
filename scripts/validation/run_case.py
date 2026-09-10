@@ -34,6 +34,22 @@ SRC_ROOT = ROOT / "src" / "tianji_teleop"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+
+def configured_acquisition_root() -> Path | None:
+    """Return the optional external acquisition checkout supplied by the operator."""
+    value = os.environ.get("TIANJI_ACQUISITION_ROOT", "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def configured_acquisition_acl() -> Path | None:
+    root = configured_acquisition_root()
+    return root / "config" / "zenohd_acl.yaml" if root is not None else None
+
+
+def acquisition_fingerprint() -> dict[str, Any]:
+    root = configured_acquisition_root()
+    return git_fingerprint(root) if root is not None else {"commit": "unavailable", "dirty": None}
+
 from tianji_teleop.config_loader import DEFAULT_ROUTER_ENDPOINT, canonical_config_root
 from tianji_teleop.protocol.messages import ProtocolEnvelope, SafetyStopAck, SafetyStopRequest
 from tianji_teleop.sources.common.real_admission import RealCapabilityInput
@@ -471,11 +487,11 @@ def _profile_config(profile: str) -> dict[str, Any]:
 
 def _hashes() -> dict[str, str]:
     config_root = canonical_config_root()
-    acl = Path("/home/current/syz/mocap/acquisition/config/zenohd_acl.yaml")
+    acl = configured_acquisition_acl()
     return {
         "config_sha256": sha256_tree(config_root, suffixes={".yaml", ".yml"}),
         "runtime_sha256": sha256_tree(ROOT / "runtime"),
-        "acl_sha256": sha256_file(acl) if acl.is_file() else "unavailable",
+        "acl_sha256": sha256_file(acl) if acl is not None and acl.is_file() else "unavailable",
     }
 def _bind_real_preflight(
     source_path: Path,
@@ -985,7 +1001,7 @@ def _build_manifest(case_id: str, case: Mapping[str, Any], profile: str, run_id:
                 instance_ids["hand_executor_instances"] = executor_instances
                 instance_ids["producer_hand"] = producer_instances[hand_sides[0]]
                 instance_ids["executor_hand"] = executor_instances[hand_sides[0]]
-    repositories = {"teleop": git_fingerprint(ROOT), "acquisition": git_fingerprint(Path("/home/current/syz/mocap/acquisition"))}
+    repositories = {"teleop": git_fingerprint(ROOT), "acquisition": acquisition_fingerprint()}
     hashes = _hashes()
     manifest: dict[str, Any] = {
         "schema_name": BUNDLE_SCHEMA,

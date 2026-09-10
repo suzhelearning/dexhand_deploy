@@ -22,27 +22,221 @@ PICO2 头显/双腕位姿
 和 26 点手部骨架，以及实际送入 IK 的期望 TCP。手腕追踪短暂丢失时，仿真机械臂
 保持上一帧关节命令，识别恢复后继续追向新的手腕目标。
 
-推荐的初版 PICO2 仿真机械臂启动命令：
+## PICO2 裸手遥操快速测试（机械臂＋舞肌二代手）
+
+以下命令在工程根目录执行，使用 `pico2_hands_sim` 和 `head_palm_direct`，控制
+MuJoCo 中的天机双臂与舞肌二代手。PICO2 中需运行原有 PICO_2 手追踪采集 APK，
+启用手部追踪和数据发送，并通过 USB 连接电脑、允许 USB 调试。
+
+### 首次准备
 
 ```bash
+pixi install --locked
+pixi install --manifest-path tools/wuji_hand_native/pixi.toml --locked
+pixi run -e ik-build build-ik-sim
+```
+
+需要系统 GCC/G++、ADB 和可用的桌面显示环境。`build-ik-sim` 编译本机 v131 仿真 IK。
+**Git 不包含 `vendor/`、`runtime/`、头显 APK 或编译产物**：新电脑还需准备本工程
+配套运行依赖（包括 `vendor/python`、Zenoh C/C++ 依赖和下述 `zenohd`），
+不能仅凭 `git pull` 就假定依赖齐全。详见 [厂商运行时说明](VENDOR_RUNTIME.md)、
+[官方手独立环境](docs/wuji-hand-porting.md)。此 PICO2 路线不需要 Manus 或 XRoboToolkit。
+
+### 终端一：启动 Zenoh router
+
+```bash
+./vendor/zenoh-router/zenohd \
+  -l tcp/127.0.0.1:7447 \
+  --no-multicast-scouting
+```
+
+保持此终端运行；如果该地址已有可用 router，不要重复启动。
+设置 `TIANJI_ROUTER_ENDPOINT` 只是指定连接地址，不会启动 router。
+
+### 终端二：连接头显并启动完整仿真
+
+```bash
+adb devices -l
+adb forward tcp:10002 tcp:10002
+adb forward --list
+
+mkdir -p recordings/device_acceptance
+TELEOP_TEST_ID=$(date +%Y%m%d_%H%M%S)
+RECORDING="recordings/device_acceptance/pico_${TELEOP_TEST_ID}.h5"
+
 TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447 \
 pixi run bash scripts/run_session.sh \
-  --profile hand_tracking_sim \
+  --profile pico2_hands_sim \
   --viewer \
-  --disable-hands \
+  --arm-pose-mapper head_palm_direct \
   --ik-backend pico_ee_dexhand_qp \
   --arm-target-processor passthrough \
   --joint-trajectory passthrough \
   --command-step-clipping false \
   --joint-limit-source urdf \
   --pico-overlay \
-  --ik-target-overlay
+  --ik-target-overlay \
+  --record "$RECORDING"
 ```
 
-这条命令只控制 MuJoCo 中的双臂，不发布舞肌手控制命令；需要同时验证舞肌 2
-代手时，去掉 `--disable-hands`，并保持 `hand_mode: retarget`。当前已通过隔离
-的合成 PICO2 多进程仿真验证；真实 PICO2、真实天机机械臂和真实舞肌 2 代手
-尚未完成联机验收。
+`adb devices` 中目标头显应为 `device`；`unauthorized` 时在头显内确认授权。
+只测试机械臂时，在上述命令追加 `--disable-hands`；完整手部测试不要加此参数。
+每次重启重新生成时间戳，录制文件不允许覆盖。
+
+### 标定、开始与结束
+
+1. 等待 `session_startup_complete`，确认可视化中的左右腕和手骨架随真人更新。
+2. 佩戴好头显，双臂水平伸直，在启动会话的终端按 `c`，保持双腕稳定约 2 秒。
+   看到 `Height calibration succeeded` 后再放松；失败则保持稳定重新按 `c`。
+   此标定只修改 Z 高度，不修改 X/Y 映射；重启会话后需要重新标定。
+3. 双手保持可识别，在同一终端按 `s` 开始遥操，依次测试腕部运动、张手、握拳和捏合。
+   再按 `s` 请求回 Home；按 `q` 回 Home 并退出，等待录制和进程清理结束。
+
+普通张手/握拳默认只作为手骨架输入和手势观察，不自动启动或停止。
+若要单独测试手势启动，可追加 `--operator-input gesture`：完成标定后，先释放双手
+张开姿态，再双手稳定张开约 0.8 秒触发一次启动请求；键盘 `c/s/q` 仍可用。
+
+视觉短暂丢失且 TCP 仍持续有新帧时，失效侧保持，恢复后沿原映射继续；
+TCP 断连或组件异常退出需排查并重启会话。`--joint-trajectory passthrough`
+绕过额外关节 Ruckig，v131 内部 Cartesian OTG 仍保留。
+
+退出后可在同一终端检查录制：
+
+```bash
+pixi run python scripts/check_dual_recording.py --mode pico --input "$RECORDING"
+pixi run python scripts/check_dual_recording.py --mode pico --input "$RECORDING" \
+  --retarget-hand-commands
+```
+
+当前已通过合成输入 MuJoCo 闭环和专项回归，并已有用户现场试用反馈；
+仍需同事验证真实输入下的映射、指尖姿态和长时间运行。出现问题请保留本次 H5
+及终端异常信息。完整步骤见[真实输入→仿真验收操作单](docs/real-input-simulation-acceptance.md)。
+
+## 双输入迁移状态
+
+原有`hand_tracking_sim`及其映射、v131、轨迹选项保持原路径。新增的
+`vr_manus_sim`使用独立SPARK完整双臂算法和官方舞肌二代手retarget；
+上游必须是原版PICO_tracker的TJVR修正上肢数据，不是PICO2裸手TCP。
+
+```bash
+# 首先按 docs/spark-porting.md、docs/wuji-hand-porting.md 构建独立依赖。
+# 由操作者设置 Manus 参考工程根目录，并启动外部 router、原版 PICO_tracker
+# （默认 TJVR UDP 127.0.0.1:15000）后：
+export PICO_MANUS_TELEOP_ROOT="${PICO_MANUS_TELEOP_ROOT:?set PICO_MANUS_TELEOP_ROOT before running}"
+TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447 \
+pixi run bash scripts/run_session.sh --profile vr_manus_sim --viewer \
+  --manus-rawviz "${PICO_MANUS_TELEOP_ROOT}/manus/rawviz.out" \
+  --manus-user gjy \
+  --spark-overlay
+```
+
+人员名称须对应rawviz目录下左右手的`.mcal`标定。只测机械臂时，删除两个
+Manus参数并加`--disable-hands`。可追加`--record recordings/device_acceptance/vr_manus_TIMESTAMP.h5`，
+拒绝覆盖。按`s`显式启动、`h`回Home、`r`在健康Home联合重置后等待新输入及
+再次`s`；故障锁存仍需重开会话。
+
+新`pico2_hands_sim`已接通PICO2裸手输入、现有v131双臂IK和官方舞肌二代手retarget。
+它只启动一个PICO接收器，不启动Manus或旧几何retarget手节点；MuJoCo同时拥有机械臂和手的仿真反馈。
+先启动外部router、在PICO2中运行原有手追踪APK，并确认ADB连接：
+
+```bash
+adb devices
+adb forward tcp:10002 tcp:10002
+TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447 \
+pixi run bash scripts/run_session.sh \
+  --profile pico2_hands_sim --viewer \
+  --arm-pose-mapper head_palm_direct \
+  --ik-backend pico_ee_dexhand_qp \
+  --arm-target-processor passthrough --joint-trajectory passthrough \
+  --command-step-clipping false --joint-limit-source urdf \
+  --pico-overlay --ik-target-overlay
+```
+
+需先按`docs/wuji-hand-porting.md`构建官方手独立环境。只测双臂可加`--disable-hands`。
+默认映射为`relative_home`；也可显式选择`--arm-pose-mapper head_palm_direct`，沿用原有仅Z标定操作。
+PICO键盘操作沿用原target source：`s`启动/回Home，`q`退出；与VR入口的`h/r`操作不同。
+可加`--record recordings/device_acceptance/pico2_TIMESTAMP.h5`，保存schema 1.2原始26点、关节命令/反馈及解析配置。
+新PICO入口还发布只读open/pinch/fist/unknown几何手势观察，并写入HDF5的`meta/dual_audit`。
+默认动作绑定关闭，普通张手/抓握不会自动启动或停止；几何标签不代表真实手型准确率已验收。
+仅新PICO仿真可显式加`--operator-input gesture`：armed状态下先释放双手张开姿态，再双手稳定张开0.8秒，
+只发送一次start请求，仍须通过原有输入/标定及coordinator授权检查；长按不重复，被拒绝不排队重试。
+键盘`s/c/q`仍保留，手势不会执行暂停/回Home/标定；TCP重连后需重开会话，不沿用旧手势参考。
+已授权且TCP持续有新帧时，视觉丢失侧保持，恢复沿原映射继续；断连、权限丢失或处理故障仍停止。
+
+`vr_manus_xr_sim`提供新的 XRoboToolkit 控制器/Tracker＋Manus 仿真入口：它直接消费 XR
+头显、控制器和 Tracker 数据，控制器负责 start/Home/clutch，Manus 回调进入同一舞肌二代
+retarget；运行时必须提供 XRoboToolkit Python SDK/PC-Service，Manus rawviz 和用户标定仍通过
+参数注入。若 SDK 不在当前 Pixi 环境，可追加 `--xr-sdk-pythonpath PATH`（或仅对 XR
+采集进程设置 `TIANJI_XR_SDK_PYTHONPATH`）；该路径不会传给 IK、coordinator 或执行器。
+追加 `--xr-overlay` 可在 MuJoCo 诊断空间显示原始头显、控制器和四个 Tracker；它只读显示，
+不参与映射或命令。该入口与已验证的`pico2_hands_sim`互斥，不会启动 PICO2 接收器。
+XR 会话启动前会运行 `scripts/check_xr_sdk.py`，只检查 Pybind 必需接口，不调用设备连接；
+缺少 SDK 或接口时会在创建 router/执行器前失败，不会自动回退到 PICO2 或旧 TJVR。
+
+也可先用只读探针确认真实 XR 输入已经在线：
+
+```bash
+pixi run python scripts/probe_teleop_input.py --mode xr \
+  --xr-sdk-pythonpath "${XR_SDK_PYTHONPATH:?set XR_SDK_PYTHONPATH}" \
+  --duration-s 10 --minimum-frames 30 --minimum-trackers 4
+```
+
+探针只检查 SDK、PC-Service、HMD、双控制器和配置的 Tracker 新鲜度，不连接 router、
+不启动 Manus、不执行操作事件或机器人命令；`passed=true`不等于标定、映射或真机验收通过。
+
+没有 XR SDK 或设备时，可先运行离线目标层 smoke，分别验证腕部 Tracker 和控制器绑定：
+
+```bash
+pixi run python scripts/xr_manus_sim_smoke.py --arm-input xr_tracker --frames 100
+pixi run python scripts/xr_manus_sim_smoke.py --arm-input xr_controller --frames 100
+```
+
+该 smoke 使用合成 XR 帧和 Manus assembler 形状的 126-float callback，经过 canonical
+observation、显式 controller start 边沿和 `xr_incremental`/手目标桥；不启动 SDK、rawviz、
+router、IK 或机器人命令。它只证明输入到目标层的接线，不替代 MuJoCo、官方 Hand2
+retarget 或真实设备验收。
+
+三种入口均通过本机合成输入、原生算法和录制联调；真实设备验收及长期实时性能仍待完成。
+真实输入设备的准备、只接收探测、两路仿真启动和人工验收步骤见[真实输入→仿真验收操作单](docs/real-input-simulation-acceptance.md)。Manus标准SDK库目录现在仅注入采集子进程；自定义路径使用`--manus-library-dir`，不需要全局修改IK/retarget运行环境。
+停止会话后才能切换模式，不自动回退来源；`--resolve-only`可先只读检查三种配置。
+
+录制结束后，可纯离线核验原始输入到骨架观测/回调的一致性：
+
+```bash
+pixi run python scripts/check_dual_recording.py --mode pico --input recordings/device_acceptance/pico2_TIMESTAMP.h5
+pixi run python scripts/check_dual_recording.py --mode pico --input recordings/device_acceptance/pico2_TIMESTAMP.h5 \
+  --retarget-hand-commands
+pixi run python scripts/check_dual_recording.py --mode manus --input /已有目录/manus.h5
+pixi run python scripts/check_dual_recording.py --mode manus --input /已有目录/manus.h5 \
+  --retarget-hand-commands
+pixi run python scripts/check_dual_recording.py --mode tjvr --input /已有目录/vr_manus.h5
+pixi run python scripts/check_dual_recording.py --mode tjvr --input /已有目录/vr_manus.h5 \
+  --check-native-resets
+pixi run python scripts/check_dual_recording.py --mode xr --input /已有目录/vr_manus_xr.h5
+```
+
+输出JSON及首个差异，退出码0/1/2分别表示一致/差异/输入错误。不会连接router或执行录制中的操作。
+Manus核验要求录制包含原始rawviz行和解析绑定配置；旧的仅callback/PKL文件不冒充raw重建。
+TJVR核验要求新VR录制中的门控参数、reset初态和逐包决策审计；重新计算重复/跳变拒绝、epoch变化及重同步代数，按原记录顺序精确比较，不重排或插值。若录制含`native_attempt`，还核验SPARK实际记录的消费帧是否通过门控、原包/接收时钟/重同步代数一致，以及tick和执行代次的顺序；无新帧tick保持`null`，不补零或插值。`native_input_check`明确区分已检查、无原生调用、未录制或旧审计缺字段。不包含手指，不能搭配`--retarget-hand-commands`；不能证明实时调度选中了理论最新帧，也不重建IK/授权状态。缺少合同/审计的旧录制仍可读取，但不猜测门控或消费历史。
+XR核验要求schema 1.2录制包含`raw/xr_input`；逐帧核对HMD、控制器、Tracker、按键、连接代次/序号及展平列与完整JSON的内容，并核验`meta/dual_audit`中的XR操作观察，不连接SDK、router或执行器。
+显式`--retarget-hand-commands`还要求录制资产摘要与本地官方手环境一致，启动离线worker重建已有手关节命令；不会重放授权或驱动设备。
+PICO模式额外要求新录制中的原始接收时钟及实际retarget消费记录；缺少这些边界的旧文件不会猜测滤波初态。
+这是录制一致性检查，不是完整IK/retarget等价性或真机验收。
+
+TJVR可显式追加`--check-native-resets`，按当前受管VR初始执行代次1的合同，核验成功rearm的14关节reset回执、零速度/加速度、执行代次递增及后续原生调用顺序。拒绝的rearm不推进代次，其他运行实例的回执不采用；缺失回执不能支撑新的执行代次。此选项不执行reset，不验证实际Home/静止反馈、内部新鲜输入截止时刻或启动授权；普通检查默认不启用这一更严格阶段。
+
+已有原版与迁移版算法轨迹时，可分阶段比较：
+
+```bash
+pixi run python scripts/compare_dual_input_reference.py \
+  --spark-reference /轨迹目录/reference.jsonl --spark-migrated /轨迹目录/migrated.jsonl \
+  --hand-reference /轨迹目录/original_hand.json --hand-migrated /轨迹目录/migrated_hand.json
+```
+
+两组参数可只提供其中完整一组。它比较已有轨迹，不启动设备；通过仅代表所提供阶段一致，不代表同步联合或真机验收。
+
+详细依赖、可运行命令、测试证据及未完成项见
+[双输入接入进度](docs/dual-input-integration-progress.md)。
 
 ## 唯一入口
 

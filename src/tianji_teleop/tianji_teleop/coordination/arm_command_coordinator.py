@@ -7,6 +7,7 @@ producer 与执行器均通过严格 protocol messages 交换数据，不在此�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 import json
 import math
 import os
@@ -16,6 +17,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ..protocol import topics
+from ..protocol.bilateral import (
+    ArmBilateralProposal, ArmBilateralCommand, ARM_BILATERAL_PROPOSAL,
+    ARM_BILATERAL_RECEIPT, ARM_BILATERAL_COMMAND,
+)
 from ..protocol.messages import (
     ALL_ARM_JOINT_NAMES,
     ARM_JOINT_NAMES,
@@ -33,6 +38,7 @@ from ..protocol.messages import (
 )
 
 from ..zenoh_util import declare_component_liveliness
+from .bilateral_robot import BilateralArmRobotConfig
 
 @dataclass(frozen=True)
 class ArmRobotConfig:
@@ -46,6 +52,11 @@ class ArmRobotConfig:
     @property
     def home_all(self) -> tuple[float, ...]:
         return self.left_home_rad + self.right_home_rad
+
+    def limits(self, side):
+        if side not in ('left', 'right'):
+            raise ValueError('side must be left or right')
+        return self.lower_limits_rad, self.upper_limits_rad
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ArmRobotConfig":
@@ -116,7 +127,7 @@ class ArmCommandCoordinator:
         publisher_instance_id: str,
         router_zid: str,
         profile: Mapping[str, Any] | None = None,
-        robot_config: ArmRobotConfig | Mapping[str, Any] | str | os.PathLike[str] | None = None,
+        robot_config: ArmRobotConfig | BilateralArmRobotConfig | Mapping[str, Any] | str | os.PathLike[str] | None = None,
         coordinator_config: Mapping[str, Any] | str | os.PathLike[str] | None = None,
         clock: Callable[[], int] = time.monotonic_ns,
     ) -> None:
@@ -128,6 +139,22 @@ class ArmCommandCoordinator:
         self.clock = clock
         self._lock = threading.RLock()
         self.profile = dict(profile or {})
+        self._bilateral = self.profile.get('bilateral_proposals')
+        if 'bilateral_proposals' in self.profile:
+            if (not isinstance(self._bilateral, dict) or
+                    set(self._bilateral) != {'run_id', 'execution_epoch'} or
+                    not isinstance(self._bilateral['run_id'], str) or not self._bilateral['run_id'].strip() or
+                    type(self._bilateral['execution_epoch']) is not int or not 0 < self._bilateral['execution_epoch'] < 2**63):
+                raise ValueError('invalid bilateral_proposals session binding')
+            if self.profile.get('required_capability') != 'simulation':
+                raise ValueError('bilateral execution is currently simulation-only')
+            if sorted(self.profile.get('active_sides', [])) != ['left', 'right']:
+                raise ValueError('bilateral execution requires both active sides')
+            self._bilateral = dict(self._bilateral)
+        self._bilateral_tick = 0
+        self._pending_bilateral = None
+        self._last_bilateral_receipt = None
+        self._last_bilateral_command = None
         if "authorities" in self.profile:
             self.authorities = self._validate_authorities(self.profile["authorities"])
         else:
@@ -143,7 +170,9 @@ class ArmCommandCoordinator:
                 or coordinator_authority["router_zid"] != router_zid
             ):
                 raise ValueError("coordinator identity does not match coordinator_arm authority")
-        self.robot = robot_config if isinstance(robot_config, ArmRobotConfig) else (ArmRobotConfig.from_mapping(robot_config) if isinstance(robot_config, Mapping) else ArmRobotConfig.load(robot_config))
+        if isinstance(robot_config, BilateralArmRobotConfig) and self._bilateral is None:
+            raise ValueError('side-specific reference robot requires a bilateral simulation session')
+        self.robot = robot_config if isinstance(robot_config, (ArmRobotConfig, BilateralArmRobotConfig)) else (ArmRobotConfig.from_mapping(robot_config) if isinstance(robot_config, Mapping) else ArmRobotConfig.load(robot_config))
         self.config = self._coordinator_config(coordinator_config)
         self._sequence = 0
         self._state = self._make_state("idle", "startup", None)
@@ -324,6 +353,9 @@ class ArmCommandCoordinator:
             self._publishers["status"] = session.declare_publisher(topics.COORDINATOR_STATUS)
             self._publishers["home"] = session.declare_publisher(topics.AT_HOME)
             self._publishers["complete"] = session.declare_publisher(topics.RETURN_COMPLETE)
+            if self._bilateral is not None:
+                self._publishers['bilateral_receipt'] = session.declare_publisher(ARM_BILATERAL_RECEIPT)
+                self._publishers['bilateral_command'] = session.declare_publisher(ARM_BILATERAL_COMMAND)
 
     def _publish(self, name: str, payload: Mapping[str, Any]) -> None:
         publisher = self._publishers.get(name)
@@ -403,6 +435,16 @@ class ArmCommandCoordinator:
             return
         if parsed.router_zid != self.router_zid:
             self._enter_fault("component router_zid mismatch")
+            return
+        # Hand-tracking/XR sessions have a receive-only observation process in
+        # addition to the target source.  It publishes the same status topic
+        # for diagnostics, but it is deliberately not a lifecycle authority
+        # and must not compete with the launcher's ``source`` identity.
+        if (
+            parsed.component_role == "source"
+            and isinstance(parsed.diagnostics, Mapping)
+            and parsed.diagnostics.get("observation_only") is True
+        ):
             return
         diagnostic_side = parsed.diagnostics.get("side") if isinstance(parsed.diagnostics, Mapping) else None
         if not self._matches_authority(parsed.component_role, parsed.component_id, parsed.publisher_instance_id, parsed.router_zid, side=diagnostic_side):
@@ -522,6 +564,12 @@ class ArmCommandCoordinator:
         self._hand_state[parsed.side] = _Timed(parsed, self.clock() if received_ns is None else received_ns)
 
     def update_proposal(self, proposal: ArmJointProposal | Mapping[str, Any], *, received_ns: int | None = None) -> bool:
+        if self._bilateral is not None:
+            self._enter_fault('unpaired proposal on bilateral session')
+            return False
+        return self._update_single_proposal(proposal, received_ns=received_ns)
+
+    def _update_single_proposal(self, proposal: ArmJointProposal | Mapping[str, Any], *, received_ns: int | None = None) -> bool:
         try:
             parsed = proposal if isinstance(proposal, ArmJointProposal) else ArmJointProposal.from_dict(proposal)
         except (ProtocolError, TypeError, ValueError) as exc:
@@ -555,6 +603,69 @@ class ArmCommandCoordinator:
                 return False
         self._proposals[parsed.side] = _Timed(parsed, observed_ns)
         return True
+
+    @property
+    def last_bilateral_receipt(self):
+        """Coordinator disposition only; never represents actuator feedback."""
+        return deepcopy(self._last_bilateral_receipt)
+
+    def validate_bilateral_home_rearm(self, execution_epoch):
+        """New simulation-only barrier; never clears an existing fault."""
+        with self._lock:
+            now = self.clock()
+            if (self._bilateral is None or type(execution_epoch) is not int or
+                    execution_epoch != self._bilateral['execution_epoch'] + 1 or execution_epoch >= 2**63 or
+                    self._state.state != 'idle' or not self._return_ready(now) or not self._commands_at_home() or
+                    list(self._arm_state.value.position_rad) != list(self.robot.home_all)):
+                raise ValueError('bilateral rearm requires idle, fresh exact Home feedback and next epoch')
+
+    def rearm_bilateral_at_home(self, execution_epoch):
+        with self._lock:
+            self.validate_bilateral_home_rearm(execution_epoch)
+            self._bilateral['execution_epoch'] = execution_epoch
+            self._bilateral_tick = 0
+            self._pending_bilateral = None
+            self._last_bilateral_receipt = None
+            self._last_bilateral_command = None
+            self._proposals.clear()
+            self._adopted_proposal_time_ns.clear()
+            self._step_rejection = None
+            self._state = self._next_state('idle', 'explicit Home rearm; fresh input and start required', None)
+            self._publish_session_snapshot()
+
+    @property
+    def last_bilateral_command(self):
+        return deepcopy(self._last_bilateral_command)
+
+    def update_bilateral_proposal(self, value, *, received_ns=None) -> bool:
+        with self._lock:
+            if self._bilateral is None:
+                return False
+            try:
+                pair = ArmBilateralProposal.from_dict(value.to_dict() if isinstance(value, ArmBilateralProposal) else value)
+            except (TypeError, ValueError) as exc:
+                self._enter_fault(f'malformed bilateral proposal: {exc}')
+                return False
+            if (pair.run_id != self._bilateral['run_id'] or
+                    pair.execution_epoch != self._bilateral['execution_epoch'] or
+                    pair.tick_id <= self._bilateral_tick):
+                return False  # old/foreign execution generations never roll back state
+            if self._state.state != 'teleop':
+                return False
+            if self._pending_bilateral is not None:
+                # No silent latest-only drop at this execution boundary. The
+                # producer must account for every downstream disposition.
+                self._enter_fault('bilateral proposal superseded before command tick')
+                return False
+            previous = dict(self._proposals)
+            observed = self.clock() if received_ns is None else received_ns
+            if not (self._update_single_proposal(pair.left, received_ns=observed) and
+                    self._update_single_proposal(pair.right, received_ns=observed)):
+                self._proposals = previous
+                return False
+            self._bilateral_tick = pair.tick_id
+            self._pending_bilateral = pair
+            return True
 
     def handle_proposal_dict(self, value: Mapping[str, Any]) -> bool:
         return self.update_proposal(value)
@@ -681,6 +792,9 @@ class ArmCommandCoordinator:
         return IntentResult(False, self._state, "unsupported intent")
 
     def _enter_returning(self, reason: str, now_ns: int) -> None:
+        if self._bilateral is not None:
+            self._enter_fault(reason)
+            return
         if self._state.state in {"returning", "fault"}:
             return
         self._teleop_started_ns = None
@@ -765,6 +879,10 @@ class ArmCommandCoordinator:
             # x + 1 * (home - x) can differ from home by one floating-point ULP.
             position = home if fraction >= 1.0 else [x + fraction * (y - x) for x, y in zip(start, home)]
         self._safe_command[side] = position
+        if self._bilateral is not None and self._state.state == 'fault':
+            # New integration faults hold; old profiles retain bounded Home.
+            position = list((self._return_start_command or self._safe_command)[side])
+            self._safe_command[side] = position
         if mode != "teleop":
             self._adopted_proposal_time_ns.pop(side, None)
         return ArmJointCommand(1, sequence, timestamp_ns, "coordinator", side, mode, proposal_seq, target_seq, list(ARM_JOINT_NAMES[side]), position, self.publisher_instance_id, self.router_zid)
@@ -782,7 +900,7 @@ class ArmCommandCoordinator:
             if tracking_hold and self.profile.get('required_capability', 'simulation') != 'simulation':
                 self._enter_fault("tracking hold is simulation-only")
                 return
-            if not all(math.isfinite(x) and lo <= x <= hi for x, lo, hi in zip(candidate.position_rad, self.robot.lower_limits_rad, self.robot.upper_limits_rad)):
+            if not all(math.isfinite(x) and lo <= x <= hi for x, lo, hi in zip(candidate.position_rad, *self.robot.limits(side))):
                 self._enter_fault("proposal exceeds hard joint limits or is nonfinite")
                 return
             allowed = 2.0 * self.config["maximum_command_step_rad"]
@@ -836,8 +954,25 @@ class ArmCommandCoordinator:
                 self._at_home = LatchedBool(1, self._sequence, timestamp_ns, at_home, self.publisher_instance_id, self.router_zid)
                 self._return_complete = LatchedBool(1, self._sequence, timestamp_ns, self._return_complete.value, self.publisher_instance_id, self.router_zid)
             self._state = SessionState(1, self._sequence, timestamp_ns, self._state.state, self._state.reason, "coordinator", self._state.intent_sequence, self.publisher_instance_id, self.router_zid)
+            if self._bilateral is not None:
+                command_pair = ArmBilateralCommand(self._bilateral['run_id'], self._bilateral['execution_epoch'],
+                    commands['left'].proposal_sequence if self._state.state == 'teleop' else None,
+                    commands['left'], commands['right'])
+                self._last_bilateral_command = command_pair.to_dict()
+                self._publish('bilateral_command', self._last_bilateral_command)
             for side, command in commands.items():
                 self._publish(side, command.to_dict())
+            if self._pending_bilateral is not None:
+                pair, self._pending_bilateral = self._pending_bilateral, None
+                accepted = self._state.state == 'teleop' and all(
+                    commands[side].proposal_sequence == getattr(pair, side).sequence for side in ('left', 'right'))
+                self._last_bilateral_receipt = dict(schema_version=1, kind='arm_bilateral_receipt',
+                    run_id=pair.run_id, execution_epoch=pair.execution_epoch, tick_id=pair.tick_id,
+                    timestamp_ns=timestamp_ns, publisher_instance_id=self.publisher_instance_id,
+                    router_zid=self.router_zid, stage='coordinator_command', accepted=accepted,
+                    reason='accepted' if accepted else self._state.reason,
+                    command_position_rad={side: list(commands[side].position_rad) for side in ('left', 'right')})
+                self._publish('bilateral_receipt', self._last_bilateral_receipt)
             self._publish("state", self._state.to_dict())
             status = ComponentStatus(
                 1,
@@ -879,6 +1014,10 @@ class ArmCommandCoordinator:
             (topics.HAND_STATE.format(side="left"), self._on_hand_state_payload),
             (topics.HAND_STATE.format(side="right"), self._on_hand_state_payload),
         ]
+        if self._bilateral is not None:
+            callbacks = [(key, callback) for key, callback in callbacks
+                         if key not in (topics.arm_proposal('left'), topics.arm_proposal('right'))]
+            callbacks.append((ARM_BILATERAL_PROPOSAL, self._on_bilateral_payload))
         resources = [self.session.declare_subscriber(key, callback) for key, callback in callbacks]
         try:
             period = 1.0 / self.config["rate_hz"]
@@ -892,6 +1031,13 @@ class ArmCommandCoordinator:
                     resource.undeclare()
                 except Exception:
                     pass
+
+    def _on_bilateral_payload(self, sample: Any) -> None:
+        with self._lock:
+            try:
+                self.update_bilateral_proposal(self._payload(sample))
+            except (TypeError, ValueError):
+                self._enter_fault('malformed bilateral proposal')
 
     def _payload(self, sample: Any) -> Mapping[str, Any]:
         payload = getattr(sample, "payload", sample)

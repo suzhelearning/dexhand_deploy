@@ -7,12 +7,12 @@
 ## 完整命令
 
 ```bash
-# 终端 0：唯一 router（采集仓库）
-cd /home/current/syz/mocap/acquisition
+# 终端 0：唯一 router（采集 checkout）
+cd "${TIANJI_ACQUISITION_ROOT:?set TIANJI_ACQUISITION_ROOT}"
 TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447 pixi run start-router
 
-# 终端 1：teleop 仓库
-cd /home/current/xxl/tianji_teleop
+# 终端 1：teleop checkout
+cd "${TIANJI_TELEOP_ROOT:?run from the teleop checkout}"
 export TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447
 pixi run validation-run -- --list
 pixi run doctor

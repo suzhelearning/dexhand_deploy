@@ -1,0 +1,51 @@
+# Generic target bridge for the XR arm + Manus hand route.
+input_profile: manus
+simulation_only: true
+rate_hz: 90.0
+arm_input_max_age_s: 0.5
+active_sides: [left, right]
+active_hand_sides: [left, right]
+arm_input_source: xr
+
+hand_adapter: fixed_rotation
+hand_adapter_config:
+  source: manus
+  coordinate_frame: manus_local_vuh_y_flipped_wrist_relative
+  max_age_s: 0.5
+  rotation:
+    left: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    right: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+arm_pose_mapper: xr_incremental
+arm_pose_mapper_config:
+  expected_reference_frame: xr_tracking
+  expected_tracked_frame: wrist_tracker
+  tracked_to_wrist_pose:
+    left: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    right: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+  # Controller-to-wrist calibration is independent from wrist-Tracker
+  # calibration.  The launcher selects this field only for xr_controller;
+  # the tracker mapping above remains the default and fallback.
+  controller_to_wrist_pose:
+    left: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    right: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+  rate_hz: 90.0
+  min_cutoff: 1.0
+  beta: 0.7
+  elbow_min_cutoff: 0.3
+  dynamic_elbow_direction: true
+  require_elbow_tracking: false
+
+arm_target_processor: passthrough
+arm_target_processor_config: {}
+
+operator_config:
+  start: {side: right, control: grip, threshold: 0.8}
+  home: {side: left, control: grip, threshold: 0.8}
+  clutch: {side: right, control: trigger, threshold: 0.5}
+  freshness_ns: 200000000
+  stable_ns: 800000000
+
+elbow_reference_direction:
+  left: [0.45638698, -0.74604902, -0.48489358]
+  right: [0.45638698, 0.74604902, -0.48489358]

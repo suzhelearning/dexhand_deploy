@@ -583,6 +583,7 @@ class ArmInputObservation:
     frame_association_id: str
     publisher_instance_id: str
     router_zid: str
+    elbow_pose: list[float] | None = None
 
     def __post_init__(self) -> None:
         _schema(self.schema_version); _integer(self.sequence, "sequence"); _integer(self.timestamp_ns, "timestamp_ns")
@@ -592,6 +593,7 @@ class ArmInputObservation:
         _integer(self.receiver_frame_sequence, "receiver_frame_sequence"); _identity(self.mapping_version, "mapping_version")
         self.pose = None if self.pose is None else _pose(self.pose, "pose"); self.valid = _boolean(self.valid, "valid")
         if self.valid and self.pose is None: raise ProtocolError("valid arm observation requires pose")
+        self.elbow_pose = None if self.elbow_pose is None else _pose(self.elbow_pose, "elbow_pose")
         _identity(self.frame_association_id, "frame_association_id"); _identity(self.publisher_instance_id, "publisher_instance_id"); _identity(self.router_zid, "router_zid")
 
     def to_dict(self) -> dict[str, Any]:
@@ -601,14 +603,22 @@ class ArmInputObservation:
                 "reference_frame": self.reference_frame, "source_instance_id": self.source_instance_id,
                 "source_sequence": self.source_sequence, "receiver_instance_id": self.receiver_instance_id,
                 "receiver_frame_sequence": self.receiver_frame_sequence, "mapping_version": self.mapping_version,
-                "pose": self.pose, "valid": self.valid, "frame_association_id": self.frame_association_id}
+                "pose": self.pose, "valid": self.valid, "frame_association_id": self.frame_association_id,
+                "elbow_pose": self.elbow_pose}
 
     @classmethod
     def from_dict(cls, data: Any) -> "ArmInputObservation":
-        payload = {"source_timestamp_ns", "received_timestamp_ns", "source", "side", "tracked_frame", "reference_frame", "source_instance_id", "source_sequence", "receiver_instance_id", "receiver_frame_sequence", "mapping_version", "pose", "valid", "frame_association_id"}
-        schema, instance, router, sequence, timestamp, value = _parse_wire(data, payload)
+        payload = {"source_timestamp_ns", "received_timestamp_ns", "source", "side", "tracked_frame", "reference_frame", "source_instance_id", "source_sequence", "receiver_instance_id", "receiver_frame_sequence", "mapping_version", "pose", "valid", "frame_association_id", "elbow_pose"}
+        # Arm messages emitted before the forearm-tracker extension remain
+        # readable.  Normalize the old payload at the protocol boundary so
+        # all downstream code sees one typed shape.
+        normalized = dict(data) if isinstance(data, Mapping) else data
+        if isinstance(normalized, dict) and "elbow_pose" not in normalized:
+            normalized["elbow_pose"] = None
+        schema, instance, router, sequence, timestamp, value = _parse_wire(normalized, payload)
         if value["pose"] is not None: _pose(value["pose"], "pose", parse=True)
-        return cls(schema, sequence, timestamp, value["source_timestamp_ns"], value["received_timestamp_ns"], value["source"], value["side"], value["tracked_frame"], value["reference_frame"], value["source_instance_id"], value["source_sequence"], value["receiver_instance_id"], value["receiver_frame_sequence"], value["mapping_version"], value["pose"], value["valid"], value["frame_association_id"], instance, router)
+        if value["elbow_pose"] is not None: _pose(value["elbow_pose"], "elbow_pose", parse=True)
+        return cls(schema, sequence, timestamp, value["source_timestamp_ns"], value["received_timestamp_ns"], value["source"], value["side"], value["tracked_frame"], value["reference_frame"], value["source_instance_id"], value["source_sequence"], value["receiver_instance_id"], value["receiver_frame_sequence"], value["mapping_version"], value["pose"], value["valid"], value["frame_association_id"], instance, router, value["elbow_pose"])
 
 
 @dataclass(eq=True)

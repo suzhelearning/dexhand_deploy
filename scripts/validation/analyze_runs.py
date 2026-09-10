@@ -39,6 +39,7 @@ if __package__:
         BUNDLE_VERSION,
         MATRIX_PATH,
         _authority_contract,
+        configured_acquisition_acl,
         _profile_config,
         _source_type,
         build_session_contract,
@@ -55,6 +56,7 @@ else:
         BUNDLE_VERSION,
         MATRIX_PATH,
         _authority_contract,
+        configured_acquisition_acl,
         _profile_config,
         _source_type,
         build_session_contract,
@@ -266,8 +268,8 @@ def _verify_manifest(
         raise AnalysisError("canonical config hash mismatch")
     if hashes.get("runtime_sha256") != sha256_tree(ROOT / "runtime"):
         raise AnalysisError("runtime hash mismatch")
-    acl = Path("/home/current/syz/mocap/acquisition/config/zenohd_acl.yaml")
-    current_acl = sha256_file(acl) if acl.is_file() else "unavailable"
+    acl = configured_acquisition_acl()
+    current_acl = sha256_file(acl) if acl is not None and acl.is_file() else "unavailable"
     if hashes.get("acl_sha256") != current_acl:
         raise AnalysisError("ACL hash mismatch")
     return manifest

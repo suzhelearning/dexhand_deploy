@@ -117,6 +117,7 @@ def _arm_model(value: ArmInputObservationWire) -> ArmInputObservation:
         frame_association_id=value.frame_association_id,
         source_sequence=value.source_sequence,
         source_instance_id=value.source_instance_id,
+        elbow_pose=None if value.elbow_pose is None else np.asarray(value.elbow_pose, dtype=np.float64),
     )
 
 
@@ -185,6 +186,7 @@ class ObservationTargetBridge:
         self._started = False
         self.hold_on_tracking_loss = hold_on_tracking_loss
         self._hold_poses: dict[str, np.ndarray] = {}
+        self._hold_elbows: dict[str, tuple[float, float, float]] = {}
 
     @property
     def tracking_hold_sides(self) -> tuple[str, ...]:
@@ -252,6 +254,11 @@ class ObservationTargetBridge:
         if (not wire.valid or wire.pose is None) and not self.hold_on_tracking_loss:
             raise TargetBridgeInputRejected("arm observation is invalid")
         previous = self._arm_latest.get(wire.side)
+        if (self._started and wire.source == "xr" and previous is not None and
+                wire.source_instance_id != previous.source_instance_id):
+            raise TargetBridgeInputRejected(
+                "XR connection generation changed; re-start is required"
+            )
         if previous is not None and (wire.reference_frame != previous.reference_frame or wire.tracked_frame != previous.tracked_frame):
             raise TargetBridgeInputRejected("arm observation coordinate frame changed")
         self._require_identity(
@@ -284,10 +291,20 @@ class ObservationTargetBridge:
         try:
             self.pose_mapper.initialize(references)
             self.target_processor.reset()
+            initial_mapped = {
+                side: self.pose_mapper.map(value)
+                for side, value in references.items()
+            }
+            if any(not value.valid or value.pose is None for value in initial_mapped.values()):
+                raise TargetBridgeInputRejected("pose mapper returned an invalid initialization target")
+            self._hold_elbows = {
+                side: initial_mapped[side].elbow_reference_direction or self._elbows[side]
+                for side in references
+            }
             if self.hold_on_tracking_loss:
                 self._hold_poses = {
-                    side: self.pose_mapper.map(value).pose.copy()
-                    for side, value in references.items()
+                    side: initial_mapped[side].pose.copy()
+                    for side in references
                 }
         except Exception as exc:
             raise TargetBridgeInputRejected(f"target bridge initialization failed: {exc}") from exc
@@ -299,6 +316,7 @@ class ObservationTargetBridge:
     def reset(self) -> None:
         self._started = False
         self._hold_poses.clear()
+        self._hold_elbows.clear()
         self._hand_latest.clear()
         self._arm_latest.clear()
         self._arm_latest_sequence.clear()
@@ -340,7 +358,7 @@ class ObservationTargetBridge:
             if observation_sequence <= self._last_arm_emitted.get(side, -1):
                 continue
             if not observation.valid:
-                arms.append(PreparedArmTarget(side, self._hold_poses[side], self._elbows[side],
+                arms.append(PreparedArmTarget(side, self._hold_poses[side], self._hold_elbows.get(side, self._elbows[side]),
                     observation.source_timestamp_ns, observation_sequence,
                     self.observation_publisher_instance_id, observation.frame_association_id,
                     'tracking_hold', 'tracking_hold', tracking_valid=False))
@@ -354,11 +372,13 @@ class ObservationTargetBridge:
             if not processed.valid or processed.pose is None:
                 raise TargetBridgeInputRejected(f"arm target processing returned invalid output for {side}")
             self._hold_poses[side] = processed.pose.copy()
+            elbow_reference = processed.elbow_reference_direction or self._elbows[side]
+            self._hold_elbows[side] = elbow_reference
             arms.append(
                 PreparedArmTarget(
                     side=side,
                     pose=processed.pose,
-                    elbow_reference_direction=self._elbows[side],
+                    elbow_reference_direction=elbow_reference,
                     source_timestamp_ns=observation.source_timestamp_ns,
                     observation_sequence=observation_sequence,
                     observation_publisher_instance_id=self.observation_publisher_instance_id,

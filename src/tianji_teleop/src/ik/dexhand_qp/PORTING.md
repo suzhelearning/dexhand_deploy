@@ -5,8 +5,9 @@ uses the v131 implementation documented in `../v131_qp/PORTING.md`.
 The original core files and their probe remain for provenance only; they are
 not selected by that factory name anymore.
 
-Source: `/home/zj/current_robotics/TJ_arm_control_pico_ee_ik`, clean tree at
-`3cfa5108b12d21232ce13a1f0d84831ad525d294`.
+Source checkout is supplied only for offline comparison through
+`V131_REFERENCE_ROOT`; runtime does not depend on an external checkout.
+Reference commit: `3cfa5108b12d21232ce13a1f0d84831ad525d294`.
 
 Original SHA-256 (source .cpp files are unchanged except for a provenance comment):
 

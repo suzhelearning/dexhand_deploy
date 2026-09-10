@@ -20,7 +20,14 @@ if ! command -v zenohd >/dev/null 2>&1; then
   printf '%s\n' '错误：test 需要可执行 zenohd 以启动受管临时 router。' >&2
   exit 1
 fi
-acl_config="${TIANJI_ACL_CONFIG:-/home/current/syz/mocap/acquisition/config/zenohd_acl.yaml}"
+acl_config="${TIANJI_ACL_CONFIG:-}"
+if [[ -z "${acl_config}" && -n "${TIANJI_ACQUISITION_ROOT:-}" ]]; then
+  acl_config="${TIANJI_ACQUISITION_ROOT}/config/zenohd_acl.yaml"
+fi
+[[ -n "${acl_config}" ]] || {
+  printf '%s\n' '错误：测试需要 ACL；请设置 TIANJI_ACL_CONFIG 或 TIANJI_ACQUISITION_ROOT。' >&2
+  exit 1
+}
 [[ -f "${acl_config}" ]] || { printf '错误：ACL 配置不存在：%s\n' "${acl_config}" >&2; exit 1; }
 export TIANJI_ROUTER_ENDPOINT="${router_endpoint}"
 mkdir -p -- "${TELEOP_RUNTIME_DIR}"

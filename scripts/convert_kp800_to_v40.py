@@ -21,13 +21,14 @@
 
 用法:
   pixi run python scripts/convert_kp800_to_v40.py [--input DIR] [--output DIR]
-  --input  默认 /home/current/Documents/pkg_kp800_20260827
-  --output 默认 /home/current/data/kp800_v40(按子目录同名输出)
+  --input  可由 KP800_INPUT_ROOT 提供，必须显式指定
+  --output 默认 ./kp800_v40（按子目录同名输出）
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import re
 import sys
@@ -220,16 +221,19 @@ def main() -> int:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("/home/current/Documents/pkg_kp800_20260827"),
-        help="kp800 数据包目录(默认取该路径)",
+        default=Path(os.environ["KP800_INPUT_ROOT"]) if os.environ.get("KP800_INPUT_ROOT") else None,
+        help="kp800 数据包目录（或设置 KP800_INPUT_ROOT）",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("/home/current/data/kp800_v40"),
-        help="输出根目录(默认 /home/current/data/kp800_v40)",
+        default=Path(os.environ.get("KP800_OUTPUT_ROOT", "kp800_v40")),
+        help="输出根目录（或设置 KP800_OUTPUT_ROOT）",
     )
     args = parser.parse_args()
+
+    if args.input is None:
+        parser.error("--input 或 KP800_INPUT_ROOT 是必需的")
 
     source_dirs = [d for d in args.input.iterdir() if d.is_dir()]
     converted = 0

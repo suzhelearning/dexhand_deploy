@@ -44,6 +44,7 @@ class Task8ConfigTreeTest(unittest.TestCase):
             "executors/marvin_impedance.yaml",
             "executors/wuji_hand2.yaml",
             "executors/wuji_hand2_regrind.yaml",
+            "executors/wuji_hand2_official.yaml",
             "recording/session.yaml",
             "recording/session_hand_tracking.yaml",
             "replay/target.yaml",
@@ -94,15 +95,20 @@ class Task8ConfigTreeTest(unittest.TestCase):
     def test_hand_executor_profiles_keep_shared_rate_and_enable_regrind_interpolation(self) -> None:
         shared = yaml.safe_load((CONFIG / "executors/wuji_hand2.yaml").read_text())
         regrind = yaml.safe_load((CONFIG / "executors/wuji_hand2_regrind.yaml").read_text())
+        official = yaml.safe_load((CONFIG / "executors/wuji_hand2_official.yaml").read_text())
         self.assertEqual(float(shared["rate_hz"]), 60.0)
         self.assertFalse(shared["linear_interpolation"])
+        self.assertNotIn("retarget_backend", shared)
         self.assertEqual(float(regrind["rate_hz"]), 100.0)
         self.assertTrue(regrind["linear_interpolation"])
+        self.assertEqual(official["retarget_backend"], "official_wuji_hand2")
         regrind_profile = yaml.safe_load((CONFIG / "sessions/regrind_real.yaml").read_text())
         self.assertEqual(regrind_profile["hand_executor_config"], "executors/wuji_hand2_regrind.yaml")
         for profile in ("mocap_live_sim", "mocap_live_real", "h5_sim", "h5_real", "wuji_direct_real"):
             value = yaml.safe_load((CONFIG / "sessions" / f"{profile}.yaml").read_text())
             self.assertEqual(value.get("hand_executor_config", "executors/wuji_hand2.yaml"), "executors/wuji_hand2.yaml")
+        xr_profile = yaml.safe_load((CONFIG / "sessions/vr_manus_xr_runtime.yaml").read_text())
+        self.assertEqual(xr_profile["hand_executor_config"], "executors/wuji_hand2_official.yaml")
 
 
     def test_session_config_cannot_copy_router_or_ik_authority(self) -> None:
@@ -153,6 +159,10 @@ class Task8ConfigTreeTest(unittest.TestCase):
         self.assertIn('hand_executor_config=executors/wuji_hand2.yaml', launcher)
         executor_launcher = (SCRIPTS / "run_executor.sh").read_text(encoding="utf-8")
         self.assertIn('value.get("linear_interpolation") is True', executor_launcher)
+        self.assertIn('value.get("retarget_backend", "geometry")', executor_launcher)
+        self.assertIn('--retarget-backend "${retarget_backend}"', executor_launcher)
+        self.assertIn("TIANJI_WUJI_RETARGET_PYTHON", launcher)
+        self.assertIn("scripts/wuji_hand_worker.py", launcher)
         self.assertIn('native_args+=(--linear-interpolation)', executor_launcher)
         bridge = (ROOT / "src/tianji_teleop/src/wuji_hand2/wuji_hand2_bridge_node.cpp").read_text(encoding="utf-8")
         self.assertIn("bool linear_interpolation{false};", bridge)

@@ -1,0 +1,15 @@
+# Component composition for the separately resolved pico2_hands_sim contract.
+# Not an alias or override of an existing user-facing session profile.
+source_config: sources/hand_tracking_target.yaml
+observation_config: sources/hand_tracking_observation.yaml
+arm_producer_config: producers/ik.yaml
+arm_executor_config: executors/mujoco.yaml
+coordinator_config: coordinator/arm.yaml
+required_capability: simulation
+active_sides: [left, right]
+inactive_sides: []
+hand_mode: direct
+hand_executor: mujoco
+hand_overlay: none
+active_hand_sides: [left, right]
+arm_command_path: coordinator

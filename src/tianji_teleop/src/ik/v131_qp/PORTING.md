@@ -1,7 +1,9 @@
 # pico_ee_v131_velocity_qp full velocity control-path port
 
-Reference: /home/zj/current_robotics/TJ_arm_control_pico_ee_ik,
-commit 3cfa5108b12d21232ce13a1f0d84831ad525d294,
+Reference checkout is supplied only for offline comparison through the
+`V131_REFERENCE_ROOT` environment variable; no external checkout is needed
+at runtime. Reference commit:
+3cfa5108b12d21232ce13a1f0d84831ad525d294,
 config/qp_ik_pico_ee_v131_velocity_qp_mujoco.yaml.
 
 ## Scope and configuration

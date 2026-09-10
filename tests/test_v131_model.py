@@ -9,7 +9,8 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / 'src/tianji_teleop/assets/v131/marvin_m6_qp_pico_fast_kinematics.xml'
-ORIGINAL = Path('/home/zj/current_robotics/TJ_arm_control_pico_ee_ik/models/marvin_m6_qp_pico_fast.xml')
+_original_model = os.environ.get('V131_REFERENCE_MODEL')
+ORIGINAL = Path(_original_model).expanduser() if _original_model else None
 
 
 class OriginalModelTest(unittest.TestCase):
@@ -38,7 +39,7 @@ class OriginalModelTest(unittest.TestCase):
         np.testing.assert_array_equal(model.jnt_range[0], [-1.5708, 3.1067])
         np.testing.assert_array_equal(model.jnt_range[7], [-3.1067, 1.5708])
 
-    @unittest.skipUnless(ORIGINAL.exists(), 'optional reference checkout unavailable')
+    @unittest.skipUnless(ORIGINAL is not None and ORIGINAL.is_file(), 'optional reference checkout unavailable')
     def test_world_fk_and_jacobian_match_original_model(self):
         self.assertTrue(MODEL.is_file(), 'missing original v131 kinematic model')
         models = [mujoco.MjModel.from_xml_path(str(path)) for path in (ORIGINAL, MODEL)]

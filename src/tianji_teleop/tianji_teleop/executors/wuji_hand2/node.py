@@ -30,6 +30,7 @@ from ...protocol.messages import (
 )
 from ...sources.common.real_admission import RealCapabilityInput, parse_real_capability
 from .config import WujiHandConfig
+from .retarget import RETARGET_BACKENDS, create_hand_retarget_backend, retarget_keypoints as _retarget_keypoints
 
 
 HAND_TIMEOUT_S = 0.5
@@ -48,40 +49,6 @@ def _put(publisher: Any, payload: Mapping[str, Any]) -> None:
 def _payload(value: Any) -> Mapping[str, Any]:
     value = getattr(value, "payload", value)
     return value if isinstance(value, Mapping) else strict_loads(bytes(value))
-
-
-def _retarget_keypoints(points: Sequence[Sequence[float]], config: WujiHandConfig) -> list[float]:
-    """Simple finite geometry retargeter used by dry/headless execution.
-
-    It consumes relative points, but also normalizes an arbitrary point array by
-    its wrist so a caller cannot accidentally make output depend on world
-    translation. The vendor retargeter remains behind the C++ SDK boundary for
-    real operation.
-    """
-    points = np.asarray(points, dtype=np.float64)
-    if points.shape != (21, 3) or not np.isfinite(points).all():
-        raise ValueError("keypoints must be a finite [21,3] array")
-    points = points - points[0]
-    values: list[float] = []
-    # Thumb has four independent joints. The remaining fingers are four-joint
-    # chains; flexion follows segment direction and abduction follows x spread.
-    for base in (1, 5, 9, 13, 17):
-        chain = points[base : base + 4]
-        if chain.shape != (4, 3):
-            raise ValueError("keypoint chain is incomplete")
-        if base == 1:
-            bend = []
-            for index in range(3):
-                vector = chain[index + 1] - chain[index]
-                bend.append(float(np.arctan2(np.linalg.norm(vector[:2]), max(abs(float(vector[2])), 1e-6))))
-            joint = [bend[0], float(np.arctan2(chain[1, 1], max(abs(float(chain[1, 0])), 1e-6))), bend[1], bend[2]]
-        else:
-            segments = np.diff(np.vstack((np.zeros((1, 3)), chain)), axis=0)
-            bend = [float(np.arctan2(np.linalg.norm(segment[:2]), max(abs(float(segment[2])), 1e-6))) for segment in segments]
-            spread = float(np.arctan2(float(chain[0, 0]), max(abs(float(chain[0, 1])), 1e-6)))
-            joint = [bend[0], spread, bend[1], bend[2]]
-        values.extend(joint)
-    return config.validate_positions(values)
 
 
 class WujiHandExecutor:
@@ -107,6 +74,8 @@ class WujiHandExecutor:
         run_id: str | None = None,
         safety_supervisor_instance_id: str | None = None,
         real_capability: RealCapabilityInput | Any | None = None,
+        retarget_backend: str = "geometry",
+        retargeter: Any | None = None,
         clock: Any = time.monotonic_ns,
     ) -> None:
         if mode not in {"direct", "retarget"}:
@@ -117,6 +86,12 @@ class WujiHandExecutor:
             raise ValueError("hand executor identities are required")
         if command_timeout_s <= 0.0:
             raise ValueError("command_timeout_s must be positive")
+        if retarget_backend not in RETARGET_BACKENDS:
+            raise ValueError(f"unknown Wuji Hand 2 retarget backend: {retarget_backend}")
+        if mode == "direct" and retarget_backend != "geometry":
+            raise ValueError("direct Wuji Hand 2 mode cannot select a retarget backend")
+        if mode == "direct" and retargeter is not None:
+            raise ValueError("direct Wuji Hand 2 mode cannot receive a retargeter")
         self.mode = mode
         self.side = side
         self.publisher_instance_id = publisher_instance_id
@@ -128,14 +103,29 @@ class WujiHandExecutor:
         self.authorized_target_source = authorized_target_source
         if not self.producer_publisher_instance_id:
             raise ValueError("producer publisher instance identity is required")
-        self.config = config if isinstance(config, WujiHandConfig) else WujiHandConfig.from_mapping(config) if isinstance(config, Mapping) else WujiHandConfig.load(config)
+        robot_config = config
+        if not isinstance(robot_config, (WujiHandConfig, Mapping)):
+            # ``run_executor.sh`` passes the executor YAML as its CLI config,
+            # while TIANJI_HAND_CONFIG is the separate robot-joint contract.
+            # Prefer the launcher-injected canonical robot config so the two
+            # configuration layers cannot be confused.
+            robot_config = os.environ.get("TIANJI_HAND_CONFIG") or os.environ.get("TIANJI_WUJI_CONFIG") or robot_config
+        self.config = robot_config if isinstance(robot_config, WujiHandConfig) else WujiHandConfig.from_mapping(robot_config) if isinstance(robot_config, Mapping) else WujiHandConfig.load(robot_config)
         self.session = session
         self.device = device
         self.dry_run = dry_run
         self.command_timeout_ns = int(float(command_timeout_s) * 1e9)
         self.run_id = run_id
+        self._hand_output_audit_enabled = (
+            mode == "retarget" and os.environ.get("TIANJI_HAND_OUTPUT_AUDIT") == "1"
+        )
+        if self._hand_output_audit_enabled and (
+            not isinstance(self.run_id, str) or not self.run_id.strip()
+        ):
+            raise ValueError("hand output audit requires run_id")
         self.safety_supervisor_instance_id = safety_supervisor_instance_id
         self.real_capability = real_capability
+        self.retarget_backend = retarget_backend
         if not dry_run:
             if real_capability is None or not (
                 isinstance(real_capability, RealCapabilityInput) or callable(real_capability)
@@ -165,6 +155,18 @@ class WujiHandExecutor:
         self._healthy = True
         self._qpos = list(self.config.zero_position_rad)
         self._last_command: HandJointCommand | None = None
+        self._retargeter = (
+            create_hand_retarget_backend(
+                retarget_backend,
+                side=side,
+                config=self.config,
+                client=retargeter,
+            )
+            if mode == "retarget"
+            else None
+        )
+        self._last_retarget_target_sequence: int | None = None
+        self._last_retarget_values: list[float] | None = None
         self._last_error: str | None = None
         self._last_safety_sequence: int | None = None
         self._subscriptions: list[Any] = []
@@ -216,6 +218,8 @@ class WujiHandExecutor:
         }
         if self.mode == "retarget":
             self._publishers["command"] = self.session.declare_publisher(topics.hand_command(self.side))
+            if self._hand_output_audit_enabled:
+                self._publishers["audit"] = self.session.declare_publisher(topics.HAND_OUTPUT_AUDIT)
         if hasattr(self.session, "liveliness"):
             executor_logical = f"wuji_{self.side}"
             self._live_tokens["executor"] = self.session.liveliness().declare_token(
@@ -295,7 +299,8 @@ class WujiHandExecutor:
                 old_instance, old_sequence = self._target_baseline
                 if target.publisher_instance_id != old_instance or target.sequence <= old_sequence:
                     raise ProtocolError("hand target identity or sequence rollback")
-            _retarget_keypoints(target.keypoints_m, self.config)
+            if self.retarget_backend == "geometry":
+                _retarget_keypoints(target.keypoints_m, self.config)
             self._target_baseline = (target.publisher_instance_id, target.sequence)
             self._latest_target = target
             self._input_received_ns = int(self.clock())
@@ -319,6 +324,8 @@ class WujiHandExecutor:
         self.authorized_publisher_instance_id = publisher_instance_id
         self._baseline = None
         self._target_baseline = None
+        self._last_retarget_target_sequence = None
+        self._last_retarget_values = None
         self._healthy = True
     def on_hand_command(self, value: HandJointCommand | Mapping[str, Any] | Any) -> bool:
         if self.mode != "direct" or self._safety_locked:
@@ -408,6 +415,39 @@ class WujiHandExecutor:
             if callable(send):
                 send(list(values))
                 self._commands_sent += 1
+
+    def _retarget_values(self, target: HandTargetCommand) -> list[float]:
+        if self._retargeter is None:
+            raise RuntimeError("retarget backend is not initialized")
+        if self._last_retarget_target_sequence == target.sequence:
+            if self._last_retarget_values is None:
+                raise RuntimeError("retarget cache is incomplete")
+            return list(self._last_retarget_values)
+        values = self._retargeter.retarget(
+            target.keypoints_m,
+            sequence=target.sequence,
+            timestamp_ns=target.timestamp_ns,
+        )
+        values = self.config.validate_positions(values, field="retarget position_rad")
+        self._last_retarget_target_sequence = target.sequence
+        self._last_retarget_values = list(values)
+        return values
+
+    def _publish_hand_output_audit(self, target: HandTargetCommand, command: HandJointCommand) -> None:
+        publisher = self._publishers.get("audit")
+        if publisher is None:
+            return
+        _put(publisher, {
+            "schema_version": 1,
+            "kind": "hand_output",
+            "router_zid": self.router_zid,
+            "run_id": self.run_id,
+            "executor_instance_id": self.publisher_instance_id,
+            "side": self.side,
+            "target": target.to_dict(),
+            "command": command.to_dict(),
+        })
+
     def tick(self, *, now_ns: int | None = None) -> HandJointCommand | None:
         now_ns = int(self.clock()) if now_ns is None else int(now_ns)
         self._sequence += 1
@@ -426,20 +466,26 @@ class WujiHandExecutor:
         if not self._real_admission_ok():
             self._mark_unhealthy(self._last_error or "real capability denied")
         if self._tracking_allowed(now_ns):
-            if self.mode == "retarget" and self._latest_target is not None:
-                values = _retarget_keypoints(self._latest_target.keypoints_m, self.config)
-                command = HandJointCommand(
-                    1, self._sequence, now_ns, self.authorized_producer, self.side,
-                    list(HAND_JOINT_NAMES[self.side]), values, self.producer_publisher_instance_id, self.router_zid,
-                )
-                self._last_command = command
-                _put(self._publishers.get("command"), command.to_dict())
-                self._send(values)
+            target = self._latest_target
+            if self.mode == "retarget" and target is not None:
+                try:
+                    values = self._retarget_values(target)
+                except Exception as exc:
+                    self._mark_unhealthy(f"hand retarget backend failed: {exc}")
+                else:
+                    command = HandJointCommand(
+                        1, self._sequence, now_ns, self.authorized_producer, self.side,
+                        list(HAND_JOINT_NAMES[self.side]), values, self.producer_publisher_instance_id, self.router_zid,
+                    )
+                    self._last_command = command
+                    _put(self._publishers.get("command"), command.to_dict())
+                    self._publish_hand_output_audit(target, command)
+                    self._send(values)
             elif self.mode == "direct" and self._latest_command is not None:
                 values = self.config.validate_positions(self._latest_command.position_rad)
                 self._send(values)
                 command = self._latest_command
-        else:
+        if not self._tracking_allowed(now_ns):
             current = np.asarray(self._qpos, dtype=np.float64)
             zero = np.asarray(self.config.zero_position_rad, dtype=np.float64)
             step = np.asarray(self.config.zero_tolerance_rad, dtype=np.float64) * 0.2
@@ -485,7 +531,8 @@ class WujiHandExecutor:
                 1, self._status_sequence, now, role, component_id,
                 self.mode, healthy, healthy,
                 ["simulation"] if self.dry_run else ["real"], self._last_error,
-                {"side": self.side, "mode": self.mode, "at_zero": self.at_zero, "tracking_allowed": tracking, "commands_sent": self._commands_sent},
+                {"side": self.side, "mode": self.mode, "retarget_backend": self.retarget_backend,
+                 "at_zero": self.at_zero, "tracking_allowed": tracking, "commands_sent": self._commands_sent},
                 publisher_instance_id, self.router_zid,
             )
             _put(self._publishers.get("component"), component.to_dict())
@@ -516,6 +563,11 @@ class WujiHandExecutor:
             except (AttributeError, RuntimeError):
                 pass
         self._live_tokens.clear()
+        if self._retargeter is not None:
+            close = getattr(self._retargeter, "close", None)
+            if callable(close):
+                close()
+            self._retargeter = None
         if self.device is not None:
             close = getattr(self.device, "close", None)
             if callable(close):

@@ -1,0 +1,12 @@
+# v131 arm timing with enough return budget for the 60 Hz Wuji Hand 2 executor.
+# This is intentionally separate from arm.yaml and arm_v131.yaml so existing
+# PICO2 and arm-only profiles keep their original return contract.
+rate_hz: 200.0
+proposal_timeout_s: 0.2
+maximum_command_step_rad: 0.02
+command_step_time_window_s: 0.05
+home_minimum_duration_s: 2.0
+home_max_speed_rad_s: 0.4363323129985824
+home_tolerance_rad: 0.0174532925199433
+state_timeout_s: 1.0
+hand_return_timeout_s: 5.0

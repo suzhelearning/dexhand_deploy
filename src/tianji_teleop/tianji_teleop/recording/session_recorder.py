@@ -9,7 +9,8 @@ from pathlib import Path
 from ..config_loader import load_component_config, require_finite_positive
 from ..zenoh_util import open_session, require_single_router
 from .recorder import SessionRecorderNode
-from .session_h5 import EXTENDED_SCHEMA_VERSION, SCHEMA_NAME, SCHEMA_VERSION
+from .session_h5 import EXTENDED_SCHEMA_VERSION, DUAL_SCHEMA_VERSION, SCHEMA_NAME, SCHEMA_VERSION
+from ..protocol.messages import strict_loads
 
 _RECORDING_CONFIG_KEYS = {"flush_interval_s", "schema_name", "schema_version"}
 
@@ -23,12 +24,87 @@ def _load_recording_config(path: str) -> dict[str, object]:
     if config["schema_name"] != SCHEMA_NAME or config["schema_version"] not in {
         SCHEMA_VERSION,
         EXTENDED_SCHEMA_VERSION,
+        DUAL_SCHEMA_VERSION,
     }:
         raise ValueError("unsupported session recording schema")
     config["flush_interval_s"] = require_finite_positive(
         config["flush_interval_s"], "recording.flush_interval_s"
     )
     return config
+
+
+def _session_metadata(source_type, environment):
+    if source_type == 'vr_manus_xr_sim':
+        resolved = strict_loads(environment.get('TIANJI_RESOLVED_DUAL_SESSION', '{}'))
+        run_id = environment.get('TIANJI_RUN_ID', '')
+        if (resolved.get('profile') != source_type or not isinstance(run_id, str) or
+                not run_id.strip() or not isinstance(resolved.get('config'), dict) or
+                resolved['config'].get('input_mode') != 'vr_manus'):
+            raise ValueError('XR/Manus recording requires matching resolved configuration and run identity')
+        active_sides = resolved['config'].get('active_hand_sides', [])
+        if (not isinstance(active_sides, (list, tuple)) or
+                any(side not in ('left', 'right') for side in active_sides) or
+                len(set(active_sides)) != len(active_sides)):
+            raise ValueError('XR/Manus recording requires distinct active hand sides')
+
+        def optional_binding(name):
+            value = environment.get(name)
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError(f'{name} must be a string or empty')
+            value = value.strip()
+            return value or None
+
+        contract = dict(
+            version=1,
+            sides=[side for side in ('right', 'left') if side in active_sides],
+            right_glove=optional_binding('TIANJI_MANUS_RIGHT_GLOVE'),
+            left_glove=optional_binding('TIANJI_MANUS_LEFT_GLOVE'),
+            callback_order='right_then_left',
+            callback_trigger='each_accepted_pose',
+        )
+        if contract['right_glove'] is not None and contract['right_glove'] == contract['left_glove']:
+            raise ValueError('XR/Manus recording glove bindings must differ')
+        resolved = dict(resolved)
+        resolved['manus_input_contract'] = contract
+        if contract['sides']:
+            from .hand_command_check import hand_replay_asset_hashes
+            resolved['asset_sha256'] = hand_replay_asset_hashes(Path(__file__).resolve().parents[4])
+        metadata = dict(
+            run_id=run_id,
+            resolved_configuration=resolved,
+            manus_hand_adapter='manus25_to_mediapipe21_v1',
+            real_time_qualified=False,
+        )
+        return metadata
+    if source_type != 'pico2_hands_sim':
+        return None
+    from ..hand_tracking.official_pico import PICO_OFFICIAL_HAND2_ADAPTER_VERSION
+
+    resolved = strict_loads(environment.get('TIANJI_RESOLVED_DUAL_SESSION', '{}'))
+    run_id = environment.get('TIANJI_RUN_ID', '')
+    if (resolved.get('profile') != source_type or not run_id.strip() or
+            not isinstance(resolved.get('config'), dict) or
+            resolved['config'].get('input_mode') != 'pico2_hands'):
+        raise ValueError('PICO recording requires matching resolved configuration and run identity')
+    metadata = dict(run_id=run_id, resolved_configuration=resolved,
+                    pico_hand_adapter=PICO_OFFICIAL_HAND2_ADAPTER_VERSION,
+                    real_time_qualified=False)
+    if resolved['config'].get('active_hand_sides'):
+        from .hand_command_check import pico_hand_replay_asset_hashes
+        metadata['hand_retarget_asset_sha256'] = pico_hand_replay_asset_hashes(Path(__file__).resolve().parents[4])
+    return metadata
+
+
+def _recorder_class(source_type):
+    if source_type == 'pico2_hands_sim':
+        from .queued_pico import QueuedPicoRecorder
+        return QueuedPicoRecorder
+    if source_type == 'vr_manus_xr_sim':
+        from .queued_xr_manus import QueuedXrManusRecorder
+        return QueuedXrManusRecorder
+    return SessionRecorderNode
 
 
 def main() -> int:
@@ -42,6 +118,7 @@ def main() -> int:
             "TIANJI_COMPONENT_INSTANCE_ID and TIANJI_RECORDING_CONFIG are required"
         )
     recording_config = _load_recording_config(config_path)
+    metadata = _session_metadata(source_type, os.environ)
     expected_router = os.environ.get("TIANJI_ROUTER_ZID", "")
     stop_event = threading.Event()
 
@@ -59,7 +136,7 @@ def main() -> int:
     try:
         session = open_session()
         router = require_single_router(session, expected_router or None)
-        node = SessionRecorderNode(
+        node = _recorder_class(source_type)(
             session,
             Path(output),
             source_type=source_type,
@@ -68,6 +145,7 @@ def main() -> int:
             publisher_instance_id=instance,
             recording_config=recording_config,
             input_profile=os.environ.get("TIANJI_RECORD_INPUT_PROFILE") or None,
+            **({'metadata': metadata} if metadata is not None else {}),
         )
         while not stop_event.wait(1.0):
             node.flush()

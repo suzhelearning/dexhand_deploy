@@ -1,0 +1,15 @@
+# Component composition for the explicit XR/Manus simulation contract.
+source_config: sources/hand_tracking_target_xr_manus.yaml
+observation_config: sources/xr_manus_observation.yaml
+arm_producer_config: producers/ik_dexhand_qp.yaml
+arm_executor_config: executors/mujoco.yaml
+coordinator_config: coordinator/arm_v131_wuji2.yaml
+required_capability: simulation
+active_sides: [left, right]
+inactive_sides: []
+hand_mode: retarget
+hand_executor: wuji_hand2
+hand_executor_config: executors/wuji_hand2_official.yaml
+hand_overlay: mujoco
+active_hand_sides: [left, right]
+arm_command_path: coordinator

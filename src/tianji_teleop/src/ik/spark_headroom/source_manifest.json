@@ -1,0 +1,450 @@
+{
+  "source_commit": "c022b17789e9b81141915662b3bb802f4c20a396",
+  "namespace": "tianji_spark",
+  "files": [
+    {
+      "source": "src/arm_angle.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/arm_angle.cpp",
+      "source_sha256": "d5e2f9e411592b65355722a68f8940c17bae1e20a14a6f2d20d6f076dcebfbf7",
+      "destination_sha256": "93348af8e146d9a180360f79b12dcd91b505113edce9f22f0f84371d01df14db"
+    },
+    {
+      "source": "src/cartesian_otg.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/cartesian_otg.cpp",
+      "source_sha256": "1722a1da43d478e59e0e83031bbfb302b34ff2506e798c11c99c0a0656a24038",
+      "destination_sha256": "9d3e391f5fab2a85cf2793d58f51c7c29dcbeb2cf9d456445ad6079d45e27eb7"
+    },
+    {
+      "source": "src/cartesian_servo.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/cartesian_servo.cpp",
+      "source_sha256": "24b93471cc98a9359b77f00868b5f8cbff6e830c79939cad7042f1c6f4af0bd0",
+      "destination_sha256": "276fe70e0733be6b489bfd95fd55fcd086b992c13bc181b1688367c1aeedef7d"
+    },
+    {
+      "source": "src/config.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/config.cpp",
+      "source_sha256": "43cfc85f2b614c7c4896707e1310c5b6584745fad5d7166fefd884cd2d26ab31",
+      "destination_sha256": "1c2759d543378b00697dc170d5ef5f96ad76d4c9a8dc825fe0cc75be05a6b24a"
+    },
+    {
+      "source": "src/controller.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/controller.cpp",
+      "source_sha256": "ad5cd080cf18386a6d7e3c05f7532cb2e5f57f0da3cff4d12ff0a6d831976e49",
+      "destination_sha256": "3ccb87a37b20ff310c8ba80eb5004ca0373adbce4f3a75c9b577435b2e70d675"
+    },
+    {
+      "source": "src/equality_constrained_qpoases_solver.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/equality_constrained_qpoases_solver.cpp",
+      "source_sha256": "aa366a48093cc0152e89a85ea6a295ca06f2cf27bc805308b9937bbb11d7c0ee",
+      "destination_sha256": "66669c107528b4f783c5580690a211840dc28d865d416f42457689289708c412"
+    },
+    {
+      "source": "src/hierarchical_qp.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/hierarchical_qp.cpp",
+      "source_sha256": "ef175c629bbcb6afe52012a497deb6fe6f1fbfbbb4c75a196fd40492cf18a4ef",
+      "destination_sha256": "9e95573d29ddf4576d1b9a709d7d0043dc9487833f422afa2835292f0f96cb08"
+    },
+    {
+      "source": "src/hierarchical_qp_ik.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/hierarchical_qp_ik.cpp",
+      "source_sha256": "9fdd80f8063fef5bee2e0592a7a8b910971e138ef1634e74c6c0be95ec9cadc7",
+      "destination_sha256": "d24edb362fdd08db6430537202a17ac546384b5e287381010ddd4c324d13f137"
+    },
+    {
+      "source": "src/hierarchical_qpoases_solver.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/hierarchical_qpoases_solver.cpp",
+      "source_sha256": "514a65589bebdf39bfa5fbc95b1f9ff930157c90c5371f315599295187532f38",
+      "destination_sha256": "55f450cd5ba5fc889f10553187781348630c0c4b6ee666a7e56531fdc0dfb600"
+    },
+    {
+      "source": "src/iterative_pose_dls.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/iterative_pose_dls.cpp",
+      "source_sha256": "40241f89b52d4704c2a899832c8cc82aa21ab3821119eebc390252f434bb145b",
+      "destination_sha256": "fd2df002816f4c79333f7cf6b4babdd5a8f4d9e1da8af0575166800f291502e2"
+    },
+    {
+      "source": "src/joint_trajectory_limiter.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/joint_trajectory_limiter.cpp",
+      "source_sha256": "2b8f6f319acaa7ac5eb98811da7795695e933ab6f1e637cb04663623da274ff0",
+      "destination_sha256": "5be7df3071d5060961234296a8fc902f4f94882b5ad821973959a11aeac13769"
+    },
+    {
+      "source": "src/mujoco_robot.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/mujoco_robot.cpp",
+      "source_sha256": "8fc222d2f63cb9668a12af254de7f063fe21556b7438eea462431918e2ea4f97",
+      "destination_sha256": "14fc104e52b5bc1c42219f0984d6f936c71750ce3651c4529b58f762db4ecbf2"
+    },
+    {
+      "source": "src/nullspace_dls.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/nullspace_dls.cpp",
+      "source_sha256": "1b4ee4e1d029fdfe8624041689d7f7ff9c832a3eda38e20473b08f62a55c6362",
+      "destination_sha256": "a3d9a05d7aa25d9250798094c280a7ff2ed8d49cdd0100f598b5931ac92c3c54"
+    },
+    {
+      "source": "src/osqp_solver.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/osqp_solver.cpp",
+      "source_sha256": "fde035587b2db298181961c2431c2fc5b75acb0b7734ffe674a34c08b7ef420c",
+      "destination_sha256": "34efbf563df01febf0722c313cb1b7e29e2f7774c3f0803794e6593b04bd9b79"
+    },
+    {
+      "source": "src/pinocchio_arm_kinematics.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/pinocchio_arm_kinematics.cpp",
+      "source_sha256": "729d160bc582b17f54e49c981a7937fa65bd779cab1b9f09d6983e44ab434e9e",
+      "destination_sha256": "a409e333475b874576607c3bad67aa43e2df0e0df5d94057f5bc85e03b311968"
+    },
+    {
+      "source": "src/pico_teleop_protocol.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/pico_teleop_protocol.cpp",
+      "source_sha256": "63f65f990efd5e63aa6e11add0fa037c0f775a55b87bdf26820c1580a5540568",
+      "destination_sha256": "bb2f330ab8ef84827df4c90bd694d9527d8d267e73c401f45705cd9975795742"
+    },
+    {
+      "source": "src/pico_teleop_session.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/pico_teleop_session.cpp",
+      "source_sha256": "5f32fa0a4585bd27bca51a63f3bd6db90b6ab7c0ce9d5e6037561d7f35c2c243",
+      "destination_sha256": "0590b96d49edeaceff1ccd58eb1c0102b26de3ef488d1c70cbfafe76471c99fd"
+    },
+    {
+      "source": "src/qp_builder.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/qp_builder.cpp",
+      "source_sha256": "0a7c447df52c5f246a8c7b622f38df343577ac9286a0f2e8f3c13a0338624be1",
+      "destination_sha256": "a71c60e706a70cb0dc5474610b54d4d9a96fa75ec647baff52cdaf927a68d646"
+    },
+    {
+      "source": "src/qpoases_solver.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/qpoases_solver.cpp",
+      "source_sha256": "e65a0287bdfb90a6e012af8cb82a310c8d75520a0406ad9767498a127a505f80",
+      "destination_sha256": "00f5f7fa06f5dbc8415f13884cb5000db210fb984c81f318ac157a73bbacf6b6"
+    },
+    {
+      "source": "src/safety.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/safety.cpp",
+      "source_sha256": "ba9aee8ef3bb70d3e43b8fea4e0529f6a62fcd82851789ba82a4b5d859804f09",
+      "destination_sha256": "a742411dd43923666b51a5503bb44033cf07918ef063d417b7445fb0ec80915b"
+    },
+    {
+      "source": "src/spark_upper_retarget.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/spark_upper_retarget.cpp",
+      "source_sha256": "c3e8f2b6e5bd211bb3cb21c0dc75a0f2f55e93ec7f6e1bab9d0d92df2e47f015",
+      "destination_sha256": "9bbf72803858be020385b5f3ce0c462f69a750ab59d8339b7e050ba7d1e1fff1"
+    },
+    {
+      "source": "src/spark_upper_qpoases_ik.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/spark_upper_qpoases_ik.cpp",
+      "source_sha256": "de1cc535e39bbe8919611ee21178647930812099084ded2ee4abc9d2f6ec339d",
+      "destination_sha256": "250ebb6046c308ccf5f2fa16537442e2e63695b89ae923c08d893834a0eea62b"
+    },
+    {
+      "source": "src/spark_posture_reference.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/spark_posture_reference.cpp",
+      "source_sha256": "dc0509f2039711e5c057ff4a7d80432db7f5867264155ea7b5c8fc798b919308",
+      "destination_sha256": "ad07330878a175422b554bf983724222123920f785f6137b1238f8846793689a"
+    },
+    {
+      "source": "src/spark_feedforward_reference.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/spark_feedforward_reference.cpp",
+      "source_sha256": "888bb85edd720e6af5dc1b0e70a97ed20ca753115efd6c1321c7beed6a8bffc4",
+      "destination_sha256": "eb79701a696b8195ee11e27b7616d7361b708c1ab1c9ed6f0952a4e59bce0476"
+    },
+    {
+      "source": "src/spark_constraint_headroom.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/spark_constraint_headroom.cpp",
+      "source_sha256": "24412065b6cf2b5e7ea9c7aeb9ddeadb528585a714a7994bc1c03fca3c0b55da",
+      "destination_sha256": "55b03249bd3d82b7217a7213bf72c601ccbb11346c64b22040a817046f9ff0bb"
+    },
+    {
+      "source": "src/spark_palm_twist_estimator.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/spark_palm_twist_estimator.cpp",
+      "source_sha256": "0ea207b467e66a32fea846e1da245fbefd3db0b6c7e2d1c71915276e24715d94",
+      "destination_sha256": "200e499fce9651e36a1a94abe516c46b410df058fb792797bf5733686baf5066"
+    },
+    {
+      "source": "src/spark_guidance.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/spark_guidance.cpp",
+      "source_sha256": "a05a379a7e9308ddeb5084b5603f0eb4843f01695ec1d40db0f1b2cfdc93b674",
+      "destination_sha256": "b26e5b98a081fcd010d787bb0dee62db457000d1934ba16ff75871b85cd5d2b2"
+    },
+    {
+      "source": "src/spark_qpoases_diagnostic.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/spark_qpoases_diagnostic.cpp",
+      "source_sha256": "21a017090cb003f64efea3a4028ba49fbc1dc3ad79c37cdf48b7dd2d610b8c03",
+      "destination_sha256": "46d420d6c74d43e1c1ff82cb9c8af31e54ea83eb1dd78794a68ba9e702568ead"
+    },
+    {
+      "source": "src/so3.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/so3.cpp",
+      "source_sha256": "cfc7d4779bf5b1ef6b3741704897fe43d9447d40588495bd6c878b042e001285",
+      "destination_sha256": "a5a27faf890cda5decf405994ae9e9d27670bf60bc4e8dd2a1f132b530c5f1f0"
+    },
+    {
+      "source": "src/target_manager.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/target_manager.cpp",
+      "source_sha256": "64696a9e1c1f8d74c5f0821546ee035d73802bc9a90a01d50dd917b2d00f706f",
+      "destination_sha256": "e874c0d853a162362ee30e2ea51535020fc6e40be579c2a7d04079d5b34e8ba0"
+    },
+    {
+      "source": "src/upper_arm_outward.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/upper_arm_outward.cpp",
+      "source_sha256": "b1115f892225679e773036e65111ca2486f9fca110335df9420d88b5de77f4a4",
+      "destination_sha256": "450efa0fb059d8c070c01f35e72053bf82225a8380aea0d6b3ab84737fbbaffb"
+    },
+    {
+      "source": "src/velocity_ik.cpp",
+      "destination": "src/tianji_teleop/src/ik/spark_headroom/velocity_ik.cpp",
+      "source_sha256": "bcb7c4e17adfef2bdf949960c6c6929eb2b6c098b98e736bf75995d7fb0a3ca1",
+      "destination_sha256": "c023bf44a41b17901e75de928a2ab0f38e542f1e6b8a4b93b60f84c40f6a71b1"
+    },
+    {
+      "source": "include/tianji_qp_ik/arm_angle.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/arm_angle.hpp",
+      "source_sha256": "e0b12a446e8ad278f7e633f647948c8a624d44eee431282d64820f7cbad52c1b",
+      "destination_sha256": "b61e8ae1b0bc88855fc335c59464ce143e4f41a5b38ba651aa38268062dae4fa"
+    },
+    {
+      "source": "include/tianji_qp_ik/cartesian_otg.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/cartesian_otg.hpp",
+      "source_sha256": "1dc564186d8eaf254db2c18c91cfa13ed8189634a645024c5058aab9bdab765c",
+      "destination_sha256": "a93393efe9457a4bcc7995be5d20a93af1f341fdc050d5f105a7df1595b43ee5"
+    },
+    {
+      "source": "include/tianji_qp_ik/so3.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/so3.hpp",
+      "source_sha256": "381ed68016cdd4590ba0b7820ce1a8b4d0e5788ca9710101e07171711ef164d9",
+      "destination_sha256": "796e3efa6af56bf96b7428b2bcc35b3a1fd507d3bfd9f25780373cf3215aeb7f"
+    },
+    {
+      "source": "include/tianji_qp_ik/cartesian_servo.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/cartesian_servo.hpp",
+      "source_sha256": "7193ed2f26450b7d1aadc6d0871c438e5897210b8de4411b4c47ae5e79c0aa70",
+      "destination_sha256": "c6ccd335b93564b81ca8c2b52f99a61d4b250b67b956df1edfcc265971f32e2f"
+    },
+    {
+      "source": "include/tianji_qp_ik/config.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/config.hpp",
+      "source_sha256": "48dbccd9f042891504a7900bc508da5a4d7d014feb19e34753348d276865a7d0",
+      "destination_sha256": "6f44093f72d2f25f7687ec600e6f853cd6a566eb4b813748304b195bebf05b47"
+    },
+    {
+      "source": "include/tianji_qp_ik/controller.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/controller.hpp",
+      "source_sha256": "84380e4fe2b6da4da3d8ff7dbb4500633ba282d4099eed329ae4cc88abecd509",
+      "destination_sha256": "d2b64ca0ffebf57b4202a9c03f873d5c03d36d266530e0836d38c61ad84827c8"
+    },
+    {
+      "source": "include/tianji_qp_ik/osqp_solver.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/osqp_solver.hpp",
+      "source_sha256": "837f9540165e3446339e677587913cd635c7db2dbc294399d106cb4bb76476a9",
+      "destination_sha256": "e31a4618104fc30a35d3804a79086f855ee144eb79743e1bcdac9c7a0a0ab7ec"
+    },
+    {
+      "source": "include/tianji_qp_ik/qp_builder.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/qp_builder.hpp",
+      "source_sha256": "8a540b4cb5032b408493763ca7bfe1c6cd51d0dc56dbefae8eddea2c0036febd",
+      "destination_sha256": "7b75eb12c0fcd66d889fc0586c356752a2cb1e197201e365364b64a00cd0b490"
+    },
+    {
+      "source": "include/tianji_qp_ik/qpoases_solver.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/qpoases_solver.hpp",
+      "source_sha256": "dd2e4c70c6786b48485ac1a2d68bf13180c20ccff44e2fa7de7f3409b895b501",
+      "destination_sha256": "c17934c445898f803581792f1913a65f7b21ea9044f1ff26c8cc0cedc4ddba0b"
+    },
+    {
+      "source": "include/tianji_qp_ik/upper_arm_outward.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/upper_arm_outward.hpp",
+      "source_sha256": "eb90fc6c69b14fd6d5cc005cdd88a0237e48590f824f16f4c84b61f6446768de",
+      "destination_sha256": "415a54100ff85f83bf7c411b975a46145542b569cfa2b108b48687c475c64e4b"
+    },
+    {
+      "source": "include/tianji_qp_ik/equality_constrained_qpoases_solver.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/equality_constrained_qpoases_solver.hpp",
+      "source_sha256": "9b61a2dfa35567699f67fb303b7666e7bd03e4069776c5f9b39c739b5823bd27",
+      "destination_sha256": "f5fa6fb7f67f5519ad3d4e2befbab6206f602e22fdc5f3d74cb032568f53466c"
+    },
+    {
+      "source": "include/tianji_qp_ik/hierarchical_qp.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/hierarchical_qp.hpp",
+      "source_sha256": "9c282de076e26dda3b96850f61f073e1cb264373870326517adca816c7939c2e",
+      "destination_sha256": "308dfd21e8e8a5cfb4cc253e097418e77df48a0dd19b968253dbab3d95985189"
+    },
+    {
+      "source": "include/tianji_qp_ik/hierarchical_qp_ik.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/hierarchical_qp_ik.hpp",
+      "source_sha256": "4bd89529a5ed47d49bf377d5674648ed02253831bea746818d1cd0d7d038c75a",
+      "destination_sha256": "a4961a8971f9199362d338e2653ec3cb873dd7c79df2207e6a542657b2631da1"
+    },
+    {
+      "source": "include/tianji_qp_ik/hierarchical_qpoases_solver.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/hierarchical_qpoases_solver.hpp",
+      "source_sha256": "4398b0317602a57831ad367506d7a7505fc1612fdb6cd8e7b0ef050fa50e00ee",
+      "destination_sha256": "3c2f49e470edc47471074a89dd42398f4d8cc4d5232c5ed7f4608e606a598ba1"
+    },
+    {
+      "source": "include/tianji_qp_ik/iterative_pose_dls.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/iterative_pose_dls.hpp",
+      "source_sha256": "11199c0cb642e3fc6dc6422907faa3831cbd182207e5bb8c55ec27369e45228d",
+      "destination_sha256": "295bece5eed8ffe761cb6b9a0057263275bb02acdbb19a08fe206c7960b76c24"
+    },
+    {
+      "source": "include/tianji_qp_ik/joint_trajectory_limiter.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/joint_trajectory_limiter.hpp",
+      "source_sha256": "2b9f981e936504f8bbb6d4e1134dda20169690edbeb754e66b3086714da74574",
+      "destination_sha256": "8aae1fc605607820fc164423fa7352b992d58a6b17e2dffc7d6200637ea260b6"
+    },
+    {
+      "source": "include/tianji_qp_ik/mujoco_robot.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/mujoco_robot.hpp",
+      "source_sha256": "5a65786d2bfdd01a0f4a27ad0fbe9772c248896dcf9d4766b25a153a25a3855b",
+      "destination_sha256": "30d3b104e0ccf21686aee2eec8307ea94cd880b415f7cccdea0288463792456e"
+    },
+    {
+      "source": "include/tianji_qp_ik/nullspace_dls.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/nullspace_dls.hpp",
+      "source_sha256": "6355fc696757774b99ed9cadb0f51d774fb581dea6606f8aaf1aa1ac8d0a5d9a",
+      "destination_sha256": "20d88a53058bf2d70abad95c2f998d8b0109b6ac0d8e1a91d28aeae4d121a17e"
+    },
+    {
+      "source": "include/tianji_qp_ik/pinocchio_arm_kinematics.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/pinocchio_arm_kinematics.hpp",
+      "source_sha256": "ac27607ec72f4bdbf3297a502adebbb3d4fef8b5bab4cd215722f52079010b4c",
+      "destination_sha256": "69d2e1378e3f92f689ca31f045f2c9cd9dcf7fcf94cb58764989f27823a3e13b"
+    },
+    {
+      "source": "include/tianji_qp_ik/pico_teleop_protocol.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/pico_teleop_protocol.hpp",
+      "source_sha256": "f1f8e01558fbd696ec277351212bdfddbe1e721b87be6b255e8daeacb4875f90",
+      "destination_sha256": "a57247c23256e8240f547b327a9a30b35764f6381b2cc929f3d5c7a7d9a9efe2"
+    },
+    {
+      "source": "include/tianji_qp_ik/pico_teleop_session.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/pico_teleop_session.hpp",
+      "source_sha256": "7d11a5165a33593c860efe482348516d3f73dc3dba455aee900319589550dc27",
+      "destination_sha256": "6b31ae5751309f51aece0e37e3666f4fd846959d702a30c78abea65a5efef95b"
+    },
+    {
+      "source": "include/tianji_qp_ik/safety.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/safety.hpp",
+      "source_sha256": "65abfff272ce516b869c4d7e991f87f809df4a4e8bb084da50eab469426e4a72",
+      "destination_sha256": "858541ed95ba1b7c479cd55f60b04f4e2357a33dda39e0a5cac1a0c9eaf7f8ab"
+    },
+    {
+      "source": "include/tianji_qp_ik/spark_upper_retarget.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/spark_upper_retarget.hpp",
+      "source_sha256": "4fdecb207c217035590a7e05d78aba4c3d5f50d7a19bbc2df96d4aa950df5f90",
+      "destination_sha256": "7ea6558d5dded18c4a871822d192b2a548c3104bb9a1a14ceb50a3cc4c589eb5"
+    },
+    {
+      "source": "include/tianji_qp_ik/spark_upper_qpoases_ik.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/spark_upper_qpoases_ik.hpp",
+      "source_sha256": "6ca765cafa5ec50777f7c9f72b3dd4b479cb96ba98d10f6f78fb0d61b324b039",
+      "destination_sha256": "b7b1bbf686c34f97d3fed1f1e04c957c6119ff4b10229f7e4d4adc2ff603dc1e"
+    },
+    {
+      "source": "include/tianji_qp_ik/spark_posture_reference.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/spark_posture_reference.hpp",
+      "source_sha256": "90ac8a364d154c255ba53f38e99681d65329c711b41476d64b2ecbdcb6e008e1",
+      "destination_sha256": "f74de7b2ebb29a204e79633b62ec9cbce80f907b5196b06c4907f3a34b1dfceb"
+    },
+    {
+      "source": "include/tianji_qp_ik/spark_feedforward_reference.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/spark_feedforward_reference.hpp",
+      "source_sha256": "606608472fc4217754673a6a3d1c274c2360cc970870cb69045be81692a06cd0",
+      "destination_sha256": "d11f86e20f6a3157a678db88ef7ed05233a48124747b5d54a817aa65e794498d"
+    },
+    {
+      "source": "include/tianji_qp_ik/velocity_ik.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/velocity_ik.hpp",
+      "source_sha256": "156159d9bf79ee071791b255456280e81e55e0c99354b5f31270b97df44fe9f8",
+      "destination_sha256": "08de9be5b15e3f012952032dccc693d56cdee6050499b19cf2c74fcbdf32eb74"
+    },
+    {
+      "source": "include/tianji_qp_ik/spark_constraint_headroom.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/spark_constraint_headroom.hpp",
+      "source_sha256": "893dcaec0f8dea5a9c4d68460b18e6bb89f08b2aacc580fd86e103962220debb",
+      "destination_sha256": "e08d84130ba447286df3b849981dbe1c4f10a4d00aff4922664f3e1200eafa93"
+    },
+    {
+      "source": "include/tianji_qp_ik/spark_palm_twist_estimator.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/spark_palm_twist_estimator.hpp",
+      "source_sha256": "88514dc5cd65c2ba65d5899ddbf92ef297b11af8a179ae83e8b9173bb52cd803",
+      "destination_sha256": "73469a1ffbf5562a2faf556d0b54122b55e6ef40f62dad9dfc60ef7bd3e46ce6"
+    },
+    {
+      "source": "include/tianji_qp_ik/spark_guidance.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/spark_guidance.hpp",
+      "source_sha256": "0227d4eb7513d8c494f799b4d1dca5a89f0218c1a67f987794bdac6d5fd117f0",
+      "destination_sha256": "161b9eb2e2065390dacdff673dedab497d43283f64a1913462f95e7f3c63afcd"
+    },
+    {
+      "source": "include/tianji_qp_ik/spark_qpoases_diagnostic.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/spark_qpoases_diagnostic.hpp",
+      "source_sha256": "9af98b733b2f00b6e35fa414229714009e1cc8c65b1a1b772dbe8b34edde9ce9",
+      "destination_sha256": "88a137709d81b7ca11ea15463dcaee03c9d0bee7b7d02ff89cfa7de1380a621e"
+    },
+    {
+      "source": "include/tianji_qp_ik/target_manager.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/target_manager.hpp",
+      "source_sha256": "71d3b7460696975547102b5430471dc01a4fe83e1caa6b8d0456f92cc13eb3d2",
+      "destination_sha256": "6154f969ea0671f42b70615e2f45dce748d77125b1481578e2dc5d84f8a452c5"
+    },
+    {
+      "source": "include/tianji_qp_ik/types.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/types.hpp",
+      "source_sha256": "81c4c4bbf3e58206187112814a086b6f4ec59cfc78c5fbcf18f5b82c490f7b09",
+      "destination_sha256": "fc4138ce70c550641d06a7b79ef151c5ea89ffe7787bf187582db117d52dacab"
+    },
+    {
+      "source": "include/tianji_qp_ik/qp_solver.hpp",
+      "destination": "src/tianji_teleop/include/tianji_spark/qp_solver.hpp",
+      "source_sha256": "2191ab7755eecbd5ced747bfbec5c9d02cd07be196c65dbd6e928b718e7e6e3b",
+      "destination_sha256": "b32a8d14d15de4a7f80cf67e1002a09662db66f2dcf94b618ffc1dbd986a54c3"
+    },
+    {
+      "source": "tests/test_so3.cpp",
+      "destination": "tests/cpp/spark/test_so3.cpp",
+      "source_sha256": "9faf50dc875080f2f2bcbbf040aad05cefa6633437f2c8e14d6f2c0e7a351e7b",
+      "destination_sha256": "0785d04644831453c3c520102fad3dfeb2a96bf92a7e86e9dc392b9cdc2acad5"
+    },
+    {
+      "source": "tests/test_pico_teleop_protocol.cpp",
+      "destination": "tests/cpp/spark/test_pico_teleop_protocol.cpp",
+      "source_sha256": "b2f9175ddea7f9849600f401b43d3539301ef71f7d8330037323a4c1a8e12c92",
+      "destination_sha256": "73c3303115b63602957b371360b880d48801426f3854181f010b39bce1fca805"
+    },
+    {
+      "source": "tests/test_pico_teleop_session.cpp",
+      "destination": "tests/cpp/spark/test_pico_teleop_session.cpp",
+      "source_sha256": "f01bcba0cb0219d6f0e4f91623b3675415d9cc2252ee8ed39765bffc8d327d93",
+      "destination_sha256": "42c1422ed6d48a6593ca73328020fe8524cc281d843f5aedd22f3373ce73a5b3"
+    },
+    {
+      "source": "tests/test_spark_upper_retarget.cpp",
+      "destination": "tests/cpp/spark/test_spark_upper_retarget.cpp",
+      "source_sha256": "a0b2b3502afbdd0a73bf5091c321f11dcf456c3dd4e982785e1fe37fd96f1eab",
+      "destination_sha256": "050dce99b6bb40b9ea31e3a8a8d4e492ba8c0fad8826ec9a89885bab6a7dbf89"
+    },
+    {
+      "source": "tests/test_spark_posture_reference.cpp",
+      "destination": "tests/cpp/spark/test_spark_posture_reference.cpp",
+      "source_sha256": "c8b0831363fe232708d761da708015046e75a5a44dc509d970e89876f1be0c21",
+      "destination_sha256": "f7dbbe81fee6b4087f0157ec17b4208606eb756ed7105d63de537abca4f1a0f0"
+    },
+    {
+      "source": "tests/test_spark_feedforward_reference.cpp",
+      "destination": "tests/cpp/spark/test_spark_feedforward_reference.cpp",
+      "source_sha256": "2f735b1799cd124429abcc90e716c5575aab470e9f2f39c5a0b3e42a6817ae75",
+      "destination_sha256": "0ff66860a57461005bafd11054f06049c57e8e910a551e9f6cdebadf052dae1b"
+    },
+    {
+      "source": "tests/test_spark_constraint_headroom.cpp",
+      "destination": "tests/cpp/spark/test_spark_constraint_headroom.cpp",
+      "source_sha256": "f95566ac30f8135df3aa7b1b71c376871584d57732cb2c5a4cdee8f5076866c4",
+      "destination_sha256": "6dfe2cc8fcba3f5c7ae2a182f9cd4a86e02dd48d480f4f3e467c8b8fb6a5158c"
+    },
+    {
+      "source": "tests/test_spark_palm_twist_estimator.cpp",
+      "destination": "tests/cpp/spark/test_spark_palm_twist_estimator.cpp",
+      "source_sha256": "00f92102078e629058d80c62d679fa0ab89da09ce325abeebd528ed03848425e",
+      "destination_sha256": "d188a89524a413423edff0251a109dd08bd61d866812947cc17ea4c90ebe9ddb"
+    }
+  ]
+}
