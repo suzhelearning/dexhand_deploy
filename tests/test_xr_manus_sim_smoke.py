@@ -4,6 +4,34 @@ import unittest
 
 
 class XrManusSimSmokeTest(unittest.TestCase):
+    def test_cli_defaults_to_controller_only_input(self):
+        from unittest.mock import patch
+
+        import scripts.xr_manus_sim_smoke as smoke
+
+        captured = {}
+
+        def fake_run_offline_smoke(*, arm_input, frame_count):
+            captured.update(arm_input=arm_input, frame_count=frame_count)
+            return {"passed": True}
+
+        with patch(
+            "tianji_teleop.hand_tracking.xr_manus_smoke.run_offline_smoke",
+            side_effect=fake_run_offline_smoke,
+        ):
+            self.assertEqual(smoke.main([]), 0)
+
+        self.assertEqual(captured["arm_input"], "xr_controller")
+
+    def test_default_smoke_uses_controller_only_input(self):
+        from tianji_teleop.hand_tracking.xr_manus_smoke import run_offline_smoke
+
+        report = run_offline_smoke(frame_count=100)
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["arm_input"], "xr_controller")
+        self.assertTrue(report["controller_arm_binding_verified"])
+
     def test_tracker_route_exercises_observation_bridge_and_operator_edge(self):
         from tianji_teleop.hand_tracking.xr_manus_smoke import run_offline_smoke
 

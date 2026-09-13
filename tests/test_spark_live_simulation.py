@@ -46,6 +46,15 @@ class SparkLiveSimulationTest(unittest.TestCase):
         self.assertEqual(core.sim.arm_state.position_rad,
                          result.commands['left'].position_rad + result.commands['right'].position_rad)
 
+    def test_slow_viewer_startup_does_not_latch_executor_unhealthy(self):
+        core, _ = self.make()
+        self.now += 2_000_000_000
+        receiver = ReferenceTjvrReceiver('owner-source', .15, .6)
+        receiver.ingest(packet(1), self.now)
+        core.step(receiver.try_read_latest())
+        self.assertTrue(core.sim.status.healthy, core.sim.status.error)
+        self.assertTrue(core.request('start').accepted)
+
     def test_worker_failure_keeps_both_arms_and_latches_fault(self):
         core, sample = self.make()
         core.step(sample)
@@ -207,6 +216,7 @@ class SparkLiveSimulationTest(unittest.TestCase):
         capture_path = Path(directory.name) / 'joined.h5'
         recorder = AsyncDualRecorder(capture_path, router_zid='router', metadata=dict(
             synthetic=True, run_id='joined', resolved_configuration=dict(asset_sha256=hand_replay_asset_hashes(ROOT),
+                manus_filter_continuity_ns=200_000_000,
                 tjvr_stream_contract=dict(version=1, initial_state='reset',
                     max_position_jump_m=.15, max_orientation_jump_rad=.6),
                 manus_input_contract=dict(
@@ -221,7 +231,10 @@ class SparkLiveSimulationTest(unittest.TestCase):
         slot = _InputSlot()
         core = SparkLiveSimulation(ROOT, run_id='joined', router_zid='router', instance_id='joined',
             hand_sides=sides, hand_source=slot, hand_backend=hand,
-            hand_command_sink=capture.hand_output)
+            hand_command_sink=capture.hand_output,
+            hand_expired_input_sink=lambda row: capture.audit(
+                'manus_superseded_input' if row['reason'] == 'superseded_before_retarget'
+                else 'manus_expired_input', row))
         self.addCleanup(core.close)
         # Nominal throughput requires meter-scale non-collinear hands, not
         # the tens-of-meters collinear semantic-index fixture. Keep the

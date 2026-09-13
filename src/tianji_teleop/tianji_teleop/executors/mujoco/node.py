@@ -65,6 +65,9 @@ def _configure_viewer_platform() -> None:
 def _put(publisher: Any, payload: Mapping[str, Any]) -> None:
     if publisher is None:
         return
+    if hasattr(publisher, "put_json"):
+        publisher.put_json(payload)
+        return
     data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     try:
         publisher.put(data, encoding="application/json")
@@ -457,6 +460,39 @@ class MujocoExecutor:
             list(HAND_JOINT_NAMES[side]), values, None,
             self.publisher_instance_id, self.router_zid,
         )
+
+    def copy_joint_state_to(self, data: Any, arm_position_rad, hand_positions=None) -> None:
+        """Copy a control snapshot into independent MuJoCo render data.
+
+        The method intentionally never reads this executor's ``self.data`` or
+        ``self._qpos``.  A Viewer can therefore render the supplied data while
+        the control owner advances the live simulator on another thread.
+        """
+        if data is self.data or not hasattr(data, "qpos"):
+            raise ValueError("render data must be independent from executor data")
+        qpos = np.asarray(data.qpos, dtype=np.float64)
+        if qpos.ndim != 1 or qpos.shape != (int(self.model.nq),):
+            raise ValueError("render data qpos shape does not match executor model")
+        arm = np.asarray(arm_position_rad, dtype=np.float64)
+        if arm.shape != (14,) or not np.isfinite(arm).all():
+            raise ValueError("arm render state must contain 14 finite positions")
+        if hand_positions is None:
+            hand_positions = {}
+        if not isinstance(hand_positions, Mapping):
+            raise TypeError("hand_positions must be a mapping")
+        if set(hand_positions) - set(self._hand_addresses):
+            raise ValueError("render state contains a disabled hand side")
+        for side_index, side in enumerate(SIDES):
+            for joint_index, name in enumerate(getattr(self.robot, f"{side}_joint_names")):
+                qpos[self._arm_addresses[side][name]] = arm[side_index * 7 + joint_index]
+        for side, values in hand_positions.items():
+            hand = np.asarray(values, dtype=np.float64)
+            if hand.shape != (len(self._hand_addresses[side]),) or not np.isfinite(hand).all():
+                raise ValueError(f"{side} hand render state has an invalid shape or value")
+            for value, address in zip(hand, self._hand_addresses[side].values()):
+                qpos[address] = value
+        import mujoco
+        mujoco.mj_forward(self.model, data)
 
     def _setup_transport(self) -> None:
         if self.session is None:

@@ -8,13 +8,11 @@ xr:
   host: 127.0.0.1
   port: 60061
   reconnect_seconds: 1.0
-  arm_input: xr_tracker
-  tracker_serials:
-    left: "190058"
-    right: "190600"
-  elbow_tracker_serials:
-    left: "190046"
-    right: "190023"
+  # The supported route is controller-only: PICO headset + two VR
+  # controllers + Manus.  Motion Trackers are not required or bound.
+  arm_input: xr_controller
+  tracker_serials: {}
+  elbow_tracker_serials: {}
   controller_sides:
     left: left
     right: right

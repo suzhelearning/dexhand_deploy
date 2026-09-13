@@ -92,6 +92,12 @@ class AsyncDualRecordingTest(unittest.TestCase):
                     recorder.append('append_dual_audit', 'native_cycle', payload,
                                     received_timestamp_ns=sequence)
                 payload['q'][0] = 9.
+            stats = recorder.statistics
+            self.assertEqual(stats['backend'], 'native_cpp')
+            self.assertEqual(stats['accepted'], stats['processed'])
+            self.assertEqual(stats['accepted'], 9)
+            self.assertEqual(stats['queue_depth'], 0)
+            self.assertLessEqual(stats['queue_high_water'], stats['queue_capacity'])
             with SessionH5Reader(path) as reader:
                 rows = reader.read_dual_audit()
                 self.assertEqual(len(rows), 9)
@@ -153,13 +159,38 @@ class AsyncDualRecordingTest(unittest.TestCase):
                     recorder.close()
                     # The first singleton is dispatched by append_dual_audit;
                     # its internal HDF5 implementation now runs in the child.
-                    self.assertEqual([len(call.args[0]) for call in batches.call_args_list], [20, 20])
+                    # Native adapter shares canonical singleton validation in
+                    # this thread; then the two dispatcher batches follow.
+                    self.assertEqual([len(call.args[0]) for call in batches.call_args_list], [1, 20, 20])
             finally:
                 release.set()
                 recorder.close()
             with SessionH5Reader(path) as reader:
                 self.assertEqual([r['payload']['i'] for r in reader.read_dual_audit()], list(range(41)))
                 self.assertEqual(len(reader.read_manus_callbacks()), 1)
+
+    def test_consecutive_live_snapshots_batch_without_crossing_other_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'snapshot-batch.h5'
+            recorder = self.make(path)
+            calls = []
+
+            def capture_batch(rows):
+                calls.append(len(rows))
+
+            try:
+                with patch.object(recorder._writer, 'append_live_cycle_snapshot_batch',
+                                  side_effect=capture_batch):
+                    for index in range(4):
+                        recorder.append_live_cycle_snapshot(
+                            object(), run_id=f'run-{index}')
+                    recorder.append('append_dual_audit', 'operator_result', {'ok': True},
+                                    received_timestamp_ns=100)
+                    recorder.close(complete=False)
+            except Exception:
+                recorder.close(complete=False)
+                raise
+            self.assertEqual(calls, [4])
 
     def test_exception_aborts_and_existing_files_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:

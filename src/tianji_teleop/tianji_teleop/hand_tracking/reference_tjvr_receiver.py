@@ -88,6 +88,11 @@ class ReferenceTjvrReceiver:
         self._sink = raw_sink
         self._frame_sink = raw_frame_sink
         self._decision_sink = decision_sink
+        # Serialize ingest calls and stream-gate state without extending the
+        # state lock across user callbacks.  The UDP source has one ingest
+        # thread today, but keeping this boundary explicit preserves the
+        # direct receiver API's ordering if callers use it concurrently.
+        self._ingest_lock = Lock()
         self._lock = Lock()
         self._latest = None
         self._generation = 0
@@ -95,35 +100,45 @@ class ReferenceTjvrReceiver:
 
     def ingest(self, packet: bytes, received_timestamp_ns: int) -> StreamDecision | None:
         _integer(received_timestamp_ns, 'received_timestamp_ns', 1)
-        with self._lock:
-            self._stats['datagrams'] += 1
+        with self._ingest_lock:
+            with self._lock:
+                self._stats['datagrams'] += 1
+                receiver_frame_sequence = self._stats['datagrams']
             try:
                 observation = parse_reference_tjvr_packet(packet,
                     receiver_instance_id=self._instance,
-                    receiver_frame_sequence=self._stats['datagrams'],
+                    receiver_frame_sequence=receiver_frame_sequence,
                     received_timestamp_ns=received_timestamp_ns)
             except ValueError:
-                self._stats['malformed'] += 1
+                with self._lock:
+                    self._stats['malformed'] += 1
                 return None
+
+            # These callbacks may perform a deep copy, enqueue recording data,
+            # or publish diagnostics.  They must not stop the control owner
+            # from consuming the previous latest frame.
             if self._sink is not None:
                 self._sink(observation.frame.raw_packet, received_timestamp_ns)
             if self._frame_sink is not None:
                 self._frame_sink(observation)
             decision = self._gate.evaluate(observation.frame)
-            generation = self._generation + int(decision.stream_discontinuity)
+            with self._lock:
+                generation = self._generation + int(decision.stream_discontinuity)
             if self._decision_sink is not None:
                 self._decision_sink(observation, decision, generation)
             if not decision.accepted:
-                self._stats['rejected'] += 1
+                with self._lock:
+                    self._stats['rejected'] += 1
                 return decision
-            if decision.stream_discontinuity:
-                self._generation += 1
-            if self._latest is not None:
-                self._stats['superseded'] += 1
-            self._latest = ReceivedTjvrFrame(observation, decision.stream_discontinuity,
-                                            self._generation)
-            self._stats['accepted'] += 1
-            return decision
+            with self._lock:
+                if decision.stream_discontinuity:
+                    self._generation += 1
+                if self._latest is not None:
+                    self._stats['superseded'] += 1
+                self._latest = ReceivedTjvrFrame(observation, decision.stream_discontinuity,
+                                                self._generation)
+                self._stats['accepted'] += 1
+                return decision
 
     def try_read_latest(self) -> ReceivedTjvrFrame | None:
         with self._lock:

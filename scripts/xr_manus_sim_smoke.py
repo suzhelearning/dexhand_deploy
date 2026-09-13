@@ -17,8 +17,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--arm-input",
         choices=("xr_tracker", "xr_controller"),
-        default="xr_tracker",
-        help="XR pose binding to exercise (default: xr_tracker)",
+        default="xr_controller",
+        help="XR pose binding to exercise (default: xr_controller)",
     )
     parser.add_argument(
         "--frames",

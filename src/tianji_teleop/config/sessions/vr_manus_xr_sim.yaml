@@ -1,8 +1,8 @@
-# Simulation-only PICO + VR controller/Tracker + Manus contract.
+# Simulation-only PICO + VR controller + Manus contract.
 # Component composition is in sessions/vr_manus_xr_runtime.yaml.
 input_mode: vr_manus
 hand_input: manus
-arm_input: xr_tracker
+arm_input: xr_controller
 operator_input: controller
 required_capability: simulation
 active_sides: [left, right]
@@ -11,7 +11,10 @@ ik_backend: pico_ee_dexhand_qp
 arm_pose_mapper: xr_incremental
 retarget_owner: mapper
 hand_retarget_backend: official_wuji_hand2
-arm_target_processor: passthrough
+# Match the reference controller_only route: condition the mapped end pose
+# before the IK backend.  Use --arm-target-processor passthrough only for an
+# intentional diagnostic override.
+arm_target_processor: conditioned
 joint_trajectory: passthrough
 command_step_clipping: false
 joint_limit_source: urdf

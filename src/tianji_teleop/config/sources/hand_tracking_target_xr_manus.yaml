@@ -19,25 +19,44 @@ hand_adapter_config:
 arm_pose_mapper: xr_incremental
 arm_pose_mapper_config:
   expected_reference_frame: xr_tracking
-  expected_tracked_frame: wrist_tracker
+  expected_tracked_frame: controller
   tracked_to_wrist_pose:
     left: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     right: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-  # Controller-to-wrist calibration is independent from wrist-Tracker
-  # calibration.  The launcher selects this field only for xr_controller;
-  # the tracker mapping above remains the default and fallback.
+  # Controller-to-wrist calibration for the supported controller-only route.
+  # The legacy tracked_to_wrist_pose field remains available only for
+  # compatibility with old explicit tracker experiments.
   controller_to_wrist_pose:
     left: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     right: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
   rate_hz: 90.0
-  min_cutoff: 1.0
-  beta: 0.7
+  # Reference controller_only input filter parameters.
+  min_cutoff: 1.2
+  beta: 0.45
   elbow_min_cutoff: 0.3
-  dynamic_elbow_direction: true
+  # No forearm Tracker is part of this route.  Use the fixed, calibrated
+  # default elbow directions below instead of synthesizing a dynamic hint.
+  dynamic_elbow_direction: false
   require_elbow_tracking: false
 
-arm_target_processor: passthrough
-arm_target_processor_config: {}
+arm_target_processor: conditioned
+arm_target_processor_config:
+  # These values are the reference controller_only target conditioner.
+  rate_hz: 90.0
+  translation_gain: [0.90, 0.90, 0.90]
+  rotation_gain: 1.0
+  workspace_relative_radii_m: [0.42, 0.38, 0.38]
+  workspace_soft_zone_ratio: 0.90
+  maximum_linear_speed_m_s: 0.36
+  maximum_angular_speed_rad_s: 1.55
+  maximum_linear_acceleration_m_s2: 3.5
+  maximum_angular_acceleration_rad_s2: 9.0
+  initial_position:
+    left: [0.5733, 0.2237, 0.2762]
+    right: [0.5733, -0.2237, 0.2762]
+  initial_quaternion:
+    left: [0.0067, 0.7270, 0.0111, 0.6865]
+    right: [-0.0067, 0.7270, -0.0111, 0.6865]
 
 operator_config:
   start: {side: right, control: grip, threshold: 0.8}

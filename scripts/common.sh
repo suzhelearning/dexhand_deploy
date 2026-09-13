@@ -16,6 +16,14 @@ TELEOP_GUARD_DIR=""
 TELEOP_OWNER_FILE=""
 TELEOP_CHILDREN_FILE=""
 TELEOP_TAKEOVER_LOCK_FILE="${TELEOP_RUNTIME_DIR}/takeover.lock"
+TELEOP_DEVICE_ROUTE_MODES=(
+  hand_tracking_sim
+  pico2_hands_sim
+  pico_vr_manus_sim
+  hand_tracking_sim_manus
+  vr_manus_sim
+  vr_manus_xr_sim
+)
 _TELEOP_GUARD_HELD=false
 _TELEOP_TAKEOVER_FD=""
 
@@ -30,8 +38,11 @@ _lock_guard_administration() {
     printf '%s\n' '错误：系统缺少 flock，无法安全管理遥操作运行锁。' >&2
     return 1
   fi
-  exec {_TELEOP_TAKEOVER_FD}>"${TELEOP_TAKEOVER_LOCK_FILE}"
-  flock -x "${_TELEOP_TAKEOVER_FD}"
+  exec {_TELEOP_TAKEOVER_FD}>"${TELEOP_TAKEOVER_LOCK_FILE}" || return 1
+  if ! flock -x "${_TELEOP_TAKEOVER_FD}"; then
+    _unlock_guard_administration
+    return 1
+  fi
 }
 
 _unlock_guard_administration() {
@@ -138,6 +149,42 @@ _stop_recorded_process_group() {
   fi
 }
 
+# Persist tokens before spawning so recovery can find descendants that call
+# setsid even if their original supervisor/group leader has disappeared.
+register_teleop_process_token() {
+  [[ "${_TELEOP_GUARD_HELD}" == true && "$1" =~ ^[a-zA-Z0-9_:-]+$ ]] || return 1
+  printf '%s\n' "$1" >> "${TELEOP_GUARD_DIR}/process_tokens"
+}
+
+_record_token_process_groups() {
+  local token entry process_dir pgid ticks
+  local -A tokens=() groups=()
+  [[ -f "${TELEOP_GUARD_DIR}/process_tokens" ]] || return 0
+  while IFS= read -r token; do
+    [[ "$token" =~ ^[a-zA-Z0-9_:-]+$ ]] || return 1
+    tokens["$token"]=1
+  done < "${TELEOP_GUARD_DIR}/process_tokens"
+  for process_dir in /proc/[0-9]*; do
+    [[ -r "$process_dir/environ" ]] || continue
+    while IFS= read -r -d '' entry; do
+      [[ "$entry" == TIANJI_EMBEDDED_PICO_PROCESS_TOKEN=* ]] || continue
+      token="${entry#*=}"
+      [[ -n "$token" && -n "${tokens[$token]:-}" ]] || continue
+      pgid="$(ps -o pgid= -p "${process_dir##*/}" 2>/dev/null)" || continue
+      pgid="${pgid// /}"
+      [[ "$pgid" =~ ^[0-9]+$ && "$pgid" -gt 1 ]] || return 1
+      [[ "$pgid" != "$(ps -o pgid= -p "$$" | tr -d ' ')" ]] || return 1
+      [[ -z "${groups[$pgid]:-}" ]] || break
+      groups["$pgid"]=1
+      ticks="$(_process_start_ticks "$pgid" 2>/dev/null)" || ticks=0
+      printf '%s\t%s\t%s\t%s\n' "$pgid" "$ticks" 5 token-descendant \
+        >> "${TELEOP_CHILDREN_FILE}" || return 1
+      break
+    done < "$process_dir/environ" 2>/dev/null
+  done
+  return 0
+}
+
 cleanup_registered_process_groups() {
   local records=()
   local failed_records=()
@@ -148,6 +195,7 @@ cleanup_registered_process_groups() {
   local label=""
   local cleanup_failed=0
 
+  _record_token_process_groups || return 1
   if [[ ! -f "${TELEOP_CHILDREN_FILE}" ]]; then
     return 0
   fi
@@ -236,22 +284,31 @@ _recover_or_reject_selected_guard() {
       '错误：遗留进程未能完全退出；保留记录并拒绝启动。' >&2
     return 1
   fi
-  rm -f -- "${TELEOP_OWNER_FILE}" "${TELEOP_CHILDREN_FILE}"
-  rmdir -- "${TELEOP_GUARD_DIR}" 2>/dev/null || true
+  rm -f -- "${TELEOP_OWNER_FILE}" "${TELEOP_CHILDREN_FILE}" \
+    "${TELEOP_GUARD_DIR}/process_tokens" || return 1
+  rmdir -- "${TELEOP_GUARD_DIR}" || return 1
 }
 
 acquire_teleop_guard() {
-  local mode="$1"
+  local mode="${1:-}"
+  shift || true
+  local conflict_mode=""
   local current_ticks=""
 
   if [[ ! "${mode}" =~ ^[a-z][a-z0-9_-]*$ ]]; then
     printf '错误：非法运行锁模式：%s\n' "${mode}" >&2
     return 1
   fi
-  mkdir -p -- "${TELEOP_RUNTIME_DIR}" "${TELEOP_GUARDS_DIR}"
-  chmod 700 "${TELEOP_RUNTIME_DIR}" "${TELEOP_GUARDS_DIR}"
-  current_ticks="$(_process_start_ticks "$$")"
-  _lock_guard_administration
+  for conflict_mode in "$@"; do
+    if [[ ! "${conflict_mode}" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+      printf '错误：非法冲突运行锁模式：%s\n' "${conflict_mode}" >&2
+      return 1
+    fi
+  done
+  mkdir -p -- "${TELEOP_RUNTIME_DIR}" "${TELEOP_GUARDS_DIR}" || return 1
+  chmod 700 "${TELEOP_RUNTIME_DIR}" "${TELEOP_GUARDS_DIR}" || return 1
+  current_ticks="$(_process_start_ticks "$$")" || return 1
+  _lock_guard_administration || return 1
 
   # 兼容上一版单一全局守卫：活任务必须先安全退出，死任务自动回收。
   if [[ -d "${TELEOP_LEGACY_GUARD_DIR}" ]]; then
@@ -261,6 +318,20 @@ acquire_teleop_guard() {
       return 1
     fi
   fi
+
+  # Some live routes have more than one process supervisor (for example the
+  # embedded PICO parent and its vr_manus downstream).  Check their guard
+  # domains while holding the takeover lock, before any route starts a
+  # driver, SDK or producer.  Stale conflicting guards are recovered by the
+  # same PID/start-ticks and child-process-group checks as the selected one.
+  for conflict_mode in "$@"; do
+    [[ "${conflict_mode}" == "${mode}" ]] && continue
+    _select_guard_directory "${TELEOP_GUARDS_DIR}/${conflict_mode}"
+    if ! _recover_or_reject_selected_guard; then
+      _unlock_guard_administration
+      return 1
+    fi
+  done
 
   _select_guard_directory "${TELEOP_GUARDS_DIR}/${mode}"
   if ! _recover_or_reject_selected_guard; then
@@ -273,9 +344,11 @@ acquire_teleop_guard() {
     _unlock_guard_administration
     return 1
   fi
-  printf '%s\t%s\t%s\n' "$$" "${current_ticks}" "${mode}" \
-    > "${TELEOP_OWNER_FILE}"
-  : > "${TELEOP_CHILDREN_FILE}"
+  if ! { printf '%s\t%s\t%s\n' "$$" "${current_ticks}" "${mode}" \
+    > "${TELEOP_OWNER_FILE}" && : > "${TELEOP_CHILDREN_FILE}"; }; then
+    _unlock_guard_administration
+    return 1
+  fi
   _TELEOP_GUARD_HELD=true
   _unlock_guard_administration
 }
@@ -284,15 +357,24 @@ release_teleop_guard() {
   if [[ "${_TELEOP_GUARD_HELD}" != true ]]; then
     return 0
   fi
-  _lock_guard_administration
-  rm -f -- "${TELEOP_OWNER_FILE}" "${TELEOP_CHILDREN_FILE}"
-  rmdir -- "${TELEOP_GUARD_DIR}" 2>/dev/null || true
+  _lock_guard_administration || return 1
+  if ! rm -f -- "${TELEOP_OWNER_FILE}" "${TELEOP_CHILDREN_FILE}" \
+    "${TELEOP_GUARD_DIR}/process_tokens" || ! rmdir -- "${TELEOP_GUARD_DIR}"; then
+    _unlock_guard_administration
+    return 1
+  fi
   _TELEOP_GUARD_HELD=false
   _unlock_guard_administration
 }
 
 teleop_cleanup_and_release() {
   trap - EXIT INT TERM
+  # A failed acquire may have selected another route's guard while checking
+  # conflicts.  Never use that transient selection for cleanup: only the
+  # process that successfully created this guard owns its child records.
+  if [[ "${_TELEOP_GUARD_HELD}" != true ]]; then
+    return 0
+  fi
   if ! cleanup_registered_process_groups; then
     printf '%s\n' \
       '错误：仍有受管进程存活；保留运行锁和进程记录供下次恢复。' >&2

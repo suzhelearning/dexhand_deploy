@@ -8,6 +8,7 @@ import unittest
 from scripts.xr_mujoco_sim_smoke import (
     _fake_controller_grip,
     _fake_home_grip,
+    _fake_sdk_source,
     _failure_report,
     _stop_launcher,
 )
@@ -40,6 +41,13 @@ class XrMujocoSimSmokeCliTest(unittest.TestCase):
         self.assertEqual(result["stage"], "home")
         self.assertIn("TimeoutError", result["error"])
 
+    def test_controller_smoke_fixture_can_model_no_trackers(self):
+        namespace = {}
+        exec(_fake_sdk_source(include_trackers=False), namespace)
+        self.assertEqual(namespace["num_motion_data_available"](), 0)
+        self.assertEqual(namespace["get_motion_tracker_pose"](), [])
+        self.assertEqual(namespace["get_motion_tracker_serial_numbers"](), [])
+
     def test_help_declares_full_simulation_only_scope(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts/xr_mujoco_sim_smoke.py"), "--help"],
@@ -52,6 +60,30 @@ class XrMujocoSimSmokeCliTest(unittest.TestCase):
         self.assertIn("--arm-input", result.stdout)
         self.assertIn("--disable-hands", result.stdout)
         self.assertIn("--with-manus", result.stdout)
+
+    def test_cli_defaults_to_controller_only_arm_input(self):
+        from scripts.xr_mujoco_sim_smoke import main
+
+        captured = {}
+
+        def fake_run_smoke(*, arm_input, frame_count, hands_enabled):
+            captured.update(
+                arm_input=arm_input,
+                frame_count=frame_count,
+                hands_enabled=hands_enabled,
+            )
+            return {"passed": True}
+
+        import scripts.xr_mujoco_sim_smoke as smoke
+        original = smoke.run_smoke
+        try:
+            smoke.run_smoke = fake_run_smoke
+            self.assertEqual(main(["--disable-hands"]), 0)
+        finally:
+            smoke.run_smoke = original
+
+        self.assertEqual(captured["arm_input"], "xr_controller")
+        self.assertFalse(captured["hands_enabled"])
 
     @unittest.skipUnless(
         os.environ.get("TIANJI_RUN_XR_MUJOCO_SMOKE") == "1",

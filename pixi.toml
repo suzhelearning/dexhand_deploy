@@ -47,6 +47,14 @@ rl_infer = "PYTHONPATH=src/tianji_teleop:vendor/python python scripts/regrind_cp
 rl_live_infer = "PYTHONPATH=src/tianji_teleop:vendor/python python scripts/regrind_live_infer.py"
 regrind_real = "bash scripts/run_session.sh --profile regrind_real"
 regrind_hand_sim = "PYTHONPATH=src/tianji_teleop:vendor/python python scripts/regrind_live_infer.py --hand-replay"
+# XRoboToolkit native binding is built from a user-supplied/reference source
+# into ignored vendor/xr_sdk; the PC-Service itself remains an external runtime.
+build-xr-sdk = "bash scripts/build_xr_sdk.sh"
+build-embedded-pico = "bash scripts/build_embedded_pico.sh"
+build-hdf5-recorder = "bash scripts/build_hdf5_recorder.sh"
+xr-adb = "bash scripts/xr_adb_reverse.sh"
+xr-adb-down = "bash scripts/xr_adb_reverse.sh down"
+xr-service = "bash scripts/run_xr_pc_service.sh"
 # C++ IK 使用独立环境，避免 Pinocchio 开发依赖扰动便携运行环境。
 # 编译器使用 Ubuntu 24.04 系统 GCC 13；脚本会在编译前严格检查它们与
 # runtime 的 ABI 版本。

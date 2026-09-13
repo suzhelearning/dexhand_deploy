@@ -1,0 +1,402 @@
+{
+  "schema_version": 1,
+  "source_commit": "4aeb6f595e56ec9a273656ff5e122ee7a456c59b",
+  "files": [
+    {
+      "path": ".gitignore",
+      "sha256": "f3dcf7f9f474b9202cd6ad54a679f3cc92d25d6887127c51c13ce79524b1c2bc"
+    },
+    {
+      "path": "pixi.lock",
+      "sha256": "c0e02e90005782d80a89b19cadaee48a8639ade29ed9ee756ff6c5c65607d48e"
+    },
+    {
+      "path": "pixi.toml",
+      "sha256": "31a498e7c98458fbb92a18df1e1644332172c50838feaf5c211421f8f6f86054"
+    },
+    {
+      "path": "scripts/calibrate_pico_arm.sh",
+      "sha256": "2887105e88e50ba5c5cf2a697c71c6d1130fab9eb2028160b8bd871bb32dcb3d"
+    },
+    {
+      "path": "scripts/calibrate_pico_palm_orientation.sh",
+      "sha256": "d3dda117761c959ae511ebbe04fbbbf6a0436060e3877b9d9fe3ddeeece59dc8"
+    },
+    {
+      "path": "scripts/cleanup_tianji_pico_processes.py",
+      "sha256": "2d521618785b48732e1e146df5916c9669b9c2d5550c2bbc4d0147b6e2547988"
+    },
+    {
+      "path": "scripts/record_pico_tremor.sh",
+      "sha256": "db8ffb041fb699683ba289c1fbec19228501c341dbde44afb02735884e5c9753"
+    },
+    {
+      "path": "scripts/start_pico_driver.sh",
+      "sha256": "dbf0904007613c244430a2e194995bb9659a0e1b8ae5fd2ee406ad2736bd62ff"
+    },
+    {
+      "path": "scripts/start_pico_m0.sh",
+      "sha256": "754fecb7bf9c2dc5e6689692508390070f8feaf5177c7d35e6ee32599de49d7c"
+    },
+    {
+      "path": "scripts/start_tianji_pico_teleop.sh",
+      "sha256": "47d5d5e7009c04b0321d9cba21521f7cdadd6b6076930598aab7fa64d85bde6b"
+    },
+    {
+      "path": "scripts/stop_tianji_pico_teleop.sh",
+      "sha256": "96e0fc35ce11e9791e477785645ea8e5a960c084f948296c1ee2f6be7ac9f66b"
+    },
+    {
+      "path": "src/imu_ros2/CMakeLists.txt",
+      "sha256": "dc4e80c066bbbf45c6a9e3a8f35360b161f44c40e246f8713bb67c6cdb10946d"
+    },
+    {
+      "path": "src/imu_ros2/include/imu_ros2/device_time_mapper.hpp",
+      "sha256": "bdbd46ba24c6f17f6565f4e8e1b9be8bff20ad1b0e2e33576eca2225bda2f809"
+    },
+    {
+      "path": "src/imu_ros2/include/imu_ros2/im948_protocol.hpp",
+      "sha256": "149b8748de9f38b7a1d563bcf4be3f5a1cc50b4d464395d4d03ff9aabbd351d2"
+    },
+    {
+      "path": "src/imu_ros2/include/imu_ros2/orientation_reference.hpp",
+      "sha256": "53f5ace854fad8e4a469b5d8bf6fa2518ee17380efa95bb0f5425c00fd75aebf"
+    },
+    {
+      "path": "src/imu_ros2/launch/imu_multi.launch.py",
+      "sha256": "73710b66d3ed1f43720b8385eb23bd2b2a14b09731d54ee4b3eb1d66becab9f7"
+    },
+    {
+      "path": "src/imu_ros2/launch/imu_node.launch.py",
+      "sha256": "eb531d758e6c0903a96c0987c60c2c7bae0bf96564e4a63fba13e439a7b4e0f6"
+    },
+    {
+      "path": "src/imu_ros2/package.xml",
+      "sha256": "e204576de1209172cd6b713efe0758cd502c8cb199853453f6ec36e00cc8db99"
+    },
+    {
+      "path": "src/imu_ros2/src/im948_protocol.cpp",
+      "sha256": "9d7d384f90a249445a4332ceec133eeafbd7e3de5b23aac731b6a850d506fd0c"
+    },
+    {
+      "path": "src/imu_ros2/src/imu_multi_node.cpp",
+      "sha256": "66bb0ebafdad95017d81a65856f85afa56f8e66109b0a1c32ea00ae2e8784bee"
+    },
+    {
+      "path": "src/imu_ros2/src/imu_node.cpp",
+      "sha256": "eb10c6db6f3ae8a48224ecef3545e879d57ceebfa974ededd1441b904643cc01"
+    },
+    {
+      "path": "src/imu_ros2/src/orientation_reference.cpp",
+      "sha256": "0c083ad708163d38ce3430a14d3dcc22de82bbc4f66f5ce443224d7a4f161b65"
+    },
+    {
+      "path": "src/imu_ros2/test/test_im948_protocol.cpp",
+      "sha256": "f1f643f470090c43c0458d1f39a9c6e6ec6ea214759fa40f7653038e216916c4"
+    },
+    {
+      "path": "src/pico_bridge/CMakeLists.txt",
+      "sha256": "e214cabe6a5dab5cfce7a496cc56f4a81bb6842ba0a0f80b4cdaaf6bacfa61c9"
+    },
+    {
+      "path": "src/pico_bridge/config/imu900_feet.yaml",
+      "sha256": "6538a7dd4ed07c6c575a5960f6923dd9b8832a4092d8cc00584f7e864a76b40e"
+    },
+    {
+      "path": "src/pico_bridge/include/pico_bridge/auto_calibration_state.hpp",
+      "sha256": "ac662666c2f3d9bbc543164dd3bda97722600e499f78dec605293da24dbda788"
+    },
+    {
+      "path": "src/pico_bridge/include/pico_bridge/foot_imu_fusion_math.hpp",
+      "sha256": "6750581564c2e1e8a43d132f219f36b87d0d5a0d4eb0023c0d7f48336b9f8874"
+    },
+    {
+      "path": "src/pico_bridge/include/pico_bridge/foot_imu_input_state.hpp",
+      "sha256": "d56512e314423d83f56d39a876c44edd2fbeaff302777d300e9e35819d1ad67b"
+    },
+    {
+      "path": "src/pico_bridge/include/pico_bridge/pico_frame.hpp",
+      "sha256": "e918998e9d6d881a6f98d6f632d14cd96db11d70bb6f070ae84b0d0f0d564325"
+    },
+    {
+      "path": "src/pico_bridge/include/pico_bridge/smpl_ground_alignment.hpp",
+      "sha256": "1dcfa8ad75f960d34db57196b0c5c68af8a685ffb4d4762c4362d014c63beda4"
+    },
+    {
+      "path": "src/pico_bridge/include/pico_bridge/tianji_teleop_geometry.hpp",
+      "sha256": "5d20d8177e131850d5389c5180327fc035289bc8e6adb9a509f8f293823f662c"
+    },
+    {
+      "path": "src/pico_bridge/include/pico_bridge/tianji_teleop_protocol.hpp",
+      "sha256": "9e30c1053f2711616929b26c765f8a116cd3107d36fdb00e5fed5f3789f61146"
+    },
+    {
+      "path": "src/pico_bridge/include/pico_bridge/tracking_epoch_store.hpp",
+      "sha256": "b6a6ee8f5b2bde42df4c0c6e4e628a1492c97668ba74db4438e8bcbca3d37d47"
+    },
+    {
+      "path": "src/pico_bridge/launch/calibrate_pico_arm_geometry.launch.py",
+      "sha256": "5ce062f741901e3cdf57d1e8bc48fec0223cf433050b94defbc622606aa3a4ea"
+    },
+    {
+      "path": "src/pico_bridge/launch/calibrate_pico_left_arm_geometry.launch.py",
+      "sha256": "1531922fc304c2844903b0a70f8b6a71b07dfea0f314ca7f9731b6751137d27a"
+    },
+    {
+      "path": "src/pico_bridge/launch/start_pico_bridge.launch.py",
+      "sha256": "dd956e0778826e94db39634a91cf4caa840e9611edb68aa08710daf02ac071b9"
+    },
+    {
+      "path": "src/pico_bridge/launch/start_pico_foot_fusion.launch.py",
+      "sha256": "1429271d054695dc039a0eb73d5e12d870352d96574fa837adac099aa38f83b6"
+    },
+    {
+      "path": "src/pico_bridge/launch/start_pico_palm_skeleton_filter.launch.py",
+      "sha256": "b63bd37890500b48ff5dfc8dd240a947bf6d3f24508a1fc2780160d2317d8b63"
+    },
+    {
+      "path": "src/pico_bridge/launch/start_tianji_mujoco_teleop.launch.py",
+      "sha256": "ea375fca881b09f0ad2c203583014f8bd6ce74ac8290e29e75ad8a23e9bd4fb5"
+    },
+    {
+      "path": "src/pico_bridge/msg/BleFrame.msg",
+      "sha256": "f1594b269f44c435f28e2636fd836f5a1bee5e48e541487001fd8c5292e6fc06"
+    },
+    {
+      "path": "src/pico_bridge/package.xml",
+      "sha256": "a75a083bcc17b8ba5b44feb3662437c17ad7be26deac03617398cbae2d2bdde3"
+    },
+    {
+      "path": "src/pico_bridge/scripts/mock_pico_server.py",
+      "sha256": "220c31114295ac35b925d57920ba14e398107d8b7464c3329a3be18e2f625b7a"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_arm_geometry_calibrator.py",
+      "sha256": "6ac87b02f9c5f736e401c9c219b083fe2e14e60e4412d29e5ac77ff028efa6bf"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_arm_geometry_core.py",
+      "sha256": "af5b7f44247f71d093aa936ce07b39a3efc9455e26fe424ec800a10662b2fe62"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_arm_geometry_pixi.sh",
+      "sha256": "a554b6d4169224105f4ab1b4aa39df414f2bfb7f68f1624d63dd6d28766ee935"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_calibration_artifact.py",
+      "sha256": "09d28fc97a58a9a455098d83f0284bd245a2128d616f423894cd0577ca3854a6"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_left_arm_geometry_calibrator.py",
+      "sha256": "c27b952b879e819f8a7b80bcd9cf81131473accb64203758eb27156d67878fc7"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_left_arm_geometry_core.py",
+      "sha256": "1aaad786d4e47adb15d46c124671b4658d2d402ad98bd1cc86bfb5e023d8271c"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_m0_comparison_report.py",
+      "sha256": "a318e93a74a9d5636062cec4b30d5097626174849d4c6ff9100104e520889c19"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_m0_readiness.py",
+      "sha256": "459284fb346b517e6b21e7bc9702d615e7976ce8ef84adfa2c3857ad94666c3d"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_palm_orientation_client.py",
+      "sha256": "e4261de21470f02befcd29b85feb02aac55776a931403235fb7db9bbd4639d2f"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_palm_orientation_core.py",
+      "sha256": "51875e877a2ef1f149c9e454e0f165a11bebccc8b910dd5b5c80e6d0b55a32ae"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_palm_skeleton_filter_core.py",
+      "sha256": "1aabe6099d2d87fa66d3ef3c0f5c22f794e73c69cfa72926107fef23b6d1a980"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_palm_skeleton_filter_node.py",
+      "sha256": "5ccf423bbaad76f11d70e8b90f967a1dd616d1befbed708f071559c73d8a2e35"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_palm_tcp_calibrator.py",
+      "sha256": "0146fb331791e9973e477687e04e6e559edb35aae9214b53066ec09bbd21c2ba"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_palm_tcp_publisher.py",
+      "sha256": "1379587df1cbff76c908113fbf8ec847e3084056f0be5050305f7f21a12bc080"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_palm_tcp_runtime.py",
+      "sha256": "51931d6780140c0102ea3f76111f68678523c08c4424adbb8eb6162b97eb5b56"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_palm_wrist_calibrator.py",
+      "sha256": "0bf3e21769e2a32c69d8ae0ae9ce915e154edf146bbc435cb827d2a7b876f6af"
+    },
+    {
+      "path": "src/pico_bridge/scripts/pico_process_cleanup.sh",
+      "sha256": "6b423a23b83d6267723774e657ee936e2ab5ca230a9bd03f7c40088d780161b5"
+    },
+    {
+      "path": "src/pico_bridge/scripts/smpl_mujoco_visualizer.py",
+      "sha256": "7f1971a129acc79bfffe5729edf841df997fcb4afed457241c45af67de7bdd11"
+    },
+    {
+      "path": "src/pico_bridge/scripts/start_pico_m0_pixi.sh",
+      "sha256": "514e8c47ba3af884d53a301e8d2570c4c969ad07708b271afaa9dbae65af038a"
+    },
+    {
+      "path": "src/pico_bridge/src/pico_bridge_node.cpp",
+      "sha256": "6fd78f54e216210c175ee4e55cd91b9a3ae7d68a9f38c5bc79b505850ca1e920"
+    },
+    {
+      "path": "src/pico_bridge/src/pico_foot_imu_fusion_node.cpp",
+      "sha256": "02667b816bfb79cf7c94cff62c93c7ec4fbfc6c2e8d2a5fa9c9edb75d38796dc"
+    },
+    {
+      "path": "src/pico_bridge/src/pico_smpl_ground_node.cpp",
+      "sha256": "7aae0081d30671a2ae43b4ed3cb496ccdb849a21d369125477579dc8dedf7219"
+    },
+    {
+      "path": "src/pico_bridge/src/tianji_mujoco_teleop_bridge_node.cpp",
+      "sha256": "f74b2b27a209c036311fde53f86ef5d93721446fb392dc2bd7d1d1224ad6657c"
+    },
+    {
+      "path": "src/pico_bridge/src/tianji_teleop_geometry.cpp",
+      "sha256": "b16d6e369cf7dce277c24fd895c6b37d22630bebe73f4807374da46aca72a155"
+    },
+    {
+      "path": "src/pico_bridge/src/tianji_teleop_protocol.cpp",
+      "sha256": "197a78dd45217a6d21d182b90967126292c44af93dbfa309d6bebc78cfc08847"
+    },
+    {
+      "path": "src/pico_bridge/src/tracking_epoch_store.cpp",
+      "sha256": "08cb5e09b91704d79afbccfb2971d113f61bbabd98e275acd0a8d35dfd80ff10"
+    },
+    {
+      "path": "src/pico_bridge/test/fixtures/pico_left_arm_geometry_quick_v3_reference.yaml",
+      "sha256": "75474a3961cc6d367a35261109a3f6a82afa6d381094b2502e2ae1775ca47d79"
+    },
+    {
+      "path": "src/pico_bridge/test/test_auto_calibration_state.cpp",
+      "sha256": "b143b97886d8918588bdb1fc3de087711b973a2888f4c2bfde7d22f619b6c9d1"
+    },
+    {
+      "path": "src/pico_bridge/test/test_cleanup_tianji_pico_processes.py",
+      "sha256": "4faf82af1f921a73449db79b24330de73f6baeeef71906342c24816565a767ae"
+    },
+    {
+      "path": "src/pico_bridge/test/test_foot_imu_fusion_math.cpp",
+      "sha256": "036421af9d08fb2f8dd2c1214c46636dfdd6b899018545c4d9fa9b4b6a8f541c"
+    },
+    {
+      "path": "src/pico_bridge/test/test_foot_imu_input_state.cpp",
+      "sha256": "9aca5e4379d20b477c24c42ec0d5c0bca105406906470e5653e53e296cb297ed"
+    },
+    {
+      "path": "src/pico_bridge/test/test_imu900_foot_integration.py",
+      "sha256": "b6502a2e95376c4efb8f24e0f24a3df8a39b0eeb4819810738db89cf2c8f9af5"
+    },
+    {
+      "path": "src/pico_bridge/test/test_launch_integration.py",
+      "sha256": "15e60313e3b512ca711b62a2dc4ac4fdd8ee473cae202758f0e55d7183a92b47"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_arm_geometry_calibrator.py",
+      "sha256": "7cc5fd44dcf5025fd9f6180f9e75d19396004fe18bee0f719da3e85a637c73a8"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_arm_geometry_core.py",
+      "sha256": "08160cee0b642ae90522d096854c0299451e27f40a17709b1ba1d6c811de4428"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_calibration_artifact.py",
+      "sha256": "6d0e9bb4cae98933da4a06105cd26e7459cf4404502c49553b575148c1cecc15"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_calibration_menu.py",
+      "sha256": "f420ce98ddf1f708931fa72109baa16db854b1a0d4343ee06ab062b4b3463555"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_frame.cpp",
+      "sha256": "89228b919e2ff8fbc903c61541552ebbb14d20d07b31f4187e1290cf8c27549f"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_left_arm_geometry_calibrator.py",
+      "sha256": "74a4fbf56e5313eaa09ab3f45c56c8a347ab43c4d1635f86ad41f54852249422"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_left_arm_geometry_core.py",
+      "sha256": "f9c8f5871b63ff81f1f359ad3d8df9b4447e3bc83498d86e38ae58b2e8e65021"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_m0_comparison_report.py",
+      "sha256": "1180ac50fd89075677909a77c6b09abb5ab1c810426f8ca8582bf47d894a3553"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_m0_readiness.py",
+      "sha256": "b008b0fa08d80380dbdc5f57b7cc3a2cc8de9017d1851345260aabe641373803"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_m0_scripts.py",
+      "sha256": "a5133c6111a75bc7baa399bcc48a732febda57df7d991460e2c634eb44196556"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_palm_orientation_core.py",
+      "sha256": "506d5b6d0e8a68ee887253aa203a03c1dad24c59723c09bcf2039e68bfd43e8d"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_palm_orientation_service.py",
+      "sha256": "f15d53ad889d8c248056455ef2911c6f4b5bc0ad9ab1aa891ad52b6df9bb1e21"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_palm_skeleton_filter_core.py",
+      "sha256": "92e54a50137e8351b7a8d745b166360cef01de8a1f48933aeeb21016282127ac"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_palm_skeleton_filter_node.py",
+      "sha256": "53e240dc4ce1569cf58a041aa11018e46c4ba956a7e7d441350337e252d264bf"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_palm_tcp_calibrator.py",
+      "sha256": "81662868656fa8f615253e7df5a09bbc347afaac35f59745a0194ad72a5bbf20"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_palm_tcp_runtime.py",
+      "sha256": "531e768f2adec90860910fd6cad505efbd02cb878d7d3a01f5ac93cc2c34a655"
+    },
+    {
+      "path": "src/pico_bridge/test/test_pico_palm_wrist_calibrator.py",
+      "sha256": "97928796d1cc73e91b8db2d143b882bdf98d364a706ece4af7def8f9f284be81"
+    },
+    {
+      "path": "src/pico_bridge/test/test_smpl_ground_alignment.cpp",
+      "sha256": "459404b3d6c71ac6c92005ac8bd822d2f8b3d1f7375b7f3c125a73603b0e5c97"
+    },
+    {
+      "path": "src/pico_bridge/test/test_smpl_ground_integration.py",
+      "sha256": "f6ae8d9d3f3d7ded706b74b2c43ea720600d1580b009c6b5962fa4056154d5a9"
+    },
+    {
+      "path": "src/pico_bridge/test/test_smpl_mujoco_geometry.py",
+      "sha256": "f3fa08d2489a45189909748fca21115a3b5c59629bfb43764d52df842ce5552b"
+    },
+    {
+      "path": "src/pico_bridge/test/test_tianji_mujoco_teleop_bridge_runtime.py",
+      "sha256": "1575331d520cb8890a6a5e276f50f5dad4d8fdffe4d1e33cb4ba5c0ceb45f014"
+    },
+    {
+      "path": "src/pico_bridge/test/test_tianji_teleop_geometry.cpp",
+      "sha256": "f3d20cdcb9430b1a29b9c0662c001c04c902e8c84343faacaaabd86677e5b0c8"
+    },
+    {
+      "path": "src/pico_bridge/test/test_tianji_teleop_protocol.cpp",
+      "sha256": "1e69864041cdb731b4dd500eb94e2545f7d5510f04fb899cb1e64752a69d752c"
+    },
+    {
+      "path": "src/pico_bridge/test/test_tracking_epoch_store.cpp",
+      "sha256": "c80efc7b8089b1b67dd499cbf5119f62cda87d91b75c3a6d064cc379f13bf857"
+    }
+  ]
+}

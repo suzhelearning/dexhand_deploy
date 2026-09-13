@@ -2,7 +2,9 @@
 """Run the XR arm route through the managed MuJoCo simulation boundary.
 
 This is a bounded, simulation-only smoke.  A temporary in-process-compatible
-``xrobotoolkit_sdk`` module supplies moving HMD, controller and tracker data;
+``xrobotoolkit_sdk`` module supplies moving HMD and controller data; an
+explicit legacy ``--arm-input xr_tracker`` run additionally supplies tracker
+data;
 the managed launcher then runs the real XR observation process, target bridge,
 ``pico_ee_dexhand_qp`` producer, coordinator and MuJoCo executor.  Manus hand
 capture can be enabled with ``--with-manus``; that mode supplies a temporary
@@ -11,9 +13,8 @@ robot or actuator is opened.
 
 Examples::
 
-    pixi run python scripts/xr_mujoco_sim_smoke.py --arm-input xr_tracker --disable-hands
     pixi run python scripts/xr_mujoco_sim_smoke.py --arm-input xr_controller --disable-hands
-    pixi run python scripts/xr_mujoco_sim_smoke.py --arm-input xr_tracker --with-manus
+    pixi run python scripts/xr_mujoco_sim_smoke.py --arm-input xr_controller --with-manus
 """
 from __future__ import annotations
 
@@ -69,8 +70,30 @@ def _fake_home_grip(tick: int) -> float:
     return 1.0 if _FAKE_HOME_PRESS_TICK <= tick < _FAKE_HOME_RELEASE_TICK else 0.0
 
 
-def _fake_sdk_source() -> str:
+def _fake_sdk_source(*, include_trackers: bool = True) -> str:
     """Return a small SDK-shaped module for the managed smoke only."""
+    if type(include_trackers) is not bool:
+        raise TypeError("include_trackers must be boolean")
+    tracker_count = 4 if include_trackers else 0
+    tracker_poses = (
+        """    phase = _phase()
+    displacement = 0.035 * math.sin(phase)
+    height = 0.30 + 0.015 * math.cos(phase)
+    return [
+        _pose(0.42 + displacement, 0.20, height),
+        _pose(0.42 + displacement, -0.20, height),
+        _pose(0.18 + 0.5 * displacement, 0.31, 0.42),
+        _pose(0.18 + 0.5 * displacement, -0.31, 0.42),
+    ]
+"""
+        if include_trackers
+        else "    return []\n"
+    )
+    tracker_serials = (
+        "    return [\"190058\", \"190600\", \"190046\", \"190023\"]\n"
+        if include_trackers
+        else "    return []\n"
+    )
     return f'''
 import math
 
@@ -116,23 +139,15 @@ def get_right_controller_pose():
 
 
 def num_motion_data_available():
-    return 4
+    return {tracker_count}
 
 
 def get_motion_tracker_serial_numbers():
-    return ["190058", "190600", "190046", "190023"]
+{tracker_serials}
 
 
 def get_motion_tracker_pose():
-    phase = _phase()
-    displacement = 0.035 * math.sin(phase)
-    height = 0.30 + 0.015 * math.cos(phase)
-    return [
-        _pose(0.42 + displacement, 0.20, height),
-        _pose(0.42 + displacement, -0.20, height),
-        _pose(0.18 + 0.5 * displacement, 0.31, 0.42),
-        _pose(0.18 + 0.5 * displacement, -0.31, 0.42),
-    ]
+{tracker_poses}
 
 
 def get_left_trigger():
@@ -160,10 +175,12 @@ def get_right_axis():
 '''
 
 
-def _write_fake_sdk(directory: Path) -> Path:
+def _write_fake_sdk(directory: Path, *, include_trackers: bool = True) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     module = directory / "xrobotoolkit_sdk.py"
-    module.write_text(_fake_sdk_source(), encoding="utf-8")
+    module.write_text(
+        _fake_sdk_source(include_trackers=include_trackers), encoding="utf-8"
+    )
     return module
 
 
@@ -358,7 +375,7 @@ def run_smoke(*, arm_input: str, frame_count: int, hands_enabled: bool = False) 
 
     output = Path(tempfile.mkdtemp(prefix="xr-mujoco-sim-smoke-"))
     sdk_path = output / "fake_xr_sdk"
-    _write_fake_sdk(sdk_path)
+    _write_fake_sdk(sdk_path, include_trackers=arm_input == "xr_tracker")
     fake_manus = _write_fake_manus(output) if hands_enabled else None
     endpoint = _free_endpoint()
     router = None
@@ -474,8 +491,6 @@ def run_smoke(*, arm_input: str, frame_count: int, hands_enabled: bool = False) 
             "xr_incremental",
             "--ik-backend",
             "pico_ee_dexhand_qp",
-            "--arm-target-processor",
-            "passthrough",
             "--joint-trajectory",
             "passthrough",
             "--command-step-clipping",
@@ -802,7 +817,7 @@ def run_smoke(*, arm_input: str, frame_count: int, hands_enabled: bool = False) 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arm-input", choices=("xr_tracker", "xr_controller"), default="xr_tracker")
+    parser.add_argument("--arm-input", choices=("xr_tracker", "xr_controller"), default="xr_controller")
     parser.add_argument("--frames", type=int, default=100, help="synthetic frame budget (>=30)")
     parser.add_argument(
         "--disable-hands",

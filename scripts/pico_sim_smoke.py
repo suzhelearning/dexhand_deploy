@@ -224,7 +224,8 @@ def main(*, test_router_endpoint=None, test_runtime_directory=None):
 
         threading.Thread(target=drain, daemon=True).start()
         wait_for(lambda: latest.get('tianji/source/status', {}).get('ready') and
-                 counts['tianji/observation/hand/right'] > 10, 90, 'source readiness')
+                 counts['tianji/observation/hand/right'] > 10 and
+                 'tianji/observation/arm_input/right' in latest, 90, 'source readiness')
         # Startup readiness describes coordinator discovery, not receipt of the
         # first observation in the newly started target process.
         time.sleep(1)
@@ -232,11 +233,20 @@ def main(*, test_router_endpoint=None, test_runtime_directory=None):
             os.write(master, b'c')
             wait_for(lambda: latest.get('tianji/source/status', {}).get('diagnostics', {}).get(
                 'height_calibration', {}).get('state') == 'collecting', 3, 'calibration collecting')
-            # Deliberately malformed input on THIS smoke's isolated router only.
-            session.put('tianji/observation/arm_input/right', json.dumps({'bad': 'calibration regression'}))
+            # Drive the source's normal tracking-loss path on THIS smoke's
+            # isolated input stream. The raw packet and its invalid canonical
+            # observation remain associated, so the strict recorder and the
+            # PICO wire-to-observation checker can both validate the sample.
+            loss_mask = 2  # left-hand validity bit; right side stays live
             wait_for(lambda: latest.get('tianji/source/status', {}).get('diagnostics', {}).get(
-                'height_calibration', {}).get('state') == 'failed', 3, 'calibration rejected malformed input')
-            assert latest['tianji/source/status']['healthy'] is False
+                'height_calibration', {}).get('state') == 'failed', 3,
+                'calibration rejected invalid tracking observation')
+            loss_mask = 0
+            # PICO2 arm-only source mode deliberately holds an invalid wrist
+            # observation instead of faulting the source. The calibration
+            # state still records the failed attempt and remains retryable.
+            assert latest['tianji/source/status']['healthy'] is True
+            assert 'left' in latest['tianji/source/status']['diagnostics']['tracking_hold_sides']
             os.write(master, b'c')
             wait_for(lambda: latest.get('tianji/source/status', {}).get('diagnostics', {}).get(
                 'height_calibration', {}).get('state') == 'calibrated', 8, 'height calibration')

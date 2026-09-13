@@ -88,7 +88,8 @@ _XR_RAW_LEGACY_SPECS = tuple(
 _DUAL_AUDIT_SPECS = (("time_ns", (), np.int64), ("received_timestamp_ns", (), np.int64),
     ("kind", (), _STRING), ("payload_json", (), _STRING))
 _DUAL_AUDIT_KINDS = frozenset({'lifecycle', 'native_cycle', 'operator_result', 'operator_observation',
-    'manus_rawviz_line', 'manus_callback_metadata', 'hand_output', 'component_status', 'hand_retarget_input',
+    'manus_superseded_input',
+    'manus_rawviz_line', 'manus_callback_metadata', 'manus_expired_input', 'hand_output', 'component_status', 'hand_retarget_input',
     'tjvr_stream_decision'})
 
 
@@ -463,6 +464,62 @@ class SessionH5Writer:
     def append_dual_audit(self, kind, payload, *, received_timestamp_ns) -> None:
         """Passive diagnostics only: these rows never grant replay authority."""
         self.append_dual_audit_batch([(kind, payload, received_timestamp_ns)])
+
+    def append_live_cycle_snapshot(self, snapshot, *, run_id) -> None:
+        """Persist one owned live cycle without multiple parent RPCs.
+
+        This is an internal recording fast path.  The child performs the same
+        dataset writes and emits the same audit payloads as ``LiveCapture``'s
+        compatibility fallback; only the process boundary is crossed once.
+        """
+        from .live_capture import LiveCycleSnapshot
+        if not isinstance(snapshot, LiveCycleSnapshot):
+            raise SessionH5Error('live cycle snapshot has an invalid type')
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise SessionH5Error('live cycle recording run_id is required')
+        now = snapshot.received_timestamp_ns
+        if snapshot.hand_telemetry:
+            self.append_dual_audit(
+                'component_status',
+                dict(snapshot.hand_telemetry, run_id=run_id),
+                received_timestamp_ns=now,
+            )
+        for command in snapshot.result.commands.values():
+            self.append_arm_command(command, received_time_ns=now)
+        self.append_arm_state(snapshot.arm_state, received_time_ns=now)
+        self.append_session_state(snapshot.session_state, received_time_ns=now)
+        for state in snapshot.hand_states.values():
+            self.append_hand_state(state, received_time_ns=now)
+        payload = dict(
+            execution_epoch=snapshot.execution_epoch,
+            native=snapshot.result.native_result,
+            native_attempt=snapshot.result.native_attempt,
+            coordinator_receipt=snapshot.coordinator_receipt,
+            receipt_accepted=snapshot.result.receipt_accepted,
+            bilateral_command=snapshot.bilateral_command,
+            accepted_hand_commands={
+                side: command.to_dict()
+                for side, command in snapshot.hand_commands.items()
+            },
+            source_status=snapshot.source_status.to_dict(),
+            run_id=run_id,
+        )
+        self.append_dual_audit('native_cycle', payload,
+                               received_timestamp_ns=now)
+
+    def append_live_cycle_snapshot_batch(self, rows) -> None:
+        """Persist consecutive owned live snapshots in one writer RPC.
+
+        The individual snapshot operation remains the canonical layout
+        implementation. This new-only batch seam reduces pipe round trips for
+        the 200 Hz live path without changing row order or HDF5 schema.
+        """
+        if not isinstance(rows, (list, tuple)) or not 0 < len(rows) <= 64:
+            raise SessionH5Error('live snapshot batch must contain 1..64 rows')
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) != 2:
+                raise SessionH5Error('live snapshot batch row requires snapshot and run_id')
+            self.append_live_cycle_snapshot(row[0], run_id=row[1])
 
     def append_dual_audit_batch(self, rows) -> None:
         """Bounded consecutive rows, validated together and written without resampling.

@@ -2,6 +2,8 @@ import unittest
 from unittest.mock import patch
 import os
 import sys
+from pathlib import Path
+import tempfile
 
 import numpy as np
 
@@ -268,6 +270,76 @@ class XrInputTest(unittest.TestCase):
         delattr(_Sdk, "get_right_axis")
         self.assertEqual(validate_xr_sdk_module(_Sdk()), ("get_right_axis",))
 
+    def test_controller_only_sdk_preflight_does_not_require_tracker_api(self):
+        class _ControllerOnlySdk:
+            pass
+
+        required = (
+            "init", "get_headset_pose", "get_left_controller_pose",
+            "get_right_controller_pose", "get_left_trigger", "get_right_trigger",
+            "get_left_grip", "get_right_grip", "get_left_axis", "get_right_axis",
+            "get_motion_timestamp_ns",
+        )
+        for name in required:
+            setattr(_ControllerOnlySdk, name, staticmethod(lambda: None))
+
+        self.assertEqual(validate_xr_sdk_module(_ControllerOnlySdk(), require_trackers=False), ())
+        self.assertEqual(
+            validate_xr_sdk_module(_ControllerOnlySdk(), require_trackers=True),
+            ("num_motion_data_available", "get_motion_tracker_pose",
+             "get_motion_tracker_serial_numbers"),
+        )
+
+    def test_controller_only_source_reads_frame_without_tracker_sdk_symbols(self):
+        class _ControllerOnlySdk:
+            def init(self):
+                return True
+
+            def get_headset_pose(self):
+                return [0.0, 0.0, 1.6, 0.0, 0.0, 0.0, 1.0]
+
+            def get_left_controller_pose(self):
+                return [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]
+
+            def get_right_controller_pose(self):
+                return [0.4, 0.5, 0.6, 0.0, 0.0, 0.0, 1.0]
+
+            def get_left_trigger(self):
+                return 0.1
+
+            def get_right_trigger(self):
+                return 0.9
+
+            def get_left_grip(self):
+                return 0.2
+
+            def get_right_grip(self):
+                return 0.8
+
+            def get_left_axis(self):
+                return [0.0, 0.0]
+
+            def get_right_axis(self):
+                return [0.25, -0.5]
+
+        source = XrRoboToolkitSource(
+            client=XRoboToolkitClient(sdk_module=_ControllerOnlySdk()),
+            binding=self.binding(arm_input="xr_controller", tracker_serials={}),
+            receiver_instance_id="xr-receiver",
+            clock=lambda: 987654321,
+        )
+        self.assertTrue(source.initialize())
+        frame = source.read_frame()
+
+        self.assertEqual(frame.trackers, ())
+        self.assertTrue(frame.controller("left").valid)
+        np.testing.assert_allclose(
+            self.binding(arm_input="xr_controller", tracker_serials={}).pose_for_arm(
+                frame, "right"
+            ),
+            [0.4, 0.5, 0.6, 0, 0, 0, 1],
+        )
+
     def test_xr_sdk_pythonpath_is_injected_only_when_sdk_is_loaded(self):
         client = XRoboToolkitClient(sdk_module=None)
         injected = os.path.join(os.sep, "portable", "xr-sdk", "python")
@@ -279,6 +351,30 @@ class XrInputTest(unittest.TestCase):
             self.assertTrue(client.init())
         self.assertIn(injected, sys.path)
         importer.assert_called_once_with("xrobotoolkit_sdk")
+
+    def test_xr_sdk_native_library_is_loaded_before_extension_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            library = Path(directory) / "libPXREARobotSDK.so"
+            library.touch()
+            sdk = type("Sdk", (), {})()
+            with patch.dict(os.environ, {"TIANJI_XR_SDK_LIBRARY_DIR": directory}), \
+                    patch("tianji_teleop.hand_tracking.xr_input.ctypes.CDLL") as loader, \
+                    patch("tianji_teleop.hand_tracking.xr_input.importlib.import_module",
+                          return_value=sdk) as importer:
+                client = XRoboToolkitClient()
+                self.assertIs(client._load_sdk(), sdk)
+            loader.assert_called_once()
+            self.assertEqual(loader.call_args.args[0], str(library))
+            importer.assert_called_once_with("xrobotoolkit_sdk")
+
+    def test_xr_sdk_native_library_missing_fails_before_extension_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"TIANJI_XR_SDK_LIBRARY_DIR": directory}), \
+                    patch("tianji_teleop.hand_tracking.xr_input.importlib.import_module") as importer:
+                client = XRoboToolkitClient()
+                with self.assertRaisesRegex(RuntimeError, "native library is missing"):
+                    client._load_sdk()
+            importer.assert_not_called()
 
     def test_xr_service_init_failure_remains_reconnectable(self):
         class _UnavailableService:

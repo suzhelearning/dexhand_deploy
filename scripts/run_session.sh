@@ -25,14 +25,20 @@ pose_mapper_override=""
 joint_limit_source=""
 operator_input_override=""
 arm_input_override=""
+pico_calibration_dir_override=""
+pico_app_package_override=""
+pico_ros_domain_override=""
+pico_startup_timeout_override=""
 xr_manus_rawviz_override=""
 xr_manus_user_override=""
 xr_manus_library_dir_override=""
 xr_manus_right_glove_override=""
 xr_manus_left_glove_override=""
 xr_sdk_pythonpath_override=""
+xr_sdk_library_dir_override=""
 extra_args=()
 dual_runtime_args=()
+original_args=("$@")
 while (($#)); do
   case "$1" in
     --profile) profile="${2:-}"; shift 2 ;;
@@ -43,6 +49,8 @@ while (($#)); do
       dual_runtime_args+=("$1" "${2:?missing dual-input runtime value}"); shift 2 ;;
     --xr-sdk-pythonpath)
       xr_sdk_pythonpath_override="${2:?missing XR SDK Python path}"; shift 2 ;;
+    --xr-sdk-library-dir)
+      xr_sdk_library_dir_override="${2:?missing XR SDK library directory}"; shift 2 ;;
     --pico-overlay) pico_overlay=true; shift ;;
     --xr-overlay) xr_overlay=true; shift ;;
     --ik-target-overlay) ik_target_overlay=true; shift ;;
@@ -54,6 +62,10 @@ while (($#)); do
     --joint-limit-source) joint_limit_source="${2:?missing joint limit source}"; shift 2 ;;
     --operator-input) operator_input_override="${2:?missing operator input}"; shift 2 ;;
     --arm-input) arm_input_override="${2:?missing arm input}"; shift 2 ;;
+    --pico-calibration-dir) pico_calibration_dir_override="${2:?missing PICO calibration directory}"; shift 2 ;;
+    --pico-app-package) pico_app_package_override="${2:?missing PICO APK package}"; shift 2 ;;
+    --pico-ros-domain) pico_ros_domain_override="${2:?missing PICO ROS domain}"; shift 2 ;;
+    --pico-startup-timeout-s) pico_startup_timeout_override="${2:?missing PICO startup timeout}"; shift 2 ;;
     --record) record_path="${2:-}"; shift 2 ;;
     --h5|--input) input_path="${2:-}"; shift 2 ;;
     --speed) playback_speed="${2:-}"; shift 2 ;;
@@ -79,14 +91,16 @@ while (($#)); do
       printf '%s\n' \
         '用法: run_session.sh --profile PROFILE [--record PATH] [--observation-config PATH] [--disable-hands] [--confirm-real] [--h5 PATH] [--speed RATE] [--viewer|--headless]' \
         '显示模式：h5_sim 默认打开 MuJoCo viewer；追加 --headless 可显式启用无窗口模式。' \
-        '新双输入配置只读检查：--profile {pico2_hands_sim|vr_manus_sim|vr_manus_xr_sim} --resolve-only。' \
+        '新双输入配置只读检查：--profile {pico2_hands_sim|vr_manus_sim|vr_manus_xr_sim|pico_vr_manus_sim} --resolve-only。' \
         '仅新PICO入口可选：--operator-input gesture（armed下双手先释放再张开0.8秒请求启动，默认keyboard）。' \
         'VR+Manus仿真：--profile vr_manus_sim --manus-rawviz PATH --manus-user USER；仅双臂使用 --disable-hands。' \
-        'XR+Manus仿真：--profile vr_manus_xr_sim --manus-rawviz PATH --manus-user USER [--arm-input {xr_tracker|xr_controller}]。' \
-        'XR原生SDK路径：可选 --xr-sdk-pythonpath PATH（仅注入 XR 采集进程，也可用 TIANJI_XR_SDK_PYTHONPATH）。' \
-        'XR原始可视化：--profile vr_manus_xr_sim --viewer --xr-overlay（仅显示头显、控制器和Tracker）。' \
+        'XR+Manus仿真：--profile vr_manus_xr_sim --manus-rawviz PATH --manus-user USER（默认只用头显+双手柄，不需要Tracker）。' \
+        'XR原生SDK路径：--xr-sdk-pythonpath PATH 配 Python 扩展，--xr-sdk-library-dir PATH 配 libPXREARobotSDK.so（仅注入 XR 采集进程；也可用对应 TIANJI_XR_SDK_* 环境变量）。' \
+        'XR本地运行时：若 vendor/xr_sdk/python 和 vendor/xr_sdk/lib 存在会自动发现；可用 pixi run build-xr-sdk 构建。ADB映射使用 pixi run xr-adb（60061/63901），不操作 PICO2 的 10002。' \
+        'XR原始可视化：--profile vr_manus_xr_sim --viewer --xr-overlay（只读显示头显和控制器；额外Tracker若存在也不参与控制）。' \
         'VR诊断/录制：--spark-overlay --record NEW.h5（父目录须存在）；h 回Home，r 联合重置，再用新输入和 s 启动。' \
         'hand_tracking 仿真可选：--ik-backend NAME --joint-trajectory {passthrough|ruckig} --command-step-clipping {true|false} --arm-target-processor {passthrough|conditioned}' \
+        '内嵌旧版 PICO+手柄入口：--profile pico_vr_manus_sim；上游可选 --pico-calibration-dir PATH --pico-app-package PACKAGE --pico-ros-domain ID --pico-startup-timeout-s SECONDS --adb-serial SERIAL。' \
         'PICO 仿真位姿映射：--arm-pose-mapper {relative_home|head_direct|head_palm_direct}（默认 relative_home）' \
         'PICO 原始头显/手腕/26点骨架显示：--profile hand_tracking_sim --viewer --pico-overlay（兼容 --disable-hands）' \
         'Dexhand QP 仿真限位来源：--joint-limit-source {yaml|urdf}（默认 yaml，保留硬限位检查）' \
@@ -103,6 +117,14 @@ if [[ -z "${profile}" ]]; then
   printf '%s\n' '错误：必须指定 --profile。' >&2
   exit 2
 fi
+if [[ -n "${pico_calibration_dir_override}${pico_app_package_override}${pico_ros_domain_override}${pico_startup_timeout_override}" &&
+      "${profile}" != pico_vr_manus_sim ]]; then
+  printf '%s\n' '错误：--pico-calibration-dir/--pico-app-package/--pico-ros-domain/--pico-startup-timeout-s 仅支持 pico_vr_manus_sim。' >&2
+  exit 2
+fi
+if [[ "${profile}" == pico_vr_manus_sim ]]; then
+  exec bash "${SCRIPT_DIR}/run_embedded_pico_vr_session.sh" "${original_args[@]}"
+fi
 hand_tracking_simulation=false
 if [[ -n "${operator_input_override}" && "${profile}" != pico2_hands_sim &&
       "${profile}" != vr_manus_xr_sim ]]; then
@@ -113,8 +135,8 @@ if [[ -n "${arm_input_override}" && "${profile}" != vr_manus_xr_sim ]]; then
   printf '%s\n' '错误：--arm-input 仅支持 vr_manus_xr_sim。' >&2
   exit 2
 fi
-if [[ -n "${xr_sdk_pythonpath_override}" && "${profile}" != vr_manus_xr_sim ]]; then
-  printf '%s\n' '错误：--xr-sdk-pythonpath 仅支持 vr_manus_xr_sim。' >&2
+if [[ -n "${xr_sdk_pythonpath_override}${xr_sdk_library_dir_override}" && "${profile}" != vr_manus_xr_sim ]]; then
+  printf '%s\n' '错误：XR SDK 路径参数仅支持 vr_manus_xr_sim。' >&2
   exit 2
 fi
 pico_simulation=false
@@ -128,7 +150,7 @@ if [[ "${profile}" == pico2_hands_sim || "${profile}" == vr_manus_sim ||
         "${confirm_real}" == true || "${pico_overlay}" == true || "${ik_target_overlay}" == true ||
         "${xr_overlay}" == true ||
         ${#extra_args[@]} -gt 0 || ${#dual_runtime_args[@]} -gt 0 ||
-        -n "${xr_sdk_pythonpath_override}" ]]; }; then
+        -n "${xr_sdk_pythonpath_override}${xr_sdk_library_dir_override}" ]]; }; then
     printf '%s\n' '错误：--resolve-only 不接受采集、录制、显示或未识别的运行参数。' >&2
     exit 2
   fi
@@ -378,7 +400,12 @@ if [[ "${ik_backend_override}" == pico_ee_dexhand_qp ]]; then
   coordinator_config=coordinator/arm_v131.yaml
   joint_trajectory_override="${joint_trajectory_override:-passthrough}"
   command_clipping_override="${command_clipping_override:-false}"
-  target_processor_override="${target_processor_override:-passthrough}"
+  # PICO2 keeps its historical direct-QP default.  The XR controller-only
+  # profile owns the reference controller_only conditioner in its target
+  # config; only an explicit CLI override may bypass it.
+  if [[ "${profile}" != "vr_manus_xr_sim" ]]; then
+    target_processor_override="${target_processor_override:-passthrough}"
+  fi
 fi
 [[ -z "${joint_trajectory_override}" ]] || export TIANJI_JOINT_TRAJECTORY_PROCESSOR="${joint_trajectory_override}"
 [[ -z "${command_clipping_override}" ]] || export TIANJI_COMMAND_STEP_CLIPPING="${command_clipping_override}"
@@ -451,12 +478,42 @@ validate_manus_runtime(manus)
 PY
 fi
 if [[ "${xr_manus_simulation}" == true ]]; then
+  # XRoboToolkit is optional and scoped to this observation process. A
+  # locally built bundle is preferred only when no explicit CLI/environment
+  # path was supplied; PICO2 never evaluates this branch.
+  xr_sdk_default_pythonpath="${BUNDLE_ROOT}/vendor/xr_sdk/python"
+  xr_sdk_default_library_dir="${BUNDLE_ROOT}/vendor/xr_sdk/lib"
   xr_sdk_pythonpath="${xr_sdk_pythonpath_override:-${TIANJI_XR_SDK_PYTHONPATH:-}}"
+  xr_sdk_library_dir="${xr_sdk_library_dir_override:-${TIANJI_XR_SDK_LIBRARY_DIR:-}}"
+  if [[ -z "${xr_sdk_pythonpath}" && -d "${xr_sdk_default_pythonpath}" ]]; then
+    xr_sdk_pythonpath="${xr_sdk_default_pythonpath}"
+  fi
+  if [[ -z "${xr_sdk_library_dir}" && -d "${xr_sdk_default_library_dir}" ]]; then
+    xr_sdk_library_dir="${xr_sdk_default_library_dir}"
+  fi
+  if [[ -n "${xr_sdk_pythonpath}" && ! -d "${xr_sdk_pythonpath}" ]]; then
+    printf '错误：XR SDK Python path 不存在: %s\n' "${xr_sdk_pythonpath}" >&2
+    exit 1
+  fi
+  if [[ -n "${xr_sdk_library_dir}" && ! -d "${xr_sdk_library_dir}" ]]; then
+    printf '错误：XR SDK library directory 不存在: %s\n' "${xr_sdk_library_dir}" >&2
+    exit 1
+  fi
+  xr_sdk_ld_library_path="${LD_LIBRARY_PATH:-}"
+  if [[ -n "${xr_sdk_library_dir}" ]]; then
+    if [[ -n "${xr_sdk_ld_library_path}" ]]; then
+      xr_sdk_ld_library_path="${xr_sdk_library_dir}:${xr_sdk_ld_library_path}"
+    else
+      xr_sdk_ld_library_path="${xr_sdk_library_dir}"
+    fi
+  fi
   if ! TIANJI_XR_SDK_PYTHONPATH="${xr_sdk_pythonpath}" \
+       TIANJI_XR_SDK_LIBRARY_DIR="${xr_sdk_library_dir}" \
+       LD_LIBRARY_PATH="${xr_sdk_ld_library_path}" \
        PYTHONPATH="${BUNDLE_ROOT}/src/tianji_teleop${PYTHONPATH:+:${PYTHONPATH}}" \
-       pixi run python "${SCRIPT_DIR}/check_xr_sdk.py"; then
+       pixi run python "${SCRIPT_DIR}/check_xr_sdk.py" --arm-input "${arm_input_override}"; then
     printf '%s\n' \
-      '错误：XRoboToolkit SDK 预检失败；请安装兼容 Pybind 并通过 --xr-sdk-pythonpath 或 TIANJI_XR_SDK_PYTHONPATH 指定。' \
+      '错误：XRoboToolkit SDK 预检失败；请安装兼容 Pybind/companion library，并通过 --xr-sdk-pythonpath、--xr-sdk-library-dir 或对应 TIANJI_XR_SDK_* 变量指定。' \
       >&2
     exit 1
   fi
@@ -748,7 +805,13 @@ export TIANJI_REQUIRED_CAPABILITY="${required_capability}"
 activate_bundle_runtime
 mode="simulation"
 [[ "${required_capability}" == real ]] && mode=real
-acquire_teleop_guard "${profile}"
+guard_conflicts=()
+case "${profile}" in
+  hand_tracking_sim|pico2_hands_sim|hand_tracking_sim_manus|vr_manus_xr_sim)
+    guard_conflicts=("${TELEOP_DEVICE_ROUTE_MODES[@]}")
+    ;;
+esac
+acquire_teleop_guard "${profile}" "${guard_conflicts[@]}"
 if ! existing_tokens="$(read_teleop_node_list)"; then
   release_teleop_guard
   printf '%s\n' '错误：无法完成启动前 live domain preflight。' >&2
@@ -985,7 +1048,9 @@ if [[ "${hand_tracking_simulation}" == true ]]; then
 elif [[ "${xr_manus_simulation}" == true ]]; then
   observation_args=(
     "${base_env[@]}"
-    "TIANJI_XR_SDK_PYTHONPATH=${xr_sdk_pythonpath_override:-${TIANJI_XR_SDK_PYTHONPATH:-}}"
+    "TIANJI_XR_SDK_PYTHONPATH=${xr_sdk_pythonpath}"
+    "TIANJI_XR_SDK_LIBRARY_DIR=${xr_sdk_library_dir}"
+    "LD_LIBRARY_PATH=${xr_sdk_ld_library_path}"
     "TIANJI_COMPONENT_INSTANCE_ID=${observation_instance}"
     "TIANJI_SOURCE_INSTANCE_ID=${observation_instance}"
     bash "${SCRIPT_DIR}/run_source.sh"

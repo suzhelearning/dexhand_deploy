@@ -7,7 +7,26 @@ tests/logs
 build/
 log/
 staging/
+/install/
+/recordings/
+/MUJOCO_LOG.TXT
 
 # 本地便携运行包和厂商二进制；由构建或受控离线包提供。
 runtime
 vendor
+
+# The legacy PICO driver is embedded as source, while generated environments,
+# build products, logs, recordings, and runtime state remain local-only.
+!vendor/
+vendor/*
+!vendor/pico_tracker/
+!vendor/pico_tracker/**
+vendor/pico_tracker/.pixi/
+vendor/pico_tracker/build/
+vendor/pico_tracker/install/
+vendor/pico_tracker/log/
+vendor/pico_tracker/recordings/
+vendor/pico_tracker/runtime/
+vendor/pico_tracker/.pytest_cache/
+vendor/pico_tracker/**/__pycache__/
+vendor/pico_tracker/**/*.py[cod]

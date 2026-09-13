@@ -11,7 +11,9 @@ import os
 _METHODS = frozenset({'append_dual_audit', 'append_dual_audit_batch',
     'append_raw_reference_tjvr', 'append_manus_callback', 'append_arm_command',
     'append_arm_state', 'append_hand_command', 'append_hand_state',
-    'append_session_state', 'append_raw_pico', 'flush', 'close', 'abort'})
+    'append_session_state', 'append_raw_pico', 'append_live_cycle_snapshot',
+    'append_live_cycle_snapshot_batch',
+    'flush', 'close', 'abort'})
 
 
 def _writer_main(connection, path, options):
@@ -20,7 +22,11 @@ def _writer_main(connection, path, options):
     failed = False
     try:
         try:
-            writer = SessionH5Writer(path, **options)
+            writer_type = SessionH5Writer
+            if options.get('source_type') == 'vr_manus_sim':
+                from .buffered_session_h5 import BufferedSessionH5Writer
+                writer_type = BufferedSessionH5Writer
+            writer = writer_type(path, **options)
         except Exception as exc:
             connection.send((False, type(exc).__name__, str(exc)))
             return

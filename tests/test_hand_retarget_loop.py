@@ -25,7 +25,7 @@ class HandRetargetLoopTest(unittest.TestCase):
             time.sleep(.005)
         self.assertTrue(predicate())
 
-    def setup_loop(self, backend=None):
+    def setup_loop(self, backend=None, **options):
         module = 'tianji_teleop.producers.hand_retarget_loop'
         self.assertIsNotNone(importlib.util.find_spec(module))
         from tianji_teleop.producers.hand_retarget_loop import HandRetargetLoop
@@ -33,7 +33,8 @@ class HandRetargetLoopTest(unittest.TestCase):
             router_zid='router', coordinator_instance_id='coord', receiver_instance_id='source',
             freshness_ns=1_000_000_000)
         source, published = Source(), []
-        loop = HandRetargetLoop(producer, source, publish=published.append, clock=lambda: 1_000_000_000)
+        loop = HandRetargetLoop(producer, source, publish=published.append, clock=lambda: 1_000_000_000,
+                                **options)
         self.addCleanup(loop.close)
         return loop, source, published
 
@@ -80,7 +81,10 @@ class HandRetargetLoopTest(unittest.TestCase):
     def test_readiness_needs_fresh_valid_required_sides(self):
         loop, source, _ = self.setup_loop()
         self.assertTrue(hasattr(loop, 'status'))
-        self.assertFalse(loop.status(1_000_000_000, ('left', 'right')).ready)
+        waiting = loop.status(1_000_000_000, ('left', 'right'))
+        self.assertFalse(waiting.ready)
+        self.assertEqual(waiting.diagnostics['readiness_reason'],
+                         'waiting for first Manus callback')
         source.rows.append(self.row())
         self.wait_until(lambda: loop.processed_callbacks == 1)
         status = loop.status(1_000_000_000, ('left', 'right'))
@@ -98,6 +102,50 @@ class HandRetargetLoopTest(unittest.TestCase):
         self.wait_until(lambda: loop.failure is not None)
         self.assertIn('age_ns=2000000000', loop.failure)
         self.assertEqual(published, [])
+
+    def test_expired_input_is_audited_and_fresh_input_recovers_without_auto_start(self):
+        discarded = []
+        loop, source, published = self.setup_loop(drop_expired_inputs=True,
+                                                  expired_input_sink=discarded.append)
+        loop._clock = lambda: 3_000_000_000
+        source.rows.append(self.row())
+        self.wait_until(lambda: len(discarded) == 1)
+        self.assertIsNone(loop.failure)
+        self.assertFalse(loop.status(3_000_000_000, ('left', 'right')).ready)
+        self.assertEqual(loop.processed_callbacks, 0)
+        self.assertEqual(discarded[0]['callback_sequence'], 1)
+        self.assertEqual(discarded[0]['age_ns'], 2_000_000_000)
+        source.rows.append(replace(self.row(), sequence=2, received_timestamp_ns=3_000_000_000))
+        self.wait_until(lambda: loop.processed_callbacks == 1)
+        self.assertTrue(loop.status(3_000_000_000, ('left', 'right')).ready)
+        self.assertEqual(published, [])
+
+    def test_expired_input_policy_does_not_hide_wrong_receiver(self):
+        loop, source, published = self.setup_loop(drop_expired_inputs=True)
+        loop._clock = lambda: 3_000_000_000
+        source.rows.append(replace(self.row(), receiver_instance_id='wrong'))
+        self.wait_until(lambda: loop.failure is not None)
+        self.assertEqual(published, [])
+
+    def test_latest_selection_processes_newest_and_audits_every_skipped_callback(self):
+        skipped = []
+        loop, source, published = self.setup_loop(drop_expired_inputs=True,
+            latest_input_only=True, expired_input_sink=skipped.append)
+        source.rows.extend([replace(self.row(), sequence=i) for i in range(1, 11)])
+        self.wait_until(lambda: loop.processed_callbacks == 1)
+        self.assertEqual(loop.producer.input_snapshot['sequence'], 10)
+        self.assertEqual([row['callback_sequence'] for row in skipped], list(range(1, 10)))
+        self.assertTrue(all(row['reason'] == 'superseded_before_retarget' for row in skipped))
+        self.assertTrue(loop.status(1_000_000_000, ('left', 'right')).ready)
+        self.assertEqual(published, [])
+
+    def test_expired_input_policy_does_not_hide_duplicate_sequence(self):
+        discarded = []
+        loop, source, _ = self.setup_loop(drop_expired_inputs=True, expired_input_sink=discarded.append)
+        loop._clock = lambda: 3_000_000_000
+        source.rows.extend([self.row(), self.row()])
+        self.wait_until(lambda: loop.failure is not None)
+        self.assertEqual(len(discarded), 1)
 
     def test_new_callback_after_control_tick_cutoff_does_not_hide_previous_fresh_input(self):
         loop, source, _ = self.setup_loop()

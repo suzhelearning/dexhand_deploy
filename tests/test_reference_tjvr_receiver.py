@@ -1,4 +1,5 @@
 import struct
+from threading import Event, Thread
 import unittest
 import zlib
 
@@ -55,6 +56,47 @@ class ReferenceReceiverTest(unittest.TestCase):
         self.assertEqual(source.try_read_latest().observation.frame.sequence, 2)
         self.assertIsNone(source.try_read_latest())
         self.assertEqual(source.stats()['superseded'], 1)
+
+    def test_slow_raw_callback_does_not_block_previous_latest(self):
+        entered = Event()
+        release = Event()
+
+        def slow_callback(_frame):
+            entered.set()
+            release.wait(1.0)
+
+        source = receiver.ReferenceTjvrReceiver(
+            'test', .15, .6, raw_frame_sink=slow_callback
+        )
+        source.ingest(packet(1), 100)
+        reader_done = Event()
+        consumed = []
+
+        def read_latest():
+            consumed.append(source.try_read_latest())
+            reader_done.set()
+
+        ingest_thread = Thread(
+            target=lambda: source.ingest(packet(2), 101), daemon=True
+        )
+        reader_thread = Thread(target=read_latest, daemon=True)
+        ingest_thread.start()
+        self.assertTrue(entered.wait(1.0))
+        reader_thread.start()
+        try:
+            self.assertTrue(
+                reader_done.wait(.1),
+                'slow raw callback must not hold the latest-frame lock',
+            )
+        finally:
+            release.set()
+            ingest_thread.join(1.0)
+            reader_thread.join(1.0)
+        self.assertFalse(ingest_thread.is_alive())
+        self.assertFalse(reader_thread.is_alive())
+        self.assertIsNotNone(consumed[0])
+        self.assertEqual(consumed[0].observation.frame.sequence, 1)
+        self.assertEqual(source.try_read_latest().observation.frame.sequence, 2)
 
     def test_resynchronization_generation_survives_superseding(self):
         source = self.make()

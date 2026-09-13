@@ -31,6 +31,27 @@ class HandRetargetResultTest(unittest.TestCase):
             self.assertEqual(result[side]['joint_names'], list(HAND_JOINT_NAMES[side]))
             self.assertEqual(result[side]['position_rad'], self.row()[side]['position_rad'])
 
+    def test_latest_sampling_preserves_filter_continuity_and_raw_identity(self):
+        import json
+        module = self.module()
+        seen = []
+        def exchange(client, request):
+            row = json.loads(request)
+            seen.append(row['callback_sequence'])
+            result = self.row()
+            result.update(callback_sequence=row['callback_sequence'], timestamp_ns=row['timestamp_ns'])
+            return result
+        with patch.object(module.OfficialHandClient, '_exchange', exchange):
+            client = module.OfficialHandClient(python=sys.executable, script=__file__,
+                                               filter_continuity_ns=200_000_000)
+            self.addCleanup(client.close)
+            for seq, stamp in [(3, 1), (10, 20_000_001), (20, 300_000_001), (25, 320_000_001)]:
+                result = client.retarget([0.] * 126, sequence=seq, timestamp_ns=stamp)
+                self.assertEqual(result['callback_sequence'], seq)
+            self.assertEqual(seen, [1, 2, 4, 5])
+            with self.assertRaises(ValueError):
+                client.retarget([0.] * 126, sequence=24, timestamp_ns=330_000_001)
+
     def test_wrong_sequence_nonfinite_wrong_side_and_partial_frame_rejected(self):
         for field in ('sequence', 'nan', 'side', 'partial'):
             row = self.row()
@@ -54,6 +75,29 @@ class HandRetargetResultTest(unittest.TestCase):
             with patch.object(module.subprocess, 'Popen', side_effect=spawn):
                 client = module.OfficialHandClient(python=sys.executable, script=__file__)
                 client.close()
+
+    @unittest.skipUnless(os.environ.get('WUJI_REFERENCE_TEST'), 'optional pinned official hand process')
+    def test_sampled_inputs_match_continuous_official_filter_and_gap_reset(self):
+        import numpy as np
+        root = Path(__file__).resolve().parents[1]
+        clients = []
+        for options in ({'filter_continuity_ns': 200_000_000}, {}):
+            client = self.module().OfficialHandClient(
+                python=root / 'tools/wuji_hand_native/.pixi/envs/default/bin/python',
+                script=root / 'scripts/wuji_hand_worker.py', startup_handshake=True, **options)
+            self.addCleanup(client.close)
+            clients.append(client)
+        for raw, internal, stamp, bend in [(3, 1, 1, 0.), (10, 2, 20_000_001, .01),
+                                          (20, 4, 300_000_001, .02), (25, 5, 320_000_001, .005)]:
+            points = [0., 0., 0.]
+            for finger in range(5):
+                for joint in range(4):
+                    points.extend([.02 * (finger - 2), .02 * (joint + 1), bend * joint])
+            actual = clients[0].retarget(points + points, sequence=raw, timestamp_ns=stamp)
+            expected = clients[1].retarget(points + points, sequence=internal, timestamp_ns=stamp)
+            self.assertEqual(actual['callback_sequence'], raw)
+            for side in ('left', 'right'):
+                np.testing.assert_allclose(actual[side]['position_rad'], expected[side]['position_rad'], atol=1e-10)
 
     @unittest.skipUnless(os.environ.get('WUJI_REFERENCE_TEST'), 'optional pinned official hand process')
     def test_startup_handshake_does_not_consume_a_callback(self):

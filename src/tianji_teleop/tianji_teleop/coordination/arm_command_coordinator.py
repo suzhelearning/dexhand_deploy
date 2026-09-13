@@ -360,6 +360,9 @@ class ArmCommandCoordinator:
     def _publish(self, name: str, payload: Mapping[str, Any]) -> None:
         publisher = self._publishers.get(name)
         if publisher is not None:
+            if hasattr(publisher, "put_json"):
+                publisher.put_json(payload)
+                return
             publisher.put(json.dumps(payload, separators=(",", ":")).encode("utf-8"), encoding="application/json")
 
     def _publish_session_snapshot(self) -> None:
@@ -720,13 +723,28 @@ class ArmCommandCoordinator:
     def _return_ready(self, now_ns: int) -> bool:
         return self._arm_at_home(now_ns) and (not self._hand_enabled() or self._hand_at_zero_ready(now_ns))
 
+    def _domain_readiness_detail(self, role: str, now_ns: int) -> str | None:
+        """Expose a component's own wait/failure reason in an intent result."""
+        for (entry_role, _), timed in self._statuses.items():
+            if entry_role != role or not self._fresh(timed, now_ns):
+                continue
+            if timed.value.error:
+                return timed.value.error
+            diagnostics = timed.value.diagnostics
+            detail = diagnostics.get('readiness_reason') if isinstance(diagnostics, Mapping) else None
+            if isinstance(detail, str) and detail:
+                return detail
+        return None
+
     def _start_ready(self, now_ns: int) -> tuple[bool, str]:
         for role in ("source", "producer_arm", "executor_arm"):
             if not self._domain_ready(role, now_ns):
                 return False, f"{role} not exactly-one fresh healthy ready"
         if self._hand_enabled():
             if not self._domain_ready("producer_hand", now_ns):
-                return False, "producer_hand not exactly-one fresh healthy ready"
+                detail = self._domain_readiness_detail("producer_hand", now_ns)
+                suffix = f": {detail}" if detail else ""
+                return False, "producer_hand not exactly-one fresh healthy ready" + suffix
             if not all(self._hand_at_zero_ready(now_ns) for _ in (0,)):
                 return False, "hand executor/state not fresh at zero"
         if not self._fresh(self._arm_state, now_ns) or not self._arm_at_home(now_ns):

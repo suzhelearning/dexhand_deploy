@@ -13,10 +13,35 @@ class XrSessionConfigTest(unittest.TestCase):
         )
         result = config_loader.resolve_dual_session_config(value, disable_hands=False)
         self.assertEqual(result["input_mode"], "vr_manus")
-        self.assertEqual(result["arm_input"], "xr_tracker")
+        self.assertEqual(result["arm_input"], "xr_controller")
         self.assertEqual(result["receivers"], ["manus", "xr"])
         self.assertEqual(result["arm_pose_mapper"], "xr_incremental")
+        self.assertEqual(result["arm_target_processor"], "conditioned")
         self.assertFalse(result["requires_upper_limb_skeleton"])
+
+    def test_xr_manus_default_is_controller_only_and_has_no_tracker_requirement(self):
+        value = config_loader.load_yaml(
+            config_loader.component_path("sources/xr_manus_observation.yaml")
+        )
+        self.assertEqual(value["xr"]["arm_input"], "xr_controller")
+        self.assertEqual(value["xr"]["tracker_serials"], {})
+        self.assertEqual(value["xr"]["elbow_tracker_serials"], {})
+
+    def test_xr_controller_defaults_match_reference_controller_only_conditioning(self):
+        from tianji_teleop.hand_tracking.target_node import _load_config
+
+        value = _load_config(
+            config_loader.component_path("sources/hand_tracking_target_xr_manus.yaml")
+        )
+        self.assertEqual(value["arm_pose_mapper_config"]["expected_tracked_frame"], "controller")
+        self.assertEqual(value["arm_pose_mapper_config"]["min_cutoff"], 1.2)
+        self.assertEqual(value["arm_pose_mapper_config"]["beta"], 0.45)
+        self.assertFalse(value["arm_pose_mapper_config"]["dynamic_elbow_direction"])
+        self.assertEqual(value["arm_target_processor"], "conditioned")
+        self.assertEqual(value["arm_target_processor_config"]["translation_gain"], [0.90, 0.90, 0.90])
+        self.assertEqual(value["arm_target_processor_config"]["workspace_relative_radii_m"], [0.42, 0.38, 0.38])
+        self.assertEqual(value["arm_target_processor_config"]["maximum_linear_speed_m_s"], 0.36)
+        self.assertEqual(value["arm_target_processor_config"]["maximum_angular_speed_rad_s"], 1.55)
 
     def test_xr_controller_can_be_selected_without_changing_hand_input(self):
         value = config_loader.load_yaml(
@@ -88,7 +113,7 @@ class XrSessionConfigTest(unittest.TestCase):
         value = _load_config(
             config_loader.component_path("sources/xr_manus_observation.yaml")
         )
-        self.assertEqual(value["xr"]["arm_input"], "xr_tracker")
+        self.assertEqual(value["xr"]["arm_input"], "xr_controller")
         self.assertIsNone(value["manus"]["user"])
         self.assertIsNone(value["manus"]["rawviz"])
         self.assertIsNone(value["manus"]["library_dir"])

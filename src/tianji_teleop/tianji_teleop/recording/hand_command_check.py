@@ -2,7 +2,8 @@
 
 The explicit offline solver owns no router, coordinator or executor. This does
 not reproduce authorization decisions or prove that a recorded command was
-executed. Every callback, including idle callbacks, advances the original bridge.
+executed. Every callback, including idle callbacks, advances the original bridge,
+except inputs explicitly audited as expired before live retargeting.
 """
 import hashlib
 import json
@@ -119,6 +120,8 @@ def check_manus_hand_commands(path, *, root, backend_factory=None, input_atol=1e
             if not _asset_matches(recorded_assets, root, asset, digest):
                 raise ValueError(f'hand replay asset provenance mismatch: {asset}')
         callbacks = reader.read_manus_callbacks()
+        expired = {row['payload']['callback_sequence'] for row in reader.read_dual_audit()
+                   if row['kind'] in ('manus_expired_input', 'manus_superseded_input')}
         commands = {side: reader.read_hand_command(side) for side in ('left', 'right')}
     index = {}
     for side, rows in commands.items():
@@ -132,16 +135,23 @@ def check_manus_hand_commands(path, *, root, backend_factory=None, input_atol=1e
     callback_sequences = {row['callback_sequence'] for row in callbacks}
     if any(sequence not in callback_sequences for _, sequence in index):
         raise ValueError('recorded hand command has no associated callback')
+    if not expired <= callback_sequences or any(sequence in expired for _, sequence in index):
+        raise ValueError('expired Manus callback audit conflicts with raw inputs or commands')
     root = Path(root).resolve(strict=True)
     sides = configuration['manus_input_contract']['sides']
     factory = backend_factory if backend_factory is not None else OfficialHandClient
+    options = {}
+    if 'manus_filter_continuity_ns' in configuration:
+        options['filter_continuity_ns'] = configuration['manus_filter_continuity_ns']
     backend = factory(python=root / 'tools/wuji_hand_native/.pixi/envs/default/bin/python',
         script=root / 'scripts/wuji_hand_worker.py', single_hand_side='left' if sides == ['left'] else 'right',
-        startup_handshake=True)
+        startup_handshake=True, **options)
 
     try:
         for callback in callbacks:
             sequence = callback['callback_sequence']
+            if sequence in expired:
+                continue  # Live discarded this input before advancing retarget state.
             result = backend.retarget(callback['points'], sequence=sequence,
                                       timestamp_ns=callback['received_timestamp_ns'])
             report['replayed_callbacks'] += 1

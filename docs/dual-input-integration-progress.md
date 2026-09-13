@@ -1,26 +1,35 @@
-# 双输入接入进度（2026-09-10）
+# 双输入接入进度（2026-09-13）
 
-当前是**离线联合仿真可验证，PICO2与VR+Manus均已有受管实时仿真入口，整体方案仍未完成**的阶段。未提交或push；未连接真实PICO/Manus做本轮设备验收，真机没有启动或验收。
+当前目标已收敛为两条路线：**PICO2裸手**与**PICO头显＋双VR手柄＋Manus**。两条路线均已有受管实时仿真入口。PICO2 当前分支已完成真实设备人工试运行；原版 PICO＋VR 手柄链路已完成真实设备人工遥操；当前分支内嵌入口已完成启动及机械臂动作冒烟。Tracker 不属于本阶段目标。本轮工作区未重新接入真实 PICO/Manus，因此完整带 Manus 的当前分支 H5 验收、模式切换压力和长期运行仍未完成。
 
-本轮最新验证：**905项 Python 测试通过、53项按环境条件跳过（49.622秒）**。当前 `build` 目录未发现可运行的 CTest 用例，因此不把 CTest 作为本轮通过证据。本轮覆盖 XR 连接代次/重连安全、raw HDF5代次记录、控制器事件代次切换、运行中目标参考拒绝、SDK API预检/释放、NumPy/可迭代 Tracker 返回值、raw XR录制核验、XR操作观察审计、publisher身份接线、只读 XR 设备探针、126-float Manus callback 兼容、Manus rawviz 工作目录固定及 XR+Manus 目标层离线 smoke；PICO2 受保护链路未改动。PICO合成测试产物与官方Hand2原版1339帧对照差值0为此前独立证据；下方较小测试计数和历史快照不覆盖这一最新结果。
+本轮最新验证：**990项 Python 测试中935项执行通过、55项按环境条件跳过**；PICO2官方手受管 smoke（含高度标定失败/重试、显式手势START、追踪丢失保持/恢复、双overlay）和 XR 控制器＋Manus→MuJoCo 全链路 smoke 均返回`passed=true`。内嵌 PICO bundle 的 ROS2 CTest 为 **29/29 通过**。控制器-only夹具明确模拟零 Tracker，仍验证双臂、官方Hand2双手和Home回位。本轮覆盖 XR 连接代次/重连安全、raw HDF5代次记录、控制器事件代次切换、运行中目标参考拒绝、SDK API预检/原生库预加载/释放、controller-only 无 Tracker API 预检和运行时无 Tracker API 采集、raw XR录制核验、XR操作观察审计、publisher身份接线、只读 XR 设备探针、控制器-only无 Tracker 探针、126-float Manus callback 兼容、Manus rawviz 工作目录固定及 XR+Manus 目标层离线 smoke，以及本轮共享设备路由锁、异常孤儿进程恢复、冲突清理隔离、PID 身份保护和多设备 ADB 绑定回归；PICO2 受保护链路未改动。此前的 PICO2 和原版 PICO＋VR 手柄人工测试另作为现场反馈记录，不与本轮软件回归混称。上述软件结果不替代完整设备验收。
 
-实物测试按用户安排暂缓。本轮仅完成软件回归与验收准备，不将合成输入、离线对照或库加载检查作为真实设备验收。操作单见[真实输入设备→仿真验收](real-input-simulation-acceptance.md)。
+本轮新增 XR 运行时部署能力：从用户指定的 Pybind 源码和 `libPXREARobotSDK.so` 编译
+`xrobotoolkit_sdk` 到 Git 忽略的 `vendor/xr_sdk`，`vr_manus_xr_sim` 自动发现并只向
+XR 观察进程注入 Python/库路径；新增 XR 专用 `adb reverse`（60061/63901），不改动
+PICO2 的 10002 forward。当前机器已完成同源 x86_64/Python 3.10 扩展编译和
+controller-only API 导入校验，并迁移旧机同版本 PC-Service 到 Git 忽略的
+`vendor/xr_pc_service`；新增 `xr-service --check`/前台启动入口。真实设备探针与验收尚未执行。
+
+实物测试按用户安排暂缓。本轮未重新接入设备，仅完成软件回归与验收准备；此前已有人工作动验证，但尚未形成当前分支带 Manus 的完整 H5 验收记录。操作单见[真实输入设备→仿真验收](real-input-simulation-acceptance.md)。
 
 ## 当前交付边界（优先于下方历史记录）
 
 | 项目 | 当前状态 | 尚缺内容 |
 |---|---|---|
-| PICO2裸手→v131双臂+官方Hand2仿真 | 受管入口及合成闭环可运行 | 当前实物输入验收、长期负载 |
-| 外部PICO_tracker TJVR+Manus→SPARK+官方Hand2仿真 | 受管入口、离线原版对照可运行 | 同步真实输入验收、长期负载 |
-| 停止后切换 | VR→PICO→VR同router/运行目录验证通过 | VR带实时手套的反复切换压力验证 |
+| PICO2裸手→v131双臂+官方Hand2仿真 | 受管入口、合成闭环及当前分支真实 PICO2 人工试运行已完成 | 正式 H5 验收、长期负载和更完整手型记录 |
+| 内嵌原版 PICO wholebody→M0→TJVR→SPARK/Hand2 仿真 | 源码 bundle、独立构建入口、分阶段 readiness、受管 supervisor 已实现；已完成启动及机械臂动作人工冒烟 | 当前分支带 Manus 手套的完整实机 H5、两路切换压力和长期运行 |
+| 历史 `vr_manus_sim` TJVR/Tracker+Manus→SPARK+官方Hand2 | 保留旧数据/测试兼容 | 不属于当前目标，不安排本轮设备验收 |
+| 停止后切换 | 共享设备路由 guard、过期 guard 恢复、旧 PICO2 profile 互斥和内嵌孤儿进程回收已有回归覆盖 | 带真实输入的反复切换压力验证 |
 | PICO手势 | 观察/录制和显式双手张开START可用 | 真实手型质量、其余操作绑定 |
-| XR直接控制器/Tracker输入 | 受管采集边界、序列号绑定、增量/离合、控制器事件及 raw 录制已接通 | 当前环境安装/启动 XR SDK 与 PC-Service、真实设备验收 |
+| XR控制器输入 | 控制器-only（无 Tracker）受管采集、增量/离合、控制器事件及 raw 录制已接通；本机 SDK/PC-Service 运行时可检查/启动 | 控制器标定、真实设备采样与验收 |
 | SPARK外层额外平滑 | reference_direct可用 | processed_guarded监督及可信恢复；当前明确拒绝启用 |
 | 两种新真机profile | 保持禁止 | 部署实现、设备/反馈/保护参数与实际验收 |
 
 运行资产摘要是启动预检快照，不是运行中文件防篡改证明。VR新增flat MJCF实际网格引用闭包，连同原有模型/URDF/配置/worker/手套标定摘要进入resolved配置及录制；外部PICO_tracker当前实际加载的标定仍标`external_not_verified`，不能用已取回的历史YAML冒充。
 
-本次尝试只读访问参考机器时，SSH在密钥交换前被远端关闭，未登录、未启动设备；当前ADB设备列表为空。XR SDK实际构建版本和当前四Tracker/控制器绑定尚未确认，因此只把 XR 路线的软件边界标为已接通，不把外部运行环境或真实设备验收描述成已完成。
+本轮已从参考机器迁移同版本 x86_64 PC-Service 运行时到 Git 忽略目录，并通过前台包装器
+完成文件和启动入口检查；尚未启动真实 XR SDK/PC-Service 采样，控制器标定和真实设备验收仍未完成。因此只把 XR 控制器路线的软件边界标为已接通，不把真实设备验收描述成已完成。
 
 ## 已打通的链路
 
@@ -34,23 +43,31 @@
 
 ### XR 原始输入可视化增量（9月10日）
 
-为现场联调增加独立的 `--xr-overlay`。它只订阅 `raw/xr_input`，在 MuJoCo Viewer 的平移诊断区域显示 HMD、左右控制器及当前有效 Tracker；每帧校验 router/receiver 身份、序号和 500ms 新鲜度，拒绝的帧只进入状态诊断。该 overlay 不写入 qpos、不生成目标、不参与 IK/手 retarget，也不改变已有 `--pico-overlay` 或 `pico2_hands_sim` 的默认参数。`--xr-sdk-pythonpath` 仍只注入 XR 采集子进程，避免把外部 SDK 路径传给旧 PICO2、协调器或执行器。
+为现场联调增加独立的 `--xr-overlay`。它只订阅 `raw/xr_input`，在 MuJoCo Viewer 的平移诊断区域显示 HMD 和左右控制器；兼容SDK若返回Tracker也只作被动诊断。每帧校验 router/receiver 身份、序号和 500ms 新鲜度，拒绝的帧只进入状态诊断。该 overlay 不写入 qpos、不生成目标、不参与 IK/手 retarget，也不改变已有 `--pico-overlay` 或 `pico2_hands_sim` 的默认参数。`--xr-sdk-pythonpath` 仍只注入 XR 采集子进程，避免把外部 SDK 路径传给旧 PICO2、协调器或执行器。
 
 XR 入口/可视化定向测试已通过；新增连接代次合同：PC-Service 每次重连从新代次/序号开始，运行中的代次变化会让目标桥接要求重新启动，启动前的重连则替换旧参考。新增 `check_xr_sdk.py` 启动前无副作用 API 预检，并让 XR 客户端关闭时释放已加载 SDK（兼容没有 close hook 的旧绑定）。采集边界同时兼容参考 Pybind 返回的 list 与兼容实现返回的 NumPy/可迭代 Tracker 容器，不用数组真值判断。完整回归中的参考闭包哈希曾因误改只读参考资产而失败，已恢复参考副本原文；修正后872项 Python 测试通过、51项跳过。真实 XR SDK、PC-Service、Tracker/控制器标定和设备验收仍未执行。
 
-新增独立只读 `check_dual_recording.py --mode xr`，逐帧核对 `raw/xr_input` 的 HMD、控制器、Tracker、按键、源时钟有效位/数值、连接代次/序号以及 HDF5 展平列和完整 `XrFrame` JSON；同时核验已录制的 XR 操作观察审计（路由、publisher、动作、代次和序号），并要求 schema 1.2 的完整 JSON 显式保存连接代次。不初始化 SDK、不连接 router、不执行操作事件、IK 或 retarget。相关录制检查测试通过，仍不代替真实设备验收。
+新增独立只读 `check_dual_recording.py --mode xr`，逐帧核对 `raw/xr_input` 的 HMD、控制器、按键、源时钟有效位/数值、连接代次/序号以及 HDF5 展平列和完整 `XrFrame` JSON；兼容字段中的Tracker只做被动一致性检查，不是当前路线必需输入。同时核验已录制的 XR 操作观察审计（路由、publisher、动作、代次和序号），并要求 schema 1.2 的完整 JSON 显式保存连接代次。不初始化 SDK、不连接 router、不执行操作事件、IK 或 retarget。相关录制检查测试通过，仍不代替真实设备验收。
 
 新增 `scripts/probe_teleop_input.py --mode xr` 只读设备探针。它复用当前 XR
-binding 配置和 `XrRoboToolkitSource`，启动前检查 Pybind 必需 API，随后只读取 HMD、
-双控制器和配置的腕部/前臂 Tracker，在 JSON 中报告各信号有效帧数与 200ms 新鲜度；
+binding 配置和 `XrRoboToolkitSource`，启动前按所选输入模式检查 Pybind 必需 API，随后只读取 HMD、
+双控制器以及兼容配置中的Tracker，在 JSON 中报告各信号有效帧数与 200ms 新鲜度；
 不启动 router、Manus、IK、retarget 或任何机器人命令。SDK 路径只存在于探针子进程；
-缺 SDK、PC-Service、绑定 Tracker 或控制器数据时返回失败，便于进入仿真前定位设备侧
-问题。该探针不替代标定、映射和真机安全验收，也不改变 `pico2_hands_sim`。
+缺 SDK、PC-Service 或控制器数据时返回失败；只有显式选择兼容 `xr_tracker` 模式时才要求绑定 Tracker，
+便于进入仿真前定位设备侧问题。当前默认 `xr_controller` 模式不把 Tracker 当作必需输入。
+该探针不替代标定、映射和真机安全验收，也不改变 `pico2_hands_sim`。
+
+本轮补齐参考 `install_sdk.sh` 将 Python 扩展与`libPXREARobotSDK.so`分开安装的部署
+路径：新增 `--xr-sdk-library-dir` / `TIANJI_XR_SDK_LIBRARY_DIR`，在导入 Pybind
+扩展前用绝对路径预加载 companion library，并把该目录的`LD_LIBRARY_PATH`只注入 XR
+采集子进程；PICO2、IK、coordinator、Manus worker 和 MuJoCo 不接收该变量。缺库或
+动态库加载失败会在创建 router/受管进程前失败。该补丁的定向测试和全量回归均已通过，
+但当前机器仍没有实际 XR SDK/PC-Service 设备验收条件。
 
 ### XR+Manus 目标层离线 smoke 增量（9月10日）
 
-新增 `scripts/xr_manus_sim_smoke.py` 及对应的纯内存测试，分别用 `xr_tracker` 和
-`xr_controller` 绑定生成合成 XR 帧，同时按参考 `HandInputAssembler` 的实际扁平
+新增 `scripts/xr_manus_sim_smoke.py` 及对应的纯内存测试，默认用 `xr_controller` 绑定
+生成合成 XR 帧；显式 `xr_tracker` 仅保留兼容回归。同时按参考 `HandInputAssembler` 的实际扁平
 126-float 形状生成 Manus callback。两路数据经过与 `vr_manus_xr_sim` 相同的
 canonical observation 发布、显式 controller start 边沿、`xr_incremental` 映射和
 目标桥，验证未 start 时目标数为零、start 只触发一次、双臂和双手目标持续输出。
@@ -147,6 +164,7 @@ TJVR原包→原版stream gate→最新帧消费→独立原生SPARK→成对pro
 ```bash
 pixi run bash scripts/run_session.sh --profile vr_manus_sim --disable-hands --resolve-only
 pixi run bash scripts/run_session.sh --profile pico2_hands_sim --resolve-only
+pixi run bash scripts/run_session.sh --profile pico_vr_manus_sim --disable-hands --resolve-only
 ```
 
 ## 新PICO2受管仿真入口（9月9日接通）
@@ -164,6 +182,33 @@ PICO已授权且TCP持续提供新帧时，短暂单侧/双侧视觉丢失保持
 失败记录：`5z38rw0l`因raw receiver身份不匹配未就绪；`h3u1aslw`因新入口仍启用旧手target校验而退出遥操。分别修正显式身份绑定及职责分离后重验通过，没有放宽时钟/超时或替换原版IK。
 
 两种新配置已存在并严格校验输入/IK/处理方式组合，只读解析不启动采集或路由器。两种已实现sim组合均可报告`runtime_available=true`，这只表示已接线，仍须通过资产/人员标定和输入就绪检查，不表示设备或真机已验收。旧profile分支不使用新解析器。
+
+## 内嵌原版 PICO＋VR手柄＋Manus 仿真入口（2026-09-10）
+
+新增 `pico_vr_manus_sim`，把参考 PICO_tracker 的 `pico_bridge`、M0 掌心/骨架修正和
+TJVR bridge 以源码形式放入 `vendor/pico_tracker`，通过 `source_manifest.json` 保存
+相对路径和 SHA-256。它使用单独的 Python 3.11/ROS2 Pixi manifest，不改变根环境，个人
+标定仍从 `~/.config/pico_tracker` 或 `--pico-calibration-dir` 读取；源码和脚本不包含
+开发机绝对 checkout 路径。
+
+`scripts/run_embedded_pico_vr_session.sh` 负责 `adb/APK → driver → raw skeleton readiness
+→ M0 → corrected skeleton readiness → TJVR readiness → 当前 vr_manus_sim downstream`，
+子进程均为独立 process group，退出时反向清理。ADB 保留原版 `tcp:9999`，只删除本次
+实际创建的 forward；PICO2 的 `tcp:10002`、official PICO2 producer、手转换和既有入口未
+进入该分支。driver 阶段只要求 `/pico/smpl_raw`，M0 阶段再要求 `/pico/palm_left/right`
+及 corrected/epoch 全量 topic，避免在 palm publisher 尚未启动时误报超时。
+
+构建和只读解析：
+
+```bash
+pixi run build-embedded-pico
+pixi run bash scripts/run_session.sh --profile pico_vr_manus_sim --disable-hands --resolve-only
+```
+
+先关闭手套验证双臂，再移除 `--disable-hands` 并提供 `--manus-rawviz`、`--manus-user`。
+该入口最终仍使用原版 TJVR `robot_arm_segments`/0.95 reach 映射和当前工程已有的
+reference-direct Spark、official Wuji2、coordinator、MuJoCo；不启用 XR SDK/PC-Service，
+也不再要求 Tracker。具体设备步骤见[真实输入设备→仿真验收](real-input-simulation-acceptance.md)。
 
 ## VR+Manus实时仿真入口（设备验收待完成）
 
@@ -267,7 +312,7 @@ Manus与TJVR按各自时间线零点组合到固定5ms控制时钟，只是合�
 1. 三种sim受管入口已接通；同一router/运行目录下PICO双臂双手退出→VR双臂启动/退出测试已通过，含残留权限探针。双向反复切换、VR实时手套切换、长时间错误退出压力与设备验收仍需覆盖。
 2. PICO2骨架到官方手后端、手producer授权及完整多进程仿真已通过合成测试；实时稳定性及真实PICO/Manus输入验证未完成。
 3. 共享控制周期、原子命令、VR live绑定、Home联合重置/显式重新授权及实际UDP进程测试已实现；任意位置可信恢复、故障恢复及`processed_guarded`尚未完成。
-4. XR直接子模式、增量映射、控制器事件授权接线已实现；实际 XR SDK/PC-Service 现场联调、Tracker/控制器标定和设备验收未完成。PICO2几何手势观察及显式双手张开 start 已接通，其余手势操作及真实手型验收未完成。
+4. XR直接子模式、增量映射、控制器事件授权接线已实现；实际 XR SDK/PC-Service 现场联调、控制器标定和设备验收未完成。Tracker不属于当前目标。PICO2几何手势观察及显式双手张开 start 已接通，其余手势操作及真实手型验收未完成。
 5. 完整算法分阶段诊断、可信恢复、XR/操作录制回放和长期可视化验收。
 6. 真机profile/preflight、真实反馈偏差监督及设备验收。现有SPARK工厂仍拒绝real，不应删除这一保护来伪装完成。
 

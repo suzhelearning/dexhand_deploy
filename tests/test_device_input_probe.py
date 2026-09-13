@@ -11,6 +11,44 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeviceInputProbeTest(unittest.TestCase):
+    def test_manus_shutdown_delay_does_not_age_the_observation(self):
+        import importlib.util
+        import contextlib
+        import io
+        import json
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location('probe_shutdown_test', ROOT / 'scripts/probe_teleop_input.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        class Source:
+            failure = None
+            sequence = 0
+            def try_read(self):
+                self.sequence += 1
+                return SimpleNamespace(source_sequences={'left': self.sequence, 'right': self.sequence},
+                                       received_timestamp_ns=time.monotonic_ns())
+            def close(self):
+                time.sleep(.3)
+        with tempfile.TemporaryDirectory() as directory:
+            rawviz = Path(directory, 'rawviz.out')
+            rawviz.touch()
+            rawviz.chmod(0o700)
+            calibration = Path(directory, 'calibration')
+            calibration.mkdir()
+            for side in ('Left', 'Right'):
+                (calibration / f'gjy{side}MetaglovePro.mcal').touch()
+            output = io.StringIO()
+            with patch('tianji_teleop.hand_tracking.reference_manus_process.ReferenceManusProcess',
+                       return_value=Source()), contextlib.redirect_stdout(output):
+                result = module.main(['--mode', 'manus', '--manus-rawviz', str(rawviz),
+                                      '--manus-user', 'gjy', '--duration-s', '.03', '--minimum-frames', '1'])
+            self.assertEqual(result, 0, output.getvalue())
+            report = json.loads(output.getvalue())
+            self.assertTrue(report['sides']['left']['fresh'])
+            self.assertTrue(report['sides']['right']['fresh'])
+
     def test_both_sides_must_be_fresh_not_just_seen_once(self):
         from tianji_teleop.hand_tracking.device_probe import InputProbe
         probe = InputProbe()
@@ -88,6 +126,17 @@ class DeviceInputProbeTest(unittest.TestCase):
             '--mode', 'pico', '--duration-s', 'nan'], capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 2)
 
+    def test_xr_probe_rejects_non_directory_native_library_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            library_file = Path(directory, 'not-a-directory')
+            library_file.write_text('', encoding='utf-8')
+            result = subprocess.run([
+                sys.executable, str(ROOT / 'scripts/probe_teleop_input.py'),
+                '--mode', 'xr', '--xr-sdk-library-dir', str(library_file),
+            ], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('directory', result.stderr.lower())
+
     def test_receive_only_xr_probe_reports_hmd_controllers_and_bound_trackers(self):
         sdk_source = '''
 _timestamp = 0
@@ -144,10 +193,24 @@ def get_motion_timestamp_ns():
 '''
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, 'xrobotoolkit_sdk.py').write_text(sdk_source, encoding='utf-8')
+            Path(directory, 'xr.yaml').write_text(
+                '''xr:
+  arm_input: xr_tracker
+  tracker_serials:
+    left: "190058"
+    right: "190600"
+  elbow_tracker_serials:
+    left: "190046"
+    right: "190023"
+''',
+                encoding='utf-8',
+            )
             result = subprocess.run([
                 sys.executable, str(ROOT / 'scripts/probe_teleop_input.py'),
                 '--mode', 'xr',
                 '--xr-sdk-pythonpath', directory,
+                '--xr-config', str(Path(directory, 'xr.yaml')),
+                '--arm-input', 'xr_tracker',
                 '--duration-s', '0.5',
                 '--minimum-frames', '2',
                 '--minimum-trackers', '4',
@@ -234,6 +297,87 @@ xr:
   arm_input: xr_controller
   tracker_serials: {}
   elbow_tracker_serials: {}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'xrobotoolkit_sdk.py').write_text(sdk_source, encoding='utf-8')
+            config_path = Path(directory, 'xr.yaml')
+            config_path.write_text(config, encoding='utf-8')
+            result = subprocess.run([
+                sys.executable, str(ROOT / 'scripts/probe_teleop_input.py'),
+                '--mode', 'xr', '--xr-sdk-pythonpath', directory,
+                '--xr-config', str(config_path), '--duration-s', '0.3',
+                '--minimum-frames', '2',
+            ], capture_output=True, text=True, timeout=8)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = __import__('json').loads(result.stdout)
+        self.assertTrue(report['passed'])
+        self.assertEqual(report['trackers']['required_count'], 0)
+        self.assertEqual(report['trackers']['minimum_trackers'], 0)
+        self.assertFalse(report['robot_commands_enabled'])
+
+    def test_xr_controller_probe_ignores_optional_tracker_bindings_by_default(self):
+        sdk_source = '''
+_timestamp = 0
+
+def init():
+    return True
+
+def close():
+    return None
+
+def _pose(x):
+    return [x, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+def get_headset_pose():
+    return _pose(0.0)
+
+def get_left_controller_pose():
+    return _pose(-0.2)
+
+def get_right_controller_pose():
+    return _pose(0.2)
+
+def num_motion_data_available():
+    return 0
+
+def get_motion_tracker_pose():
+    return []
+
+def get_motion_tracker_serial_numbers():
+    return []
+
+def get_left_trigger():
+    return 0.0
+
+def get_right_trigger():
+    return 0.0
+
+def get_left_grip():
+    return 0.0
+
+def get_right_grip():
+    return 0.0
+
+def get_left_axis():
+    return [0.0, 0.0]
+
+def get_right_axis():
+    return [0.0, 0.0]
+
+def get_motion_timestamp_ns():
+    global _timestamp
+    _timestamp += 1
+    return _timestamp
+'''
+        config = '''
+xr:
+  arm_input: xr_controller
+  tracker_serials:
+    left: "190058"
+    right: "190600"
+  elbow_tracker_serials:
+    left: "190046"
+    right: "190023"
 '''
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, 'xrobotoolkit_sdk.py').write_text(sdk_source, encoding='utf-8')

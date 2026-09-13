@@ -46,7 +46,15 @@ def validate_result(row, *, sequence, timestamp_ns):
 
 class OfficialHandClient:
     """Serialized bounded IPC; a failed transaction cannot silently restart."""
-    def __init__(self, *, python, script, timeout_seconds=20., single_hand_side='right', startup_handshake=False):
+    def __init__(self, *, python, script, timeout_seconds=20., single_hand_side='right', startup_handshake=False,
+                 filter_continuity_ns=None):
+        # Opt-in only for latest-sampled Manus. Other routes retain raw-sequence
+        # gap semantics. The worker's private sequence is never published.
+        if filter_continuity_ns is not None and (type(filter_continuity_ns) is not int or
+                                                not 0 < filter_continuity_ns < 2**63):
+            raise ValueError('filter_continuity_ns must be positive int64')
+        self._filter_continuity_ns = filter_continuity_ns
+        self._worker_sequence = 0
         if (type(timeout_seconds) not in (int, float) or
                 not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
             raise ValueError('timeout must be finite and positive')
@@ -92,18 +100,24 @@ class OfficialHandClient:
             if (not isinstance(points, list) or len(points) not in (63, 126) or
                     any(type(v) not in (int, float) or not math.isfinite(v) for v in points)):
                 raise ValueError('callback points must be 63/126 finite values')
+            worker_sequence = sequence
+            if self._filter_continuity_ns is not None:
+                interrupted = self._timestamp > 0 and timestamp_ns - self._timestamp > self._filter_continuity_ns
+                worker_sequence = self._worker_sequence + (2 if interrupted else 1)
             request = (json.dumps(dict(schema_version=1, kind='wuji_hand_input',
-                callback_sequence=sequence, timestamp_ns=timestamp_ns, points=points),
+                callback_sequence=worker_sequence, timestamp_ns=timestamp_ns, points=points),
                 allow_nan=False, separators=(',', ':')) + '\n').encode()
             if len(request) > 16384:
                 raise ValueError('official hand request exceeds IPC size limit')
             try:
                 result = self._exchange(request)
-                result = validate_result(result, sequence=sequence, timestamp_ns=timestamp_ns)
+                result = validate_result(result, sequence=worker_sequence, timestamp_ns=timestamp_ns)
             except BaseException:
                 self._shutdown()
                 raise
             self._sequence, self._timestamp = sequence, timestamp_ns
+            self._worker_sequence = worker_sequence
+            result['callback_sequence'] = sequence
             return result
 
     def _exchange(self, request):

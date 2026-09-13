@@ -53,8 +53,19 @@ class DualSessionConfigTest(unittest.TestCase):
                     self.resolve(config)
 
     def test_canonical_new_sim_profiles_resolve_without_starting_processes(self):
-        for profile, receiver in (('pico2_hands_sim', 'pico2'), ('vr_manus_sim', 'tjvr')):
+        for profile, receiver in (('pico2_hands_sim', 'pico2'), ('vr_manus_sim', 'tjvr'),
+                                  ('pico_vr_manus_sim', 'tjvr')):
             value = config_loader.load_yaml(config_loader.component_path(f'sessions/{profile}.yaml'))
             resolved = self.resolve(value, disable_hands=True)
             self.assertEqual(resolved['receivers'], [receiver])
             self.assertEqual(resolved['required_capability'], 'simulation')
+
+    def test_embedded_pico_profile_keeps_legacy_vr_manus_contract(self):
+        value = config_loader.load_yaml(
+            config_loader.component_path('sessions/pico_vr_manus_sim.yaml')
+        )
+        resolved = self.resolve(value, disable_hands=True)
+        self.assertEqual(resolved['input_mode'], 'vr_manus')
+        self.assertEqual(resolved['arm_input'], 'tjvr_corrected_palm')
+        self.assertEqual(resolved['receivers'], ['tjvr'])
+        self.assertEqual(resolved['active_hand_sides'], [])

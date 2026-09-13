@@ -11,10 +11,12 @@ to the canonical observation publisher.
 """
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
 import importlib
 import math
 import os
+from pathlib import Path
 import sys
 import time
 from typing import Any, Callable, Mapping
@@ -40,21 +42,36 @@ _REQUIRED_XR_SDK_API = (
     "get_right_axis",
     "get_motion_timestamp_ns",
 )
+_CONTROLLER_ONLY_XR_SDK_API = tuple(
+    name for name in _REQUIRED_XR_SDK_API
+    if name not in {
+        "num_motion_data_available",
+        "get_motion_tracker_pose",
+        "get_motion_tracker_serial_numbers",
+    }
+)
 
 
-def validate_xr_sdk_module(sdk: Any) -> tuple[str, ...]:
+def validate_xr_sdk_module(
+    sdk: Any, *, require_trackers: bool = True,
+) -> tuple[str, ...]:
     """Return missing required Pybind symbols without initializing the SDK.
 
     The reference Pybind package exposes a module-level API.  Keep the
     required surface explicit so a launcher can reject an incompatible SDK
-    before starting the rest of a managed session.  Motion-tracker velocity,
-    acceleration and ``close`` remain optional because older reference
-    bindings do not expose all three.
+    before starting the rest of a managed session.  Controller-only input
+    does not require the optional Motion Tracker API surface; the legacy
+    tracker route can opt into those symbols with ``require_trackers=True``.
+    Motion-tracker velocity, acceleration and ``close`` remain optional
+    because older reference bindings do not expose all three.
     """
+    if type(require_trackers) is not bool:
+        raise TypeError("require_trackers must be boolean")
     if sdk is None:
-        return _REQUIRED_XR_SDK_API
+        return _REQUIRED_XR_SDK_API if require_trackers else _CONTROLLER_ONLY_XR_SDK_API
+    required = _REQUIRED_XR_SDK_API if require_trackers else _CONTROLLER_ONLY_XR_SDK_API
     return tuple(
-        name for name in _REQUIRED_XR_SDK_API
+        name for name in required
         if not callable(getattr(sdk, name, None))
     )
 
@@ -471,7 +488,29 @@ class XRoboToolkitClient:
         self.host = host
         self.port = int(port)
         self._sdk = sdk_module
+        self._native_library = None
         self._connected = False
+
+    @staticmethod
+    def _preload_native_library():
+        """Load the reference SDK companion library before importing Pybind."""
+        value = os.environ.get("TIANJI_XR_SDK_LIBRARY_DIR", "").strip()
+        if not value:
+            return None
+        directory = Path(value).expanduser().resolve()
+        if not directory.is_dir():
+            raise RuntimeError(
+                f"XR SDK native library directory does not exist: {directory}"
+            )
+        library = directory / "libPXREARobotSDK.so"
+        if not library.is_file():
+            raise RuntimeError(f"XR SDK native library is missing: {library}")
+        try:
+            return ctypes.CDLL(str(library), mode=ctypes.RTLD_GLOBAL)
+        except OSError as exc:
+            raise RuntimeError(
+                f"XR SDK native library could not be loaded: {library}: {exc}"
+            ) from exc
 
     def _load_sdk(self) -> Any:
         if self._sdk is None:
@@ -482,6 +521,7 @@ class XRoboToolkitClient:
             for entry in reversed(tuple(item for item in injected.split(os.pathsep) if item)):
                 if entry not in sys.path:
                     sys.path.insert(0, entry)
+            self._native_library = self._preload_native_library()
             try:
                 self._sdk = importlib.import_module("xrobotoolkit_sdk")
             except ImportError as exc:

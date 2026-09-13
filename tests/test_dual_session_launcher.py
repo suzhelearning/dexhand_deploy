@@ -20,17 +20,50 @@ class DualSessionLauncherTest(unittest.TestCase):
         observation_end = script.index('\nlaunch_arm_executor()', observation_start)
         observation_block = script[observation_start:observation_end]
         self.assertIn(
-            '"TIANJI_XR_SDK_PYTHONPATH=${xr_sdk_pythonpath_override:-${TIANJI_XR_SDK_PYTHONPATH:-}}"',
+            '"TIANJI_XR_SDK_PYTHONPATH=${xr_sdk_pythonpath}"',
             observation_block,
         )
+
+    def test_xr_sdk_library_path_is_scoped_to_xr_observation_process(self):
+        script = (ROOT / 'scripts/run_session.sh').read_text()
+        base_start = script.index('base_env=(')
+        base_end = script.index('\nif [[ "${required_capability}"', base_start)
+        self.assertNotIn('TIANJI_XR_SDK_LIBRARY_DIR=', script[base_start:base_end])
+        observation_start = script.index('elif [[ "${xr_manus_simulation}" == true ]]; then')
+        observation_end = script.index('\nlaunch_arm_executor()', observation_start)
+        observation_block = script[observation_start:observation_end]
+        self.assertIn(
+            '"TIANJI_XR_SDK_LIBRARY_DIR=${xr_sdk_library_dir}"',
+            observation_block,
+        )
+        self.assertIn('"LD_LIBRARY_PATH=${xr_sdk_ld_library_path}"', observation_block)
+        self.assertIn('TIANJI_XR_SDK_LIBRARY_DIR=', script[script.index('check_xr_sdk.py'):])
+
+    def test_xr_qp_override_keeps_controller_only_conditioner_by_default(self):
+        script = (ROOT / 'scripts/run_session.sh').read_text()
+        start = script.index('if [[ "${ik_backend_override}" == pico_ee_dexhand_qp ]]; then')
+        end = script.index('\nfi', start)
+        block = script[start:end]
+        self.assertIn('if [[ "${profile}" != "vr_manus_xr_sim" ]]; then', block)
+        self.assertIn('target_processor_override="${target_processor_override:-passthrough}"', block)
 
     def test_xr_sdk_api_preflight_runs_before_live_guard(self):
         script = (ROOT / 'scripts/run_session.sh').read_text()
         preflight = script.index('${SCRIPT_DIR}/check_xr_sdk.py')
         guard = script.index('acquire_teleop_guard')
         self.assertLess(preflight, guard)
-        preflight_block_start = script.rfind('if [[', 0, preflight)
+        preflight_block_start = script.rfind(
+            'if [[ "${xr_manus_simulation}" == true ]]; then', 0, preflight
+        )
         self.assertIn('xr_manus_simulation', script[preflight_block_start:preflight])
+
+    def test_xr_sdk_preflight_uses_selected_arm_input_contract(self):
+        script = (ROOT / 'scripts/run_session.sh').read_text()
+        preflight = script.index('${SCRIPT_DIR}/check_xr_sdk.py')
+        self.assertIn(
+            '--arm-input "${arm_input_override}"',
+            script[preflight:preflight + 180],
+        )
 
     def test_xr_manus_profile_resolves_controller_input_without_device_paths(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -131,6 +164,39 @@ class DualSessionLauncherTest(unittest.TestCase):
             self.assertEqual(resolved['config']['ik_backend'], 'pico_ee_dexhand_qp')
             self.assertEqual(resolved['config']['hand_retarget_backend'], 'official_wuji_hand2')
             self.assertFalse(runtime.exists())
+
+    def test_embedded_pico_profile_resolves_without_starting_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / 'runtime'
+            result = subprocess.run(
+                [
+                    'bash', str(ROOT / 'scripts/run_session.sh'),
+                    '--profile', 'pico_vr_manus_sim', '--disable-hands', '--resolve-only',
+                ],
+                env=dict(os.environ, TIANJI_TELEOP_RUNTIME_DIR=str(runtime)),
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertTrue(value['runtime_available'])
+            self.assertEqual(value['config']['input_mode'], 'vr_manus')
+            self.assertEqual(value['config']['arm_input'], 'tjvr_corrected_palm')
+            self.assertEqual(value['config']['receivers'], ['tjvr'])
+            self.assertEqual(value['config']['active_hand_sides'], [])
+            self.assertFalse(runtime.exists())
+
+            pico = subprocess.run(
+                [
+                    'bash', str(ROOT / 'scripts/run_session.sh'),
+                    '--profile', 'pico2_hands_sim', '--resolve-only',
+                ],
+                env=dict(os.environ, TIANJI_TELEOP_RUNTIME_DIR=str(runtime)),
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(pico.returncode, 0, pico.stderr)
+            pico_value = json.loads(pico.stdout)
+            self.assertEqual(pico_value['config']['receivers'], ['pico2'])
+            self.assertNotIn('embedded', pico_value.get('reason', '').lower())
 
     def test_pico_runtime_rejects_real_before_locks(self):
         with tempfile.TemporaryDirectory() as directory:

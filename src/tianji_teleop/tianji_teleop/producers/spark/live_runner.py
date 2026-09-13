@@ -1,5 +1,5 @@
 """Managed simulation runner. No real executor or automatic authorization."""
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 import json
 import os
 import queue
@@ -18,7 +18,37 @@ from ...protocol import topics
 from ...protocol.reference_inputs import RAW_REFERENCE_TJVR, ReferenceTjvrRaw
 from ...zenoh_util import open_session, require_single_router, declare_component_liveliness
 from ..hand_retarget import OfficialHandClient
+from .live_control import LiveOperatorEvent, SnapshotSideEffectLoop, SparkControlLoop
+from .live_output import AsyncLiveOutput
 from .live_simulation import SparkLiveSimulation
+
+
+_LIVE_THREAD_SWITCH_INTERVAL_S = 0.001
+
+
+def _close_live_recording(recorder, *, exit_code):
+    """Persist the final process result before ExitStack cleanup runs."""
+    if recorder is not None:
+        recorder.close(complete=exit_code == 0)
+
+
+def _audit_live_capture(capture, kind, payload):
+    """Do not append a final audit row to an already failed recording."""
+    if capture is None:
+        return False
+    recorder = getattr(capture, 'recorder', None)
+    if recorder is not None and getattr(recorder, 'failure', None):
+        return False
+    capture.audit(kind, payload)
+    return True
+
+
+def _bound_live_thread_switch_interval():
+    """Bound GIL handoff latency while the live control owner is active."""
+    previous = sys.getswitchinterval()
+    if previous > _LIVE_THREAD_SWITCH_INTERVAL_S:
+        sys.setswitchinterval(_LIVE_THREAD_SWITCH_INTERVAL_S)
+    return previous
 
 
 class _InputSlot:
@@ -48,10 +78,12 @@ def _make_hand_client(root, sides, *, client_factory=None):
     factory = OfficialHandClient if client_factory is None else client_factory
     return factory(python=root / 'tools/wuji_hand_native/.pixi/envs/default/bin/python',
         script=root / 'scripts/wuji_hand_worker.py', startup_handshake=True,
+        filter_continuity_ns=200_000_000,
         single_hand_side='left' if sides == ('left',) else 'right')
 
 
 def run_live(root, args, resolved):
+    resolved = dict(resolved, manus_filter_continuity_ns=200_000_000)
     required = ('TIANJI_RUN_ID', 'TIANJI_DUAL_INSTANCE_ID', 'TIANJI_ROUTER_ZID')
     if os.environ.get('TIANJI_DUAL_MANAGED') != '1' or any(not os.environ.get(k) for k in required):
         raise RuntimeError('use the managed run_session launcher; explicit session identities required')
@@ -66,6 +98,9 @@ def run_live(root, args, resolved):
             except queue.Full:
                 stop.set()
     with ExitStack() as stack:
+        previous_switch_interval = _bound_live_thread_switch_interval()
+        if previous_switch_interval > _LIVE_THREAD_SWITCH_INTERVAL_S:
+            stack.callback(sys.setswitchinterval, previous_switch_interval)
         session = open_session()
         stack.callback(session.close)
         router = require_single_router(session, expected_router)
@@ -78,18 +113,22 @@ def run_live(root, args, resolved):
                               real_time_qualified=False, input_clock='host_monotonic_ns')))
             capture = LiveCapture(recorder, run_id=run_id)
             capture.audit('lifecycle', dict(stage='opening'))
-        def publish(topic, value):
-            session.put(topic, json.dumps(value, allow_nan=False, separators=(',', ':')).encode(),
-                        encoding='application/json')
+
+        output = AsyncLiveOutput(session)
+        stack.callback(output.close)
+
         hand_client = None
         slot = _InputSlot()
         if not args.disable_hands:
             hand_client = _make_hand_client(root, resolved['config']['active_hand_sides'])
             stack.callback(hand_client.close)
         core = SparkLiveSimulation(root, run_id=run_id, router_zid=router, instance_id=instance,
-            session=session, hand_sides=tuple(resolved['config']['active_hand_sides']),
+            session=output.session_proxy(), hand_sides=tuple(resolved['config']['active_hand_sides']),
             hand_source=slot if hand_client else None, hand_backend=hand_client,
-            hand_command_sink=capture.hand_output if capture else None)
+            hand_command_sink=capture.hand_output if capture else None,
+            hand_expired_input_sink=(lambda row: capture.audit(
+                'manus_superseded_input' if row['reason'] == 'superseded_before_retarget'
+                else 'manus_expired_input', row)) if capture else None)
         stack.callback(core.close)
         overlay = None
         if args.spark_overlay:
@@ -99,6 +138,7 @@ def run_live(root, args, resolved):
             capture.audit('lifecycle', dict(stage='core_ready', authorities=core.authorities,
                 manus_receiver_instance_id=instance + '-manus' if hand_client else None,
                 upstream_pico_calibration='external_not_verified'))
+
         roles = [('source', 'source'), ('producer_arm', 'producer/arm'), ('executor_arm', 'executor/arm')]
         expected_tokens = {f'tj/live/coordinator/arm/arm/{core.coordinator.publisher_instance_id}'}
         if hand_client:
@@ -129,6 +169,7 @@ def run_live(root, args, resolved):
             guard.observe(str(reply.result.key_expr), present=True)
         if guard.failure:
             raise RuntimeError(guard.failure)
+
         if hand_client:
             from ...hand_tracking.manus_environment import manus_environment
             manus_env, _ = manus_environment(args.manus_rawviz, library_dir=args.manus_library_dir)
@@ -136,21 +177,56 @@ def run_live(root, args, resolved):
                 env=manus_env,
                 receiver_instance_id=instance + '-manus', sides=core.hand_sides,
                 right_glove=args.right_glove, left_glove=args.left_glove,
+                cwd=os.path.dirname(os.path.abspath(os.fspath(args.manus_rawviz))),
                 raw_line_sink=capture.rawviz if capture else None,
                 callback_sink=capture.callback if capture else None)
             stack.callback(slot.source.close)
+
         def raw_frame(frame):
             if overlay:
                 overlay.ingest_raw(frame)
             if capture:
                 capture.tjvr(frame)
-            publish(RAW_REFERENCE_TJVR, ReferenceTjvrRaw(frame, router).to_dict())
+            output.put_json(RAW_REFERENCE_TJVR, ReferenceTjvrRaw(frame, router).to_dict())
+
         receiver = ReferenceTjvrUdp(receiver_instance_id=core.source_instance_id,
             host=args.tjvr_bind, port=args.tjvr_port, raw_frame_sink=raw_frame,
             max_position_jump_m=resolved['tjvr_stream_contract']['max_position_jump_m'],
             max_orientation_jump_rad=resolved['tjvr_stream_contract']['max_orientation_jump_rad'],
             decision_sink=capture.tjvr_decision if capture else None)
         stack.callback(receiver.close)
+
+        def publish_snapshot(snapshot):
+            if isinstance(snapshot, LiveOperatorEvent):
+                if capture:
+                    capture.audit('operator_result', snapshot.report)
+                return
+            if overlay and snapshot.result.native_result is not None:
+                overlay.ingest_native(snapshot.result.native_result,
+                                      execution_epoch=snapshot.execution_epoch)
+            if capture:
+                capture.cycle_snapshot(snapshot)
+            output.put_json(topics.SOURCE_STATUS, snapshot.source_status.to_dict())
+            output.put_json(topics.PRODUCER_STATUS, snapshot.producer_status.to_dict())
+            output.put_json(topics.ARM_STATE, snapshot.arm_state.to_dict())
+            output.put_json(topics.EXECUTOR_STATUS, snapshot.executor_status.to_dict())
+            if snapshot.hand_telemetry:
+                output.put_json(topics.PRODUCER_STATUS, snapshot.hand_telemetry['producer'])
+                for side, status in snapshot.hand_telemetry['executors'].items():
+                    output.put_json(topics.hand_executor_status(side), status)
+            for side, command in snapshot.hand_commands.items():
+                output.put_json(topics.hand_command(side), command.to_dict())
+            for side, state in snapshot.hand_states.items():
+                output.put_json(topics.hand_state(side), state.to_dict())
+
+        side_effects = SnapshotSideEffectLoop(publish_snapshot, capacity=1024)
+        side_effects.start()
+        stack.callback(side_effects.close)
+
+        def live_failure():
+            return (guard.failure or receiver.failure or side_effects.failure or output.failure or
+                    (recorder.failure if recorder else None))
+
         for sig in (signal.SIGINT, signal.SIGTERM):
             previous = signal.signal(sig, lambda *_: stop.set())
             stack.callback(signal.signal, sig, previous)
@@ -158,104 +234,93 @@ def run_live(root, args, resolved):
             saved = termios.tcgetattr(sys.stdin.fileno())
             stack.callback(termios.tcsetattr, sys.stdin.fileno(), termios.TCSANOW, saved)
             tty.setcbreak(sys.stdin.fileno())
+
         viewer = None
+        render_data = None
         if args.viewer:
+            import mujoco
             import mujoco.viewer
-            viewer = stack.enter_context(mujoco.viewer.launch_passive(core.sim.model, core.sim.data,
-                                                                      key_callback=key_callback))
+            render_data = mujoco.MjData(core.sim.model)
+            render_data.qpos[:] = core.sim.data.qpos
+            mujoco.mj_forward(core.sim.model, render_data)
+            viewer = stack.enter_context(mujoco.viewer.launch_passive(
+                core.sim.model, render_data, key_callback=key_callback))
+
+        control = SparkControlLoop(core, receiver, stop_event=stop,
+            period_s=1. / resolved['config']['rate_hz'], failure_fn=live_failure,
+            snapshot_sink=side_effects)
+
+        def emit_reports():
+            for report in control.poll_reports():
+                print(json.dumps(report), flush=True)
+
         print(json.dumps(dict(kind='dual_live_started', run_id=run_id, router_zid=router,
             tjvr_bind=list(receiver.address), resolved=resolved, authorities=core.authorities)), flush=True)
         print('s: start (requires fresh input); h: return Home; r: rearm at Home (then new input + s); '
               'q: return and exit. Fault requires restart.', flush=True)
         started = time.monotonic()
-        deadline = started
-        period = 1. / resolved['config']['rate_hz']
-        late_cycles = 0
-        exit_after_home = False
-        result = None
-        while not stop.is_set():
-            if viewer is not None and not viewer.is_running():
-                break
-            if args.duration_s is not None and time.monotonic() - started >= args.duration_s:
-                break
-            if select.select([sys.stdin], [], [], 0)[0]:
-                data = os.read(sys.stdin.fileno(), 128)
-                for value in data:
-                    key_callback(value)
-            while not keys.empty():
-                key = keys.get_nowait()
-                if key == 'r':
-                    try:
-                        with viewer.lock() if viewer is not None else nullcontext():
-                            ack = core.rearm_at_home()
-                    except ValueError as exc:
-                        report = dict(kind='operator_result', action='rearm', accepted=False, reason=str(exc))
-                    else:
-                        report = dict(kind='operator_result', action='rearm', accepted=True,
-                                      execution_epoch=ack['execution_epoch'],
-                                      reset_ack=ack,
-                                      reason='fresh input and explicit start required')
-                    if capture:
-                        capture.audit('operator_result', report)
-                    print(json.dumps(report), flush=True)
-                    continue
-                action = 'start' if key == 's' else 'shutdown' if key == 'q' else 'return'
-                outcome = core.request(action)
-                report = dict(kind='operator_result', action=action, accepted=outcome.accepted, reason=outcome.reason)
-                if capture:
-                    capture.audit('operator_result', report)
-                print(json.dumps(report), flush=True)
-                if key == 'q':
-                    exit_after_home = True
-            with viewer.lock() if viewer is not None else nullcontext():
-                result = core.step(receiver.try_read_latest(), source_failure=guard.failure or receiver.failure
-                                   or (recorder.failure if recorder else None))
-            if capture:
-                capture.cycle(core, result)
-            publish(topics.SOURCE_STATUS, core.source_status.to_dict())
-            publish(topics.PRODUCER_STATUS, core.producer.status(time.monotonic_ns()).to_dict())
-            publish(topics.ARM_STATE, core.sim.arm_state.to_dict())
-            publish(topics.EXECUTOR_STATUS, core.sim.status.to_dict())
-            hand_telemetry = core.hand_telemetry
-            if hand_telemetry:
-                publish(topics.PRODUCER_STATUS, hand_telemetry['producer'])
-                for side, status in hand_telemetry['executors'].items():
-                    publish(topics.hand_executor_status(side), status)
-            for side, command in core.last_hand_commands.items():
-                publish(topics.hand_command(side), command.to_dict())
-            for side in core.hand_sides:
-                publish(topics.hand_state(side), core.sim.hand_state(side).to_dict())
-            if viewer is not None:
-                if overlay:
+        control.start()
+        try:
+            while not stop.is_set():
+                if viewer is not None and not viewer.is_running():
+                    stop.set()
+                    break
+                if args.duration_s is not None and time.monotonic() - started >= args.duration_s:
+                    stop.set()
+                    break
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    data = os.read(sys.stdin.fileno(), 128)
+                    for value in data:
+                        key_callback(value)
+                while not keys.empty():
+                    key = keys.get_nowait()
+                    action = 'rearm' if key == 'r' else 'start' if key == 's' else 'shutdown' if key == 'q' else 'return'
+                    control.submit(action)
+                emit_reports()
+                if viewer is not None:
                     import mujoco
-                    if result.native_result is not None:
-                        overlay.ingest_native(result.native_result,
-                                              execution_epoch=core.producer.guard.execution_epoch)
+                    snapshot = control.latest
                     with viewer.lock():
+                        if snapshot is not None:
+                            core.sim.copy_joint_state_to(
+                                render_data, snapshot.arm_state.position_rad,
+                                {side: state.position_rad for side, state in snapshot.hand_states.items()})
                         viewer.user_scn.ngeom = 0
-                        overlay.append(viewer.user_scn, mujoco, time.monotonic_ns())
-                viewer.sync()
-            if guard.failure or core.failure or core.coordinator.state.state == 'fault' or (exit_after_home and core.coordinator.state.state == 'idle'):
-                break
-            deadline += period
-            remaining = deadline - time.monotonic()
-            if remaining < 0:
-                late_cycles += 1
-                deadline = time.monotonic()
-            else:
-                stop.wait(remaining)
-        report = dict(kind='dual_live_complete', state=core.coordinator.state.state,
-            reason=guard.failure or core.failure or core.coordinator.state.reason, native_ticks=(core.producer.last_result or {}).get('tick_id', 0),
-            late_cycles=late_cycles, real_time_qualified=False)
-        exit_code = 1 if guard.failure or core.failure or core.coordinator.state.state == 'fault' else 0
-        if capture:
-            # Stop writers at their source before draining disk work. Close
-            # methods are idempotent when ExitStack later releases ownership.
-            receiver.close()
-            if slot.source is not None:
-                slot.source.close()
-            core.close()
-            capture.audit('lifecycle', report)
-            recorder.close(complete=exit_code == 0)
+                        if overlay:
+                            overlay.append(viewer.user_scn, mujoco, time.monotonic_ns())
+                    viewer.sync()
+                stop.wait(.005)
+        finally:
+            stop.set()
+            control.join(timeout=5)
+            if control.is_alive():
+                raise RuntimeError('Spark control loop did not stop')
+
+        emit_reports()
+        receiver.close()
+        if slot.source is not None:
+            slot.source.close()
+        side_effects.close()
+        failure = (control.failure or guard.failure or receiver.failure or side_effects.failure or
+                   output.failure or (recorder.failure if recorder else None) or core.failure)
+        state = control.state
+        reason = failure or control.reason
+        report = dict(kind='dual_live_complete', state=state, reason=reason,
+            native_ticks=control.native_ticks, late_cycles=control.late_cycles,
+            control_ticks=control.tick_count, real_time_qualified=False)
+        exit_code = 1 if failure or state == 'fault' else 0
+        try:
+            _audit_live_capture(capture, 'lifecycle', report)
+        except Exception as exc:
+            failure = failure or f'recording final audit failed: {type(exc).__name__}: {exc}'
+        exit_code = 1 if failure or state == 'fault' else 0
+        try:
+            _close_live_recording(recorder, exit_code=exit_code)
+        except Exception as exc:
+            failure = failure or str(exc)
+            exit_code = 1
+        report['reason'] = failure or control.reason
+        if recorder is not None:
+            report['recording'] = recorder.statistics
         print(json.dumps(report), flush=True)
         return exit_code

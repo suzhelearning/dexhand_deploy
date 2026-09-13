@@ -25,7 +25,8 @@ from .node import SparkProducer
 
 class SparkLiveSimulation:
     def __init__(self, root, *, run_id, router_zid, instance_id, clock=time.monotonic_ns,
-                 hand_sides=(), hand_source=None, hand_backend=None, session=None, hand_command_sink=None):
+                 hand_sides=(), hand_source=None, hand_backend=None, session=None, hand_command_sink=None,
+                 hand_expired_input_sink=None):
         for value in (run_id, router_zid, instance_id):
             if not isinstance(value, str) or not value.strip() or '/' in value:
                 raise ValueError('explicit run/router/instance identities required')
@@ -105,7 +106,9 @@ class SparkLiveSimulation:
                     publisher_instance_id=instance_id + '-hand', router_zid=router_zid,
                     coordinator_instance_id=coordinator_id, receiver_instance_id=instance_id + '-manus',
                     freshness_ns=200_000_000)
-                self.hand_loop = HandRetargetLoop(hand_producer, hand_source, publish=self._queue_hands, clock=clock)
+                self.hand_loop = HandRetargetLoop(hand_producer, hand_source, publish=self._queue_hands,
+                    clock=clock, drop_expired_inputs=True, latest_input_only=True,
+                    expired_input_sink=hand_expired_input_sink)
             except BaseException:
                 self.close()
                 raise
@@ -223,7 +226,9 @@ class SparkLiveSimulation:
             ['simulation'], self._failure, {}, self.source_instance_id, self.router_zid)
         co = self.coordinator
         co.update_component(self.source_status, received_ns=now)
-        self.sim.on_session_state(co.state)
+        # The cached heartbeat may predate slow viewer/SDK initialization.
+        # Deliver the current coordinator heartbeat below, after cycle.step;
+        # replaying the old one here permanently faults the executor.
         self.sim.tick(now_ns=now)
         co.update_component(self.sim.status, received_ns=now)
         co.update_arm_state(self.sim.arm_state, received_ns=now)

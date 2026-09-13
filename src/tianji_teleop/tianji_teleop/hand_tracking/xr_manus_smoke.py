@@ -47,11 +47,21 @@ def _pose(x: float, y: float, z: float) -> list[float]:
 
 def _binding(arm_input: str, source_config: dict[str, Any]) -> XrBindingConfig:
     xr = source_config["xr"]
+    # The supported default is controller-only and intentionally leaves
+    # Tracker bindings empty.  Keep the explicit legacy tracker smoke
+    # deterministic without making those serials part of the production
+    # controller-only configuration.
+    tracker_serials = xr["tracker_serials"] or {
+        "left": "190058", "right": "190600",
+    }
+    elbow_tracker_serials = xr["elbow_tracker_serials"] or {
+        "left": "190046", "right": "190023",
+    }
     return XrBindingConfig(
         arm_input=arm_input,
-        tracker_serials=xr["tracker_serials"],
+        tracker_serials=tracker_serials,
         controller_sides=xr["controller_sides"],
-        elbow_tracker_serials=xr["elbow_tracker_serials"],
+        elbow_tracker_serials=elbow_tracker_serials,
     )
 
 
@@ -140,7 +150,7 @@ def _operator_filter(config: XrControllerOperatorConfig) -> OperatorEdgeFilter:
     )
 
 
-def run_offline_smoke(*, arm_input: str = "xr_tracker", frame_count: int = 100) -> dict[str, Any]:
+def run_offline_smoke(*, arm_input: str = "xr_controller", frame_count: int = 100) -> dict[str, Any]:
     """Run the receive-only XR/Manus target smoke and return a JSON report."""
     if arm_input not in XR_ARM_INPUTS:
         raise ValueError("arm_input must be xr_tracker or xr_controller")

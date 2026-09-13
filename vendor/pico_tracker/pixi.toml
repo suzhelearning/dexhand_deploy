@@ -1,0 +1,83 @@
+[workspace]
+name = "pico_project"
+version = "0.1.0"
+description = "PICO 4U data collection pipeline: TCP bridge + fisheye cams + HDF5 recorder."
+authors = ["eai <opabonre1108@mail.com>"]
+channels = [
+    "https://prefix.dev/conda-forge",
+    "https://prefix.dev/robostack-staging",
+]
+platforms = ["linux-64", "linux-aarch64"]
+
+[dependencies]
+# ROS2 Humble core (robostack)
+ros-humble-desktop = "*"
+ros-humble-rclcpp = "*"
+ros-humble-rclpy = "*"
+ros-humble-sensor-msgs = "*"
+ros-humble-geometry-msgs = "*"
+ros-humble-nav-msgs = "*"
+ros-humble-visualization-msgs = "*"
+ros-humble-std-msgs = "*"
+ros-humble-std-srvs = "*"
+ros-humble-builtin-interfaces = "*"
+ros-humble-rosidl-default-generators = "*"
+ros-humble-rosidl-default-runtime = "*"
+ros-humble-ament-cmake = "*"
+ros-humble-ament-cmake-gtest = "*"
+ros-humble-ament-cmake-python = "*"
+ros-humble-ament-index-python = "*"
+ros-humble-ament-package = "*"
+ros-humble-ament-index-cpp = "*"
+ros-humble-launch = "*"
+ros-humble-launch-ros = "*"
+ros-humble-launch-xml = "*"
+ros-humble-cv-bridge = "*"
+ros-humble-image-transport = "*"
+ros-humble-pcl-conversions = "*"
+ros-humble-stereo-msgs = "*"
+ros-humble-tf2 = "*"
+ros-humble-tf2-ros = "*"
+ros-humble-tf2-geometry-msgs = "*"
+ros-humble-message-filters = "*"
+ros-humble-rcpputils = "*"
+
+# Build tooling
+colcon-common-extensions = "*"
+compilers = "*"
+cmake = "<4"
+ninja = "*"
+pkg-config = "*"
+make = "*"
+
+# Non-ROS deps used by our packages
+hdf5 = "*"
+eigen = "*"
+libopencv = "*"
+opencv = "*"
+pcl = "*"
+yaml-cpp = "*"
+openssl = "*"
+libusb = "*"
+
+# Python deps for data_collector
+python = "3.11.*"
+# colcon's ament_python task still uses `setup.py develop --editable`, which
+# setuptools 80+ removed; keep setuptools on the last releases that support it.
+setuptools = "<80"
+h5py = "*"
+numpy = "*"
+pyyaml = "*"
+mujoco = "*"
+tmux = ">=3.7b,<4"
+
+[tasks]
+# CMake's FindPython doesn't auto-detect conda envs; pass Python_ROOT_DIR so
+# rosidl_generator_py can find the env's interpreter + numpy headers.
+build-core = "colcon build --base-paths src --symlink-install --packages-select imu_ros2 pico_bridge fisheye_camera data_collector --cmake-args -DPython_ROOT_DIR=$CONDA_PREFIX -DPython_FIND_VIRTUALENV=ONLY"
+build-pico-bridge = "colcon build --base-paths src --symlink-install --packages-select imu_ros2 pico_bridge --cmake-args -DPython_ROOT_DIR=$CONDA_PREFIX -DPython_FIND_VIRTUALENV=ONLY"
+build = "bash -lc 'export ROS_VERSION=2; bash src/odin/scripts/ensure_odin_sdk.sh && colcon build --base-paths src --symlink-install --packages-select imu_ros2 pico_bridge fisheye_camera data_collector odin_ros_driver odin_ros_driver_rev1 pico_odin --cmake-args -DPython_ROOT_DIR=$CONDA_PREFIX -DPython_FIND_VIRTUALENV=ONLY && bash src/odin/scripts/fix_ament_hook.sh'"
+test = "bash -lc 'export ROS_VERSION=2; colcon test --base-paths src --packages-select imu_ros2 pico_bridge fisheye_camera data_collector odin_ros_driver odin_ros_driver_rev1 pico_odin --event-handlers console_direct+'"
+clean = "rm -rf build install log"
+odin = "bash -lc 'source install/setup.bash && ros2 launch pico_odin odin_select.launch.py odin_impl:=original'"
+odin-lite = "bash -lc 'source install/setup.bash && ros2 launch pico_odin odin_select.launch.py odin_impl:=lite'"

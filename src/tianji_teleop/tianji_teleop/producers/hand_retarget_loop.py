@@ -15,12 +15,26 @@ from .retarget_input import manus_callback_input
 
 class HandRetargetLoop:
     def __init__(self, producer, source, *, publish, clock=time.monotonic_ns,
-                 input_adapter=manus_callback_input, processed_input_sink=None):
+                 input_adapter=manus_callback_input, processed_input_sink=None,
+                 drop_expired_inputs=False, expired_input_sink=None, latest_input_only=False):
         if not callable(input_adapter):
             raise ValueError('explicit callable retarget input adapter required')
         if processed_input_sink is not None and not callable(processed_input_sink):
             raise ValueError('processed input sink must be callable')
         self._processed_input_sink = processed_input_sink
+        if type(drop_expired_inputs) is not bool:
+            raise TypeError('drop_expired_inputs must be bool')
+        if expired_input_sink is not None and not callable(expired_input_sink):
+            raise TypeError('expired_input_sink must be callable')
+        self._drop_expired_inputs = drop_expired_inputs
+        if type(latest_input_only) is not bool or (latest_input_only and not drop_expired_inputs):
+            raise ValueError('latest input selection requires explicit expiry handling')
+        self._latest_input_only = latest_input_only
+        self._superseded_callbacks = 0
+        self._expired_input_sink = expired_input_sink
+        self._expired_callbacks = 0
+        self._last_received_sequence = 0
+        self._last_received_time = 0
         self._input_adapter = input_adapter
         self.producer, self.source = producer, source
         self._publish, self._clock = publish, clock
@@ -80,21 +94,51 @@ class HandRetargetLoop:
             holding = bool(allow_tracking_hold and fresh and set(required_sides) <= self._seen_valid_sides and
                            self.producer.tracking_authorized(now_ns))
             ready = bool(fresh and (set(required_sides) <= valid or holding))
+            if snapshot is None:
+                readiness_reason = 'waiting for first Manus callback'
+            elif not fresh:
+                readiness_reason = 'latest Manus callback is stale'
+            elif not set(required_sides) <= valid and not holding:
+                readiness_reason = 'latest Manus callback is missing a required side'
+            else:
+                readiness_reason = None
             return ComponentStatus(1, self._status_sequence, now_ns, 'producer_hand', self.producer.producer_id,
                 'ready' if ready else 'waiting_input' if healthy else 'fault', ready, healthy,
                 ['simulation'], reason, dict(processed_callbacks=self._processed,
                     valid_sides=list(snapshot['valid_sides']) if snapshot else [],
                     max_retarget_duration_ns=self._max_retarget_duration_ns,
                     max_callback_age_ns=self._max_callback_age_ns,
+                    expired_callbacks=self._expired_callbacks,
+                    superseded_callbacks=self._superseded_callbacks,
                     tracking_hold_sides=sorted(set(required_sides) - valid) if holding else [],
                     input_timestamp_ns=snapshot['timestamp_ns'] if snapshot else None,
                     latest_input_timestamp_ns=self._input_snapshot['timestamp_ns']
-                    if self._input_snapshot else None),
+                    if self._input_snapshot else None,
+                    readiness_reason=readiness_reason),
                 self.producer.publisher_instance_id, self.producer.router_zid)
 
     def _drain_sessions(self):
         while self._sessions:
             self.producer.update_session(self._sessions.popleft())
+
+    def _validate_received(self, row, now):
+        if (not self.producer.healthy or
+                row.receiver_instance_id != self.producer.receiver_instance_id or
+                type(row.sequence) is not int or
+                not self._last_received_sequence < row.sequence < 2**63 or
+                type(row.received_timestamp_ns) is not int or
+                not 0 < row.received_timestamp_ns < 2**63 or
+                row.received_timestamp_ns < self._last_received_time or now < row.received_timestamp_ns):
+            raise RuntimeError('invalid hand callback identity, ordering or clock')
+        self._last_received_sequence = row.sequence
+        self._last_received_time = row.received_timestamp_ns
+
+    def _audit_skipped(self, row, now, reason):
+        if self._expired_input_sink is not None:
+            self._expired_input_sink(dict(callback_sequence=row.sequence,
+                receiver_instance_id=row.receiver_instance_id,
+                timestamp_ns=row.received_timestamp_ns, age_ns=now - row.received_timestamp_ns,
+                freshness_ns=self.producer.freshness_ns, reason=reason))
 
     def _run(self):
         try:
@@ -110,8 +154,33 @@ class HandRetargetLoop:
                     self._stop.wait(.005)
                     continue
                 row = self._input_adapter(row)
+                if self._latest_input_only:
+                    # Bounded drain: acquisition still records every callback.
+                    # Only live solver work is coalesced, with explicit audit.
+                    for _ in range(255):
+                        newer = self.source.try_read()
+                        if newer is None:
+                            break
+                        selected_at = self._clock()
+                        self._validate_received(row, selected_at)
+                        self._audit_skipped(row, selected_at, 'superseded_before_retarget')
+                        with self._lock:
+                            self._superseded_callbacks += 1
+                        row = self._input_adapter(newer)
                 now = self._clock()
                 age = now - row.received_timestamp_ns
+                if self._drop_expired_inputs:
+                    # Only ordinary transport age is recoverable. Identity,
+                    # ordering, future clocks and backend failures remain fatal.
+                    self._validate_received(row, now)
+                    if age > self.producer.freshness_ns:
+                        self._audit_skipped(row, now, 'expired_before_retarget')
+                        with self._lock:
+                            self._expired_callbacks += 1
+                            self._max_callback_age_ns = max(self._max_callback_age_ns, age)
+                        # Do not refresh readiness or generate a command. Drain
+                        # the expired prefix and wait for genuinely fresh input.
+                        continue
                 started = time.monotonic_ns()
                 accepted = self.producer.update_input(row.payload, sequence=row.sequence,
                     timestamp_ns=row.received_timestamp_ns, receiver_instance_id=row.receiver_instance_id,

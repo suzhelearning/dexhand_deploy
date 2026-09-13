@@ -27,7 +27,7 @@ def _load_xr_probe_config(path, arm_input=None):
     if not isinstance(raw, dict) or not isinstance(raw.get('xr'), dict):
         raise ValueError('XR probe config must contain an xr mapping')
     xr = raw['xr']
-    selected_arm_input = arm_input or xr.get('arm_input', 'xr_tracker')
+    selected_arm_input = arm_input or xr.get('arm_input', 'xr_controller')
     binding = XrBindingConfig(
         arm_input=selected_arm_input,
         tracker_serials=xr.get('tracker_serials'),
@@ -43,9 +43,14 @@ def _load_xr_probe_config(path, arm_input=None):
         raise ValueError('xr.port must be an integer in 1..65535')
     if not isinstance(poll_hz, (int, float)) or not math.isfinite(float(poll_hz)) or poll_hz <= 0:
         raise ValueError('xr.poll_hz must be finite and positive')
-    required_serials = tuple(dict.fromkeys(
+    configured_serials = tuple(dict.fromkeys(
         tuple(binding.tracker_serials.values()) + tuple(binding.elbow_tracker_serials.values())
     ))
+    # Controller poses are a complete arm-input source.  The configured wrist
+    # and forearm serials remain available to the live XR observation process
+    # as optional diagnostics/elbow hints, but must not make a controller-only
+    # device probe fail.  Tracker mode keeps the full four-device requirement.
+    required_serials = configured_serials if selected_arm_input == 'xr_tracker' else ()
     return binding, host.strip(), port, float(poll_hz), required_serials
 
 
@@ -61,6 +66,7 @@ def main(argv=None):
     parser.add_argument('--manus-library-dir', type=Path)
     parser.add_argument('--xr-config', type=Path)
     parser.add_argument('--xr-sdk-pythonpath', type=Path)
+    parser.add_argument('--xr-sdk-library-dir', type=Path)
     parser.add_argument('--arm-input', choices=('xr_controller', 'xr_tracker'))
     parser.add_argument('--minimum-trackers', type=int)
     args = parser.parse_args(argv)
@@ -72,18 +78,22 @@ def main(argv=None):
         parser.error('positive frame count, explicit host and port 1..65535 required')
     if args.mode != 'manus' and any((args.manus_rawviz, args.manus_user, args.manus_library_dir)):
         parser.error('Manus options require --mode manus')
-    if args.mode != 'xr' and any((args.xr_config, args.xr_sdk_pythonpath, args.arm_input, args.minimum_trackers)):
+    if args.mode != 'xr' and any((args.xr_config, args.xr_sdk_pythonpath,
+                                  args.xr_sdk_library_dir, args.arm_input, args.minimum_trackers)):
         parser.error('XR options require --mode xr')
     if args.minimum_trackers is not None and args.minimum_trackers < 0:
         parser.error('--minimum-trackers must be non-negative')
     if args.mode == 'xr':
         if args.xr_sdk_pythonpath is not None and not args.xr_sdk_pythonpath.is_dir():
             parser.error('--xr-sdk-pythonpath must be an existing directory')
+        if args.xr_sdk_library_dir is not None and not args.xr_sdk_library_dir.is_dir():
+            parser.error('--xr-sdk-library-dir must be an existing directory')
         if args.xr_config is not None and not args.xr_config.is_file():
             parser.error('--xr-config must be an existing file')
     from tianji_teleop.hand_tracking.device_probe import InputProbe
     probe = InputProbe()
     error = None
+    observation_ended_ns = None
     start = time.monotonic()
     deadline = start + args.duration_s
     try:
@@ -112,6 +122,9 @@ def main(argv=None):
                     for side, sequence in row.source_sequences.items():
                         probe.observe(side, sequence, row.received_timestamp_ns)
             finally:
+                # SDK shutdown may take seconds; evaluate liveness at the
+                # end of acquisition, not after deliberately stopping input.
+                observation_ended_ns = time.monotonic_ns()
                 source.close()
         elif args.mode == 'xr':
             from tianji_teleop.hand_tracking.device_probe import XrInputProbe
@@ -141,10 +154,16 @@ def main(argv=None):
                 os.environ['TIANJI_XR_SDK_PYTHONPATH'] = str(
                     args.xr_sdk_pythonpath.resolve(strict=True)
                 )
+            if args.xr_sdk_library_dir is not None:
+                os.environ['TIANJI_XR_SDK_LIBRARY_DIR'] = str(
+                    args.xr_sdk_library_dir.resolve(strict=True)
+                )
             host = args.host or config_host
             port = args.port or config_port
             client = XRoboToolkitClient(host, port)
-            missing = validate_xr_sdk_module(client._load_sdk())
+            missing = validate_xr_sdk_module(
+                client._load_sdk(), require_trackers=binding.arm_input == 'xr_tracker'
+            )
             if missing:
                 raise RuntimeError('XRoboToolkit SDK missing required API: ' + ', '.join(missing))
             source = XrRoboToolkitSource(
@@ -197,7 +216,8 @@ def main(argv=None):
                                     probe.observe(side, frame.receiver_frame_sequence, now)
     except (OSError, ValueError, RuntimeError, TypeError, ImportError) as exc:
         error = str(exc)
-    result = probe.report(time.monotonic_ns(), minimum_frames=args.minimum_frames)
+    result = probe.report(observation_ended_ns if observation_ended_ns is not None else time.monotonic_ns(),
+                          minimum_frames=args.minimum_frames)
     result.update(mode=args.mode, duration_s=time.monotonic() - start, error=error)
     if error:
         result['passed'] = False

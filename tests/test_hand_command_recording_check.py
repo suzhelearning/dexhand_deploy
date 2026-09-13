@@ -36,10 +36,12 @@ class HandCommandRecordingCheckTest(unittest.TestCase):
         assets.start()
         self.addCleanup(assets.stop)
 
-    def recording(self, path):
+    def recording(self, path, *, expired_first=False, skipped_kind='manus_expired_input'):
         from tianji_teleop.recording.hand_command_check import hand_replay_asset_hashes
         def command(sequence, now, capture):
             if sequence == 1:
+                if expired_first:
+                    capture.audit(skipped_kind, dict(callback_sequence=sequence))
                 return  # Idle callback must still advance the retarget state.
             capture.hand_output({side: HandJointCommand(1, sequence, now, 'hand', side,
                 list(HAND_JOINT_NAMES[side]), [.01 * sequence] * 20, 'producer', 'router')
@@ -60,6 +62,27 @@ class HandCommandRecordingCheckTest(unittest.TestCase):
             self.assertTrue(backend.closed)
             self.assertEqual(report['matched_commands'], 4)
             self.assertEqual(report['operator_events_executed'], 0)
+
+    def test_expired_callback_does_not_advance_offline_retarget(self):
+        from tianji_teleop.recording.hand_command_check import check_manus_hand_commands
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'capture.h5'
+            self.recording(path, expired_first=True)
+            backend = Backend()
+            report = check_manus_hand_commands(path, root=ROOT, backend_factory=lambda **kw: backend)
+            self.assertTrue(report['passed'], report)
+            self.assertEqual(backend.sequences, [2, 3])
+            self.assertEqual(report['matched_commands'], 4)
+
+    def test_superseded_callback_does_not_advance_offline_retarget(self):
+        from tianji_teleop.recording.hand_command_check import check_manus_hand_commands
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'capture.h5'
+            self.recording(path, expired_first=True, skipped_kind='manus_superseded_input')
+            backend = Backend()
+            report = check_manus_hand_commands(path, root=ROOT, backend_factory=lambda **kw: backend)
+            self.assertTrue(report['passed'], report)
+            self.assertEqual(backend.sequences, [2, 3])
 
     def test_tampered_joint_reports_side_and_callback(self):
         from tianji_teleop.recording.hand_command_check import check_manus_hand_commands
