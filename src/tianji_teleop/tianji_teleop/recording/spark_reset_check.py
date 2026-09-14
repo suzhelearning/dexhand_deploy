@@ -6,7 +6,7 @@ from .session_h5 import SessionH5Reader
 from .tjvr_check import check_tjvr_recording
 
 
-def check_reset_audits(audits, *, run_id):
+def check_reset_audits(audits, *, run_id, ack_kind='spark_reset_ack'):
     """The managed VR core starts at execution epoch 1. Never execute events.
 
     Ack shape and zero derivatives are checked, not physical Home/stationarity
@@ -14,6 +14,8 @@ def check_reset_audits(audits, *, run_id):
     """
     if not isinstance(run_id, str) or not run_id.strip():
         raise ValueError('explicit recorded run_id required')
+    if ack_kind not in ('spark_reset_ack', 'mapped_palm_reset_ack'):
+        raise ValueError('unsupported reset acknowledgement kind')
     report = dict(passed=True, first_difference=None, validated_reset_acks=0,
         rejected_rearms=0, checked_native_cycles=0, initial_execution_epoch=1,
         operator_events_executed=0, physical_state_verified=False,
@@ -62,7 +64,7 @@ def check_reset_audits(audits, *, run_id):
                 difference(index, 'reset_ack_fields')
                 continue
             if (type(ack['schema_version']) is not int or ack['schema_version'] != 1 or
-                    ack['kind'] != 'spark_reset_ack' or type(ack['execution_epoch']) is not int or
+                    ack['kind'] != ack_kind or type(ack['execution_epoch']) is not int or
                     ack['execution_epoch'] != next_epoch):
                 difference(index, 'reset_ack_identity')
                 continue
@@ -103,8 +105,12 @@ def check_spark_reset_recording(path):
         raise ValueError('native cycle consumption boundaries required for reset audit check')
     with SessionH5Reader(path) as reader:
         audits = reader.read_dual_audit()
-        run_id = reader.read_hand_tracking_metadata().get('run_id')
-    reset_report = check_reset_audits(audits, run_id=run_id)
+        metadata = reader.read_hand_tracking_metadata()
+        run_id = metadata.get('run_id')
+    from ..hand_tracking.input_modes import MAPPED_PALM_BACKEND
+    backend = metadata.get('resolved_configuration', {}).get('config', {}).get('ik_backend')
+    reset_report = check_reset_audits(audits, run_id=run_id,
+        ack_kind='mapped_palm_reset_ack' if backend == MAPPED_PALM_BACKEND else 'spark_reset_ack')
     result['reset_audit'] = reset_report
     if not reset_report['passed']:
         result['passed'] = False

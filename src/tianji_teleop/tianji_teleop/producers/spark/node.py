@@ -6,7 +6,7 @@ by a later input frame, receipt or session heartbeat.
 """
 from copy import deepcopy
 
-from ...hand_tracking.input_modes import SPARK_BACKEND
+from ...hand_tracking.input_modes import SPARK_BACKEND, MAPPED_PALM_BACKEND
 from ...hand_tracking.reference_tjvr_receiver import ReceivedTjvrFrame
 from ...hand_tracking.spark_replay import ReplayTick
 from ...protocol.bilateral import ArmBilateralProposal
@@ -18,7 +18,10 @@ class SparkProducer:
     def __init__(self, backend, *, run_id, execution_epoch, publisher_instance_id,
                  coordinator_instance_id, router_zid, receiver_instance_id,
                  maximum_receipt_age_ns, session_timeout_ns, max_in_flight,
-                 producer_id='ik_spark_headroom'):
+                 producer_id='ik_spark_headroom', algorithm=SPARK_BACKEND):
+        if algorithm not in (SPARK_BACKEND, MAPPED_PALM_BACKEND):
+            raise ValueError('unsupported bilateral reference algorithm')
+        self.algorithm = algorithm
         for value in (publisher_instance_id, receiver_instance_id, producer_id):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError('producer/input identities must be explicit')
@@ -120,11 +123,11 @@ class SparkProducer:
                                   sample=sample.to_dict() if sample is not None else None)
         try:
             result = self.backend.step(ReplayTick(self._tick + 1, now_ns, sample))
-            if result['algorithm'] != SPARK_BACKEND or result['tick_id'] != self._tick + 1:
+            if result['algorithm'] != self.algorithm or result['tick_id'] != self._tick + 1:
                 raise ValueError('unexpected native algorithm or tick')
             proposals = {}
             for side in ('left', 'right'):
-                diagnostics = dict(algorithm=SPARK_BACKEND, state_source=result['state_source'],
+                diagnostics = dict(algorithm=self.algorithm, state_source=result['state_source'],
                     reference_execution_mode='reference_direct', execution_epoch=self.guard.execution_epoch,
                     tick_id=result['tick_id'], applied_epoch=result['applied_epoch'],
                     applied_sequence=result['applied_sequence'], input_live=result['input_live'],
@@ -149,7 +152,7 @@ class SparkProducer:
         return ComponentStatus(1, self._status_sequence, now_ns, 'producer_arm', self.producer_id,
             'fault' if self.paused else 'ready' if ready else 'waiting_input',
             ready, not self.paused, ['simulation'], self.guard.reason,
-            dict(algorithm=SPARK_BACKEND, state_source='model_reference', native_ticks=self._tick,
+            dict(algorithm=self.algorithm, state_source='model_reference', native_ticks=self._tick,
                  reference_execution_mode='reference_direct', in_flight=self.guard.in_flight,
                  latest_skeleton_valid=self._ready),
             self.publisher_instance_id, self.router_zid)

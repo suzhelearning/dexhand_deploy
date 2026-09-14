@@ -13,6 +13,7 @@ disable_hands=false
 display_mode=""
 record_path=""
 spark_overlay=false
+mapped_palm_height_calibration=false
 tjvr_bind="127.0.0.1"
 tjvr_port="15000"
 duration_s=""
@@ -53,6 +54,7 @@ usage() {
   --manus-library-dir PATH --right-glove ID --left-glove ID
   --tjvr-bind HOST --tjvr-port PORT --duration-s SECONDS
   --record PATH --spark-overlay --viewer|--headless
+  --mapped-palm-height-calibration（仅 mapped-palm：c 仅Z标定，再 s 开始）
 
 PICO 上游选项：
   --pico-calibration-dir PATH
@@ -95,6 +97,7 @@ while (($#)); do
       display_mode=headless; shift ;;
     --record) record_path="${2:-}"; shift 2 ;;
     --spark-overlay) spark_overlay=true; shift ;;
+    --mapped-palm-height-calibration) mapped_palm_height_calibration=true; shift ;;
     --tjvr-bind) tjvr_bind="${2:-}"; shift 2 ;;
     --tjvr-port) tjvr_port="${2:-}"; shift 2 ;;
     --duration-s) duration_s="${2:-}"; shift 2 ;;
@@ -154,7 +157,7 @@ for value_name in ik_backend arm_pose_mapper arm_target_processor joint_trajecto
   command_step_clipping joint_limit_source operator_input arm_input; do
   value="${!value_name}"
   case "$value_name" in
-    ik_backend) [[ -z "$value" || "$value" == spark_upper_qpoases_headroom_feedforward_velocity_qp ]] || fail 'pico_vr_manus_sim 必须使用原版 Spark IK backend' ;;
+    ik_backend) [[ -z "$value" || "$value" == spark_upper_qpoases_headroom_feedforward_velocity_qp || "$value" == pico_ee_mapped_corrected_palm_velocity_qp ]] || fail 'pico_vr_manus_sim 需要 Spark 或 mapped-palm 原版双臂后端' ;;
     arm_pose_mapper) [[ -z "$value" || "$value" == none ]] || fail 'TJVR corrected palm 必须使用 arm-pose-mapper none' ;;
     arm_target_processor) [[ -z "$value" || "$value" == passthrough ]] || fail 'reference-direct TJVR 必须使用 passthrough target processor' ;;
     joint_trajectory) [[ -z "$value" || "$value" == passthrough ]] || fail 'reference-direct TJVR 必须使用 passthrough trajectory' ;;
@@ -165,7 +168,12 @@ for value_name in ik_backend arm_pose_mapper arm_target_processor joint_trajecto
   esac
 done
 
+if [[ "$mapped_palm_height_calibration" == true && "$ik_backend" != pico_ee_mapped_corrected_palm_velocity_qp ]]; then
+  fail '--mapped-palm-height-calibration 必须显式选择 mapped-palm IK'
+fi
+
 if [[ "$resolve_only" == true ]]; then
+  [[ "$mapped_palm_height_calibration" != true ]] || fail '高度标定是运行选项，不支持 --resolve-only'
   [[ -z "${record_path}${duration_s}${manus_rawviz}${manus_user}${manus_library_dir}${right_glove}${left_glove}" &&
      "$pico_calibration_dir_explicit" != true &&
      "$pico_app_package_explicit" != true &&
@@ -217,6 +225,7 @@ if [[ -n "$record_path" ]]; then
 fi
 
 downstream_args=(--profile vr_manus_sim)
+[[ "$mapped_palm_height_calibration" != true ]] || downstream_args+=(--mapped-palm-height-calibration)
 [[ "$disable_hands" != true ]] || downstream_args+=(--disable-hands)
 [[ -z "$display_mode" ]] || downstream_args+=("--$display_mode")
 [[ -z "$record_path" ]] || downstream_args+=(--record "$record_path")
@@ -310,13 +319,26 @@ process_group_is_running() {
 start_child() {
   local label="$1"
   shift
+  local forward_stdio=false
+  if [[ "${1:-}" == --forward-stdio ]]; then
+    forward_stdio=true
+    shift
+  fi
   local log_path="$log_dir/${label}.log"
   local process_token="$embedded_process_run_token:$label"
   register_teleop_process_token "$process_token" || fail "无法登记 $label 进程标识"
   child_process_token["$label"]="$process_token"
-  setsid env "${runtime_env[@]}" \
-    "TIANJI_EMBEDDED_PICO_PROCESS_TOKEN=$process_token" \
-    "$@" >"$log_path" 2>&1 &
+  if [[ "$forward_stdio" == true ]]; then
+    # The downstream owns the operator keyboard. Keep its stdin connected to
+    # the launch terminal and tee its unbuffered reports into the child log.
+    setsid env "${runtime_env[@]}" \
+      "TIANJI_EMBEDDED_PICO_PROCESS_TOKEN=$process_token" \
+      "$@" <&0 > >(tee -- "$log_path") 2>&1 &
+  else
+    setsid env "${runtime_env[@]}" \
+      "TIANJI_EMBEDDED_PICO_PROCESS_TOKEN=$process_token" \
+      "$@" >"$log_path" 2>&1 &
+  fi
   local pid=$!
   local pgid=""
   for _ in {1..20}; do
@@ -480,7 +502,7 @@ fi
 
 downstream_script="${TIANJI_EMBEDDED_PICO_DOWNSTREAM_SCRIPT:-$ROOT/scripts/run_vr_manus_session.sh}"
 [[ -f "$downstream_script" ]] || fail "缺少下游启动脚本: $downstream_script"
-start_child downstream env TIANJI_EMBEDDED_PICO_DOWNSTREAM=1 \
+start_child downstream --forward-stdio env TIANJI_EMBEDDED_PICO_DOWNSTREAM=1 \
   bash "$downstream_script" "${downstream_args[@]}"
 
 printf 'session pico_vr_manus_sim started; embedded_pico_bundle=%s; tjvr=%s:%s\n' \

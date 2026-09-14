@@ -200,7 +200,10 @@ class SparkLiveSimulationTest(unittest.TestCase):
     def test_single_left_rawviz_worker_simulation_and_recording_are_consistent(self):
         self._record_and_reconstruct_actual_hands(('left',))
 
-    def _record_and_reconstruct_actual_hands(self, sides):
+    def _record_and_reconstruct_actual_hands(self, sides, *, backend=None):
+        from tianji_teleop.hand_tracking.input_modes import SPARK_BACKEND, MAPPED_PALM_BACKEND
+        backend = backend or SPARK_BACKEND
+        target_source = 'mapped_corrected_palm' if backend == MAPPED_PALM_BACKEND else 'packet'
         from tianji_teleop.producers.spark.live_simulation import SparkLiveSimulation
         from tianji_teleop.producers.spark.live_runner import _InputSlot, _make_hand_client
         from tianji_teleop.hand_tracking.reference_manus_process import ReferenceManusProcess
@@ -218,7 +221,7 @@ class SparkLiveSimulationTest(unittest.TestCase):
             synthetic=True, run_id='joined', resolved_configuration=dict(asset_sha256=hand_replay_asset_hashes(ROOT),
                 manus_filter_continuity_ns=200_000_000,
                 tjvr_stream_contract=dict(version=1, initial_state='reset',
-                    max_position_jump_m=.15, max_orientation_jump_rad=.6),
+                    max_position_jump_m=.15, max_orientation_jump_rad=.6, target_source=target_source),
                 manus_input_contract=dict(
                 version=1, sides=[side for side in ('right', 'left') if side in sides],
                 right_glove=None, left_glove=None,
@@ -230,6 +233,7 @@ class SparkLiveSimulationTest(unittest.TestCase):
         self.addCleanup(hand.close)
         slot = _InputSlot()
         core = SparkLiveSimulation(ROOT, run_id='joined', router_zid='router', instance_id='joined',
+            backend=backend,
             hand_sides=sides, hand_source=slot, hand_backend=hand,
             hand_command_sink=capture.hand_output,
             hand_expired_input_sink=lambda row: capture.audit(
@@ -255,6 +259,7 @@ class SparkLiveSimulationTest(unittest.TestCase):
             raw_line_sink=capture.rawviz, callback_sink=capture.callback)
         self.addCleanup(slot.source.close)
         receiver = ReferenceTjvrReceiver('joined-source', .15, .6,
+            target_source=target_source,
             raw_frame_sink=capture.tjvr, decision_sink=capture.tjvr_decision)
         sequence, commanded = 0, False
         started = time.monotonic()

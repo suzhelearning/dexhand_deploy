@@ -15,14 +15,15 @@ from .reference_tjvr_receiver import ReferenceTjvrReceiver
 class ReferenceTjvrUdp:
     def __init__(self, *, receiver_instance_id, host='127.0.0.1', port=15000,
                  max_position_jump_m=.15, max_orientation_jump_rad=.6,
-                 raw_sink=None, raw_frame_sink=None, clock=time.monotonic_ns, decision_sink=None):
+                 raw_sink=None, raw_frame_sink=None, clock=time.monotonic_ns, decision_sink=None,
+                 target_source='packet'):
         if not isinstance(host, str) or not host:
             raise ValueError('explicit UDP bind host required')
         if type(port) is not int or not 0 <= port <= 65535:
             raise ValueError('UDP port must be an integer in 0..65535')
         self._receiver = ReferenceTjvrReceiver(receiver_instance_id, max_position_jump_m,
                                                max_orientation_jump_rad, raw_sink, raw_frame_sink,
-                                               decision_sink=decision_sink)
+                                               decision_sink=decision_sink, target_source=target_source)
         self._clock = clock
         self._stop = Event()
         self._lock = Lock()

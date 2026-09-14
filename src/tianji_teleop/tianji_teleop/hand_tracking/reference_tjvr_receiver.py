@@ -80,7 +80,10 @@ class ReferenceTjvrReceiver:
                  max_orientation_jump_rad: float,
                  raw_sink: Callable[[bytes, int], None] | None = None,
                  raw_frame_sink: Callable[[ReferenceTjvrFrame], None] | None = None,
-                 decision_sink=None):
+                 decision_sink=None, target_source='packet'):
+        if target_source not in ('packet', 'mapped_corrected_palm'):
+            raise ValueError('unknown TJVR target source')
+        self._target_source = target_source
         if not isinstance(receiver_instance_id, str) or not receiver_instance_id.strip():
             raise ValueError('receiver_instance_id must be nonempty')
         self._instance = receiver_instance_id
@@ -121,7 +124,16 @@ class ReferenceTjvrReceiver:
                 self._sink(observation.frame.raw_packet, received_timestamp_ns)
             if self._frame_sink is not None:
                 self._frame_sink(observation)
-            decision = self._gate.evaluate(observation.frame)
+            gate_frame = observation.frame
+            if self._target_source == 'mapped_corrected_palm':
+                from .mapped_palm_input import select_mapped_palm_frame
+                try:
+                    gate_frame = select_mapped_palm_frame(gate_frame)
+                except ValueError:
+                    with self._lock:
+                        self._stats['malformed'] += 1
+                    return None
+            decision = self._gate.evaluate(gate_frame)
             with self._lock:
                 generation = self._generation + int(decision.stream_discontinuity)
             if self._decision_sink is not None:

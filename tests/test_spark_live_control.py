@@ -8,6 +8,14 @@ import mujoco
 
 
 class SparkLiveControlLoopTest(unittest.TestCase):
+    def test_exit_trigger_preserves_interruption_during_home_return(self):
+        from tianji_teleop.producers.spark.live_runner import live_exit_trigger
+        self.assertEqual(live_exit_trigger(None, 'returning', True, 'SIGINT'), 'SIGINT')
+        self.assertEqual(live_exit_trigger(None, 'idle', True, 'control_stop'), 'operator_shutdown')
+        self.assertEqual(live_exit_trigger(None, 'returning', True, 'viewer_closed'), 'viewer_closed')
+        self.assertEqual(live_exit_trigger('worker failed', 'returning', True, 'SIGINT'), 'fault')
+        self.assertEqual(live_exit_trigger(None, 'fault', False, 'control_stop'), 'fault')
+
     def test_live_runner_bounds_python_thread_switch_interval(self):
         import tianji_teleop.producers.spark.live_runner as live_runner
 
@@ -39,6 +47,17 @@ class SparkLiveControlLoopTest(unittest.TestCase):
         live_runner._close_live_recording(None, exit_code=1)
 
         self.assertEqual(recorder.completions, [False, True])
+
+    def test_startup_summary_omits_asset_dump(self):
+        from tianji_teleop.producers.spark.live_runner import startup_summary
+        resolved = {'config': {'ik_backend': 'mapped', 'hands_enabled': False, 'rate_hz': 200},
+                    'record_path': '/tmp/session.h5', 'asset_sha256': {'large_mesh': 'abc'},
+                    'mapped_palm_height_calibration': True}
+        text = startup_summary('run', resolved)
+        self.assertIn('IK=mapped', text)
+        self.assertIn('/tmp/session.h5', text)
+        self.assertNotIn('large_mesh', text)
+        self.assertEqual(resolved['asset_sha256'], {'large_mesh': 'abc'})
 
     def test_final_recording_audit_is_skipped_after_recorder_failure(self):
         import tianji_teleop.producers.spark.live_runner as live_runner
@@ -133,8 +152,10 @@ class SparkLiveControlLoopTest(unittest.TestCase):
 
             def step(self, _sample=None, *, source_failure=None):
                 self.threads.append(('step', get_ident()))
+                # Simulate native tick IDs restarting across Home resets.
+                tick = 1 + (sum(kind == 'step' for kind, _ in self.threads) - 1) % 3
                 return SimpleNamespace(
-                    commands={}, native_result=None, native_attempt=None,
+                    commands={}, native_result={'tick_id': tick}, native_attempt=None,
                     receipt_accepted=False,
                 )
 
@@ -170,6 +191,12 @@ class SparkLiveControlLoopTest(unittest.TestCase):
 
         self.assertFalse(loop.is_alive())
         self.assertGreaterEqual(loop.tick_count, 8)
+        self.assertEqual(loop.native_ticks_total, loop.tick_count)
+        self.assertLessEqual(loop.native_ticks, 3)
+        self.assertEqual(loop.timing['core_step']['count'], loop.tick_count)
+        self.assertEqual(loop.timing['schedule_lag']['count'], loop.tick_count)
+        self.assertGreaterEqual(loop.timing['cycle_work']['max_ms'],
+                                loop.timing['core_step']['max_ms'])
         thread_ids = {thread_id for _kind, thread_id in core.threads}
         self.assertEqual(len(thread_ids), 1)
         self.assertNotEqual(thread_ids.pop(), get_ident())

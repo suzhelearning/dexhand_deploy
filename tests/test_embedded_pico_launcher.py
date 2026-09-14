@@ -284,6 +284,55 @@ while true; do sleep 0.05; done
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(events.exists())
 
+    def test_interactive_child_forwards_stdin_and_streams_output(self):
+        source = (ROOT / "scripts/run_embedded_pico_vr_session.sh").read_text()
+        function = source[source.index('start_child() {'):source.index('\nstop_child() {')]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            received = root / "received"
+            script = '''
+declare -A child_process_token child_pid child_pgid child_start_ticks
+runtime_env=(); embedded_process_run_token=test; log_dir="$TELEOP_RUNTIME_DIR"
+acquire_teleop_guard pico_vr_manus_sim
+fail() { exit 5; }
+process_group_for() { printf '%s\\n' "$1"; }
+register_teleop_process_group() { [[ "$1" == "${child_pid[test]}" ]]; }
+start_child test --forward-stdio bash -c 'read -r key; printf "%s\\n" "$key" > "$TELEOP_INTERACTIVE_RECEIVED"; printf "child-output\\n"'
+wait "${child_pid[test]}"
+'''
+            environment = dict(
+                os.environ,
+                TIANJI_TELEOP_RUNTIME_DIR=str(root / "runtime"),
+                TELEOP_INTERACTIVE_RECEIVED=str(received),
+            )
+            process = subprocess.Popen(
+                ["bash", "-c", "source \"$1\"\n" + function + script, "_", str(ROOT / "scripts/common.sh")],
+                env=environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert process.stdin is not None
+                process.stdin.write("c\n")
+                process.stdin.close()
+                process.wait(timeout=5)
+                assert process.stdout is not None
+                assert process.stderr is not None
+                stdout = process.stdout.read()
+                stderr = process.stderr.read()
+                process.stdout.close()
+                process.stderr.close()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertEqual(received.read_text(), "c\n")
+            self.assertIn("child-output", stdout)
+            self.assertIn("child-output", (root / "runtime" / "test.log").read_text())
+
     def test_abrupt_supervisor_exit_does_not_leave_embedded_lock_held(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

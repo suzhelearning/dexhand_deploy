@@ -28,6 +28,8 @@ def resolve(argv=None):
     parser.add_argument('--profile', choices=('vr_manus_sim',), default='vr_manus_sim')
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--disable-hands', action='store_true')
+    parser.add_argument('--mapped-palm-height-calibration', action='store_true',
+                        help='mapped backend only: c samples horizontal arms; Z only, then s starts')
     display = parser.add_mutually_exclusive_group()
     display.add_argument('--viewer', action='store_true')
     display.add_argument('--headless', action='store_true')
@@ -71,20 +73,23 @@ def resolve(argv=None):
     if args.command_step_clipping is not None:
         value['command_step_clipping'] = args.command_step_clipping == 'true'
     config = resolve_dual_session_config(value, disable_hands=args.disable_hands)
+    if args.mapped_palm_height_calibration and config['ik_backend'] != 'pico_ee_mapped_corrected_palm_velocity_qp':
+        parser.error('--mapped-palm-height-calibration requires mapped-palm IK')
     if config['operator_input'] != 'keyboard':
         parser.error('live operator binding is keyboard-only; native TJVR bit8 is not a complete controller binding')
-    paths = [ROOT / 'build/spark-native/spark_native_worker',
-             ROOT / 'tools/spark_native/pixi.lock',
+    from tianji_teleop.producers.spark.backend_assets import bilateral_assets
+    selected = bilateral_assets(ROOT, config['ik_backend'])
+    paths = [selected['worker'], selected['lock'],
              ROOT / 'src/tianji_teleop/config/sessions/vr_manus_sim.yaml',
              ROOT / 'src/tianji_teleop/config/coordinator/arm_v131.yaml',
              ROOT / 'src/tianji_teleop/config/robot/arm.yaml',
-             ROOT / 'src/tianji_teleop/config/producers/spark_reference.yaml',
-             ROOT / 'src/tianji_teleop/assets/spark/marvin_m6_wuji2.xml',
-             ROOT / 'src/tianji_teleop/assets/spark/marvin_m6_s_ccs_696_v4_local.urdf']
+             selected['config'], selected['model'], selected['urdf']]
+    if 'manifest' in selected:
+        paths.append(selected['manifest'])
     from tianji_teleop.recording.model_assets import flat_mujoco_asset_files
     try:
         paths += flat_mujoco_asset_files(
-            ROOT / 'src/tianji_teleop/assets/spark/marvin_m6_wuji2.xml',
+            selected['model'],
             asset_root=ROOT / 'src/tianji_teleop/assets')
     except ValueError as exc:
         parser.error(str(exc))
@@ -149,11 +154,19 @@ def resolve(argv=None):
             continue
         asset_paths[key] = resolved_path
         hashes[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+    stream_contract = dict(version=1, initial_state='reset', max_position_jump_m=.15,
+                           max_orientation_jump_rad=.6)
+    if 'manifest' in selected:
+        from tianji_teleop.config_loader import load_yaml
+        native_config = load_yaml(selected['config'])
+        stream_contract.update(target_source='mapped_corrected_palm',
+            max_position_jump_m=native_config['pico_teleop']['max_position_jump_m'],
+            max_orientation_jump_rad=native_config['pico_teleop']['max_orientation_jump_rad'])
     return args, dict(profile=args.profile, config=config, tjvr_bind=[args.tjvr_bind, args.tjvr_port],
+                      **({'mapped_palm_height_calibration': True} if args.mapped_palm_height_calibration else {}),
                       manus_sdk_library_dir='external/manus/sdk' if args.manus_library_dir else None,
                       manus_sdk_loading='explicit_child_path' if args.manus_library_dir else 'inherited_unverified',
-                      tjvr_stream_contract=dict(version=1, initial_state='reset',
-                          max_position_jump_m=.15, max_orientation_jump_rad=.6),
+                      tjvr_stream_contract=stream_contract,
                       manus_input_contract=dict(version=1,
                           sides=[side for side in ('right', 'left') if side in config['active_hand_sides']],
                           right_glove=args.right_glove, left_glove=args.left_glove,

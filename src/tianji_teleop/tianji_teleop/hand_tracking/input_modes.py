@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 
 SPARK_BACKEND = "spark_upper_qpoases_headroom_feedforward_velocity_qp"
+MAPPED_PALM_BACKEND = "pico_ee_mapped_corrected_palm_velocity_qp"
 _FIELDS = frozenset({"input_mode", "hand_input", "arm_input", "operator_input"})
 _POSE_BACKENDS = frozenset({"pinocchio_cpp", "pinocchio_qp", "tianji_official", "pico_ee_dexhand_qp"})
 
@@ -71,8 +72,8 @@ def validate_ik_input(mode: InputMode, backend: str) -> None:
     """Check input shape only; does not claim a backend is built/real-ready."""
     if not isinstance(backend, str):
         raise ValueError("backend must be a string")
-    if backend == SPARK_BACKEND:
+    if backend in (SPARK_BACKEND, MAPPED_PALM_BACKEND):
         if not mode.requires_upper_limb_skeleton:
-            raise ValueError("SPARK requires corrected upper-limb skeleton input")
+            raise ValueError("bilateral reference backend requires corrected upper-limb skeleton input")
     elif backend not in _POSE_BACKENDS:
         raise ValueError(f"unknown IK backend: {backend}")

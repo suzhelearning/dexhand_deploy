@@ -38,6 +38,7 @@ xr_sdk_pythonpath_override=""
 xr_sdk_library_dir_override=""
 extra_args=()
 dual_runtime_args=()
+mapped_palm_height_calibration=false
 original_args=("$@")
 while (($#)); do
   case "$1" in
@@ -45,6 +46,7 @@ while (($#)); do
     --resolve-only) resolve_only=true; shift ;;
     --disable-hands) disable_hands=true; shift ;;
     --spark-overlay) dual_runtime_args+=("$1"); shift ;;
+    --mapped-palm-height-calibration) mapped_palm_height_calibration=true; dual_runtime_args+=("$1"); shift ;;
     --manus-rawviz|--manus-user|--manus-library-dir|--right-glove|--left-glove|--tjvr-bind|--tjvr-port|--duration-s)
       dual_runtime_args+=("$1" "${2:?missing dual-input runtime value}"); shift 2 ;;
     --xr-sdk-pythonpath)
@@ -121,6 +123,12 @@ if [[ -n "${pico_calibration_dir_override}${pico_app_package_override}${pico_ros
       "${profile}" != pico_vr_manus_sim ]]; then
   printf '%s\n' '错误：--pico-calibration-dir/--pico-app-package/--pico-ros-domain/--pico-startup-timeout-s 仅支持 pico_vr_manus_sim。' >&2
   exit 2
+fi
+if [[ "$mapped_palm_height_calibration" == true ]]; then
+  [[ "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    printf '%s\n' '错误：高度标定选项仅支持 mapped-palm 的 VR/TJVR 仿真入口。' >&2; exit 2;
+  }
+  [[ "$resolve_only" != true ]] || { printf '%s\n' '错误：高度标定是运行选项，不支持 --resolve-only。' >&2; exit 2; }
 fi
 if [[ "${profile}" == pico_vr_manus_sim ]]; then
   exec bash "${SCRIPT_DIR}/run_embedded_pico_vr_session.sh" "${original_args[@]}"

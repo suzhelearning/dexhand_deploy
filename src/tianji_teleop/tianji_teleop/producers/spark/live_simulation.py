@@ -21,12 +21,14 @@ from ..hand_retarget_loop import HandRetargetLoop
 from .coordinator_cycle import SparkCoordinatorCycle
 from .factory import reference_robot_config
 from .node import SparkProducer
+from .backend_assets import bilateral_assets
+from ...hand_tracking.input_modes import SPARK_BACKEND
 
 
 class SparkLiveSimulation:
     def __init__(self, root, *, run_id, router_zid, instance_id, clock=time.monotonic_ns,
                  hand_sides=(), hand_source=None, hand_backend=None, session=None, hand_command_sink=None,
-                 hand_expired_input_sink=None):
+                 hand_expired_input_sink=None, backend=SPARK_BACKEND):
         for value in (run_id, router_zid, instance_id):
             if not isinstance(value, str) or not value.strip() or '/' in value:
                 raise ValueError('explicit run/router/instance identities required')
@@ -54,15 +56,15 @@ class SparkLiveSimulation:
         self._hand_lock = Lock()
         self._hand_command_sink = hand_command_sink
         assets = root / 'src/tianji_teleop'
-        config = assets / 'config/producers/spark_reference.yaml'
-        model_path = assets / 'assets/spark/marvin_m6_wuji2.xml'
-        urdf = assets / 'assets/spark/marvin_m6_s_ccs_696_v4_local.urdf'
+        selected = bilateral_assets(root, backend)
+        config, model_path, urdf = (selected[k] for k in ('config', 'model', 'urdf'))
         robot = reference_robot_config(config, urdf, assets / 'config/robot/arm.yaml')
-        coordinator_id, producer_id, executor_id = (instance_id + '-' + name for name in ('coord', 'spark', 'sim'))
+        producer_suffix = 'spark' if backend == SPARK_BACKEND else 'mapped-palm'
+        coordinator_id, producer_id, executor_id = (instance_id + '-' + name for name in ('coord', producer_suffix, 'sim'))
         def authority(logical, identity, enabled=True):
             return dict(logical_id=logical, publisher_instance_id=identity, router_zid=router_zid, enabled=enabled)
         self.authorities = dict(source=authority('tjvr', self.source_instance_id),
-            producer_arm=authority('ik_spark_headroom', producer_id),
+            producer_arm=authority(selected['producer_id'], producer_id),
             coordinator_arm=authority('arm', coordinator_id), executor_arm=authority('mujoco', executor_id),
             producer_hand=authority('official_wuji_hand2', instance_id + '-hand', bool(hand_sides)),
             executor_hand={side: authority('wuji_' + side, executor_id, side in hand_sides)
@@ -82,7 +84,8 @@ class SparkLiveSimulation:
                 profile=dict(required_capability='simulation', active_sides=['left', 'right'],
                     active_hand_sides=list(hand_sides),
                     authorities=self.authorities, bilateral_proposals=dict(run_id=run_id, execution_epoch=1)))
-            worker = SparkWorkerClient(worker=root / 'build/spark-native/spark_native_worker',
+            client = SparkWorkerClient if backend == SPARK_BACKEND else selected['client']
+            worker = client(worker=selected['worker'],
                 config=config, model=model_path, urdf=urdf, startup_handshake=True)
         except BaseException:
             if self.coordinator is not None:
@@ -93,7 +96,8 @@ class SparkLiveSimulation:
             self.producer = SparkProducer(worker, run_id=run_id, execution_epoch=1,
                 publisher_instance_id=producer_id, coordinator_instance_id=coordinator_id,
                 router_zid=router_zid, receiver_instance_id=self.source_instance_id,
-                maximum_receipt_age_ns=100_000_000, session_timeout_ns=200_000_000, max_in_flight=1)
+                maximum_receipt_age_ns=100_000_000, session_timeout_ns=200_000_000, max_in_flight=1,
+                producer_id=selected['producer_id'], algorithm=backend)
         except BaseException:
             worker.close()
             self.coordinator.close()
@@ -201,6 +205,8 @@ class SparkLiveSimulation:
             router_zid=self.router_zid))
 
     def step(self, sample=None, *, source_failure=None):
+        self.last_timing = {}
+        step_started = time.perf_counter()
         if self._closed:
             raise RuntimeError('simulation closed')
         now = self.clock()
@@ -238,7 +244,9 @@ class SparkLiveSimulation:
             co.update_component(self._hand_producer_status, received_ns=now)
             self._update_hand_feedback(now)
         cycle_started = time.monotonic_ns()
+        before_cycle = time.perf_counter()
         result = self.cycle.step(now)
+        after_cycle = time.perf_counter()
         cycle_duration_ns = time.monotonic_ns() - cycle_started
         if not self.sim.on_bilateral_command(co.last_bilateral_command):
             self.producer.guard.pause('paired simulator command rejected')
@@ -266,6 +274,11 @@ class SparkLiveSimulation:
         # Store executed feedback, not only the pre-command sample. In
         # particular the final Home command can become exact on this tick.
         co.update_arm_state(self.sim.arm_state, received_ns=self.clock())
+        self.last_timing = dict(input_and_feedback=before_cycle-step_started,
+            coordinator_cycle=after_cycle-before_cycle,
+            command_and_simulation=time.perf_counter()-after_cycle)
+        if result.native_result is not None:
+            self.last_timing.update(getattr(self.producer.backend, 'last_timing', {}))
         return result
 
     def close(self):

@@ -15,7 +15,7 @@ PICO＋双 VR 手柄＋Manus 手套（机械臂与舞肌二代手）。以下指
 | 会话 profile | `pico2_hands_sim` | `pico_vr_manus_sim` |
 | 头显应用 | PICO_2 手追踪采集 APK | `com.PICO.wholebody_stream.unity` |
 | USB 数据端口 | 手动转发 TCP 10002 | 启动器管理 TCP 9999 |
-| 机械臂输入 / IK | 头相对双腕 / v131 QP | 原版 driver/M0/TJVR / SPARK |
+| 机械臂输入 / IK | 头相对双腕 / v131 QP | 原版 driver/M0/TJVR / SPARK（默认）或 mapped-palm QP |
 | 手指输入 | PICO 裸手骨架 | Manus 手套骨架 |
 | 启动终端按键 | `c` 仅 Z 标定，`s` 开始/回 Home，`q` 退出 | `s` 开始，`h` 回 Home，`r` 在 Home 重置，`q` 退出 |
 
@@ -257,6 +257,131 @@ pixi run python scripts/check_dual_recording.py --mode manus --input "$RECORDING
 按 `s` 无反应或 H5 为 `complete=false`，保留录制及本次日志，先检查 Manus 有效输入、
 USB 权限和标定路径。不要删除运行锁来启动第二个会话；确认旧会话退出后重启，
 启动器会恢复清理已登记的遗留进程。
+
+### 可选：正式 bandwidth mapped-palm QP＋Manus
+
+新增 `pico_ee_mapped_corrected_palm_velocity_qp` 后端，来源为参考工程
+`feature/pico-manus-teleop-experiments` 的正式 bandwidth baseline，tag
+`pico-mapped-wuji-hand2-bandwidth-smoothness-baseline-20260906`。
+不指定 `--ik-backend` 时，上述 VR/Manus 命令继续使用原 SPARK；PICO2 指令保持不变。
+
+新后端直接使用 corrected skeleton 的 mapped 掌心及肩/肘/腕平面臂角，
+经过原版 LF/HF Cartesian 前馈、Headroom、臂角/零空间和约束 Velocity QP。
+不执行 SPARK IK 或 SPARK 骨长缩放，但仍需要完整 corrected 上肢骨架。
+控制周期 200 Hz，使用 `model_reference` 和 `hand_tcp_frame_L/R`。
+原版内部平滑项保留；不额外叠加通用目标整形、关节 Ruckig 或逐步命令裁剪。
+
+首次使用或新后端源码更新后，在工程根目录构建：
+
+```bash
+pixi install --manifest-path tools/mapped_palm_native/pixi.toml --locked
+pixi run --manifest-path tools/mapped_palm_native/pixi.toml configure
+pixi run --manifest-path tools/mapped_palm_native/pixi.toml build
+```
+
+前述内嵌 PICO、官方 Hand2、C++ HDF5 依赖和个人标定仍需准备好。
+保持 router 终端运行，在另一个终端启动（填写本机 Manus 路径及人员名称）：
+
+```bash
+MANUS_RAWVIZ=/实际路径/manus/rawviz.out
+TELEOP_TEST_ID=$(date +%Y%m%d_%H%M%S)
+mkdir -p recordings/device_acceptance
+RECORDING="recordings/device_acceptance/mapped_palm_manus_${TELEOP_TEST_ID}.h5"
+
+adb devices -l
+
+TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447 \
+pixi run bash scripts/run_session.sh \
+  --profile pico_vr_manus_sim \
+  --viewer \
+  --ik-backend pico_ee_mapped_corrected_palm_velocity_qp \
+  --arm-target-processor passthrough \
+  --joint-trajectory passthrough \
+  --command-step-clipping false \
+  --joint-limit-source urdf \
+  --tjvr-bind 127.0.0.1 \
+  --tjvr-port 15000 \
+  --manus-rawviz "$MANUS_RAWVIZ" \
+  --manus-user gjy \
+  --spark-overlay \
+  --pico-startup-timeout-s 30 \
+  --record "$RECORDING"
+```
+
+`--spark-overlay` 在此仍是共享的 corrected 骨架/机械臂目标显示开关，不代表使用 SPARK IK。
+新 mapped 后端显示的是 IK 已采用的 corrected 骨架和实际目标，隐藏未使用的 packet
+目标及骨架原始姿态轴；模型自带的目标标记同步到实际目标，不再停留在 XML 默认位置。
+未开始/回 Home 时不显示已采用骨架，模型标记跟随当前渲染 TCP；失效骨架会隐藏。
+该显示行为仅作用于 mapped 后端，不改变原 SPARK 和 PICO2 的显示或控制流程。
+只测双臂时移除 `--manus-rawviz`、`--manus-user` 两项并加 `--disable-hands`。
+按键仍为启动终端 `s` 开始、`h` 回 Home、`r` 在 Home 重置、`q` 退出；不使用裸手路线的 `c` 标定。
+原版 mapped 后端的输入超时为 50 ms，过期由原版 hold/约束处理；断连或组件故障仍按会话规则处理。
+
+#### 可选：先按 c 做仅 Z 高度标定
+
+原版映射仍是默认。仅在上述 mapped 后端命令中增加
+`--mapped-palm-height-calibration`，即可使用独立的高度标定入口；不适用于 SPARK、XR 或
+PICO2，不会改变它们的标定/遥操流程。更新后先重新构建该原生 worker：
+
+```bash
+pixi run --manifest-path tools/mapped_palm_native/pixi.toml build
+```
+
+保持 router 运行，使用 wholebody APK。仅测试 PICO＋VR 手柄、不接 Manus：
+
+```bash
+adb devices -l
+mkdir -p recordings/device_acceptance
+TELEOP_TEST_ID=$(date +%Y%m%d_%H%M%S)
+
+TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447 \
+pixi run bash scripts/run_session.sh \
+  --profile pico_vr_manus_sim --viewer --disable-hands \
+  --ik-backend pico_ee_mapped_corrected_palm_velocity_qp \
+  --mapped-palm-height-calibration \
+  --arm-target-processor passthrough --joint-trajectory passthrough \
+  --command-step-clipping false --joint-limit-source urdf \
+  --tjvr-bind 127.0.0.1 --tjvr-port 15000 \
+  --spark-overlay --pico-startup-timeout-s 30 \
+  --record "recordings/device_acceptance/mapped_palm_height_${TELEOP_TEST_ID}.h5"
+```
+
+在启动终端按 `c`，双臂水平伸直、手柄稳定保持约 2 秒；看到
+`state: calibrated` 的标定结果后按 `s`。采集中或首次未成功时拒绝开始；移动过大、
+数据过期或 epoch 变化时本次失败，可重新按 `c`，上次成功结果保留。
+运行中不能标定；需先 `h` 回健康 Home。`r` 重置保持已成功的偏移；重新启动会话需重新标定。
+
+它沿用“水平姿势仅校正 Z”的操作方式，并非切换成 PICO2 头相对坐标映射：
+目标仍来自当前 corrected 骨架。左右偏移分别为当前模型水平 TCP 高度减去采样掌心高度；
+X/Y、姿态、比例和肩肘腕臂角保持原样，不会让机器人真的伸臂执行标定。
+HDF5 保留原始 TJVR，另记录标定事件、Home reset ack 和原生周期的
+`target_height_offsets_m`；这条校准路线不声明与原版默认目标数值等价。
+青色 `Applied corrected` 骨架保留原始已应用点位，不随高度标定整体移动。
+紫色 `Z calibrated palm position` 单独显示加 Z 偏移后的掌心位置；黄色
+`Mapped-palm IK target` 显示 native 输出的实际 IK 目标。前两者仅在输入新鲜时显示。
+高度标定仍会改变实际掌心目标 Z；原始采集和臂角输入不变，不能视为与原版输出完全等价。
+启动终端仅显示运行摘要，完整配置和资源哈希保存在录制的 metadata 中。
+VR 会话可视化刷新上限为 60 Hz，机械臂控制仍按 200 Hz 调度。
+退出报告的 `native_ticks` 是最后一轮 reset 后的计数，`native_ticks_total` 是全程累计；
+`late_cycles` 是错过计划截止时间的次数，并非 IK 失败次数。
+`timing` 分别统计输入/健康检查、控制 step、快照及整个周期工作的耗时，单位 ms。
+`exit_trigger` 区分信号、关闭窗口、时长结束及操作退出；只有按 `q` 完成回位才报告
+`home_return_completed=true`。Ctrl-C 直接停止会话，不表示已回 Home。
+移除新增选项即回到原版映射。加入 Manus 时移除 `--disable-hands` 并填写前述 Manus 参数。
+
+录制检查继续使用 `check_dual_recording.py --mode tjvr` 和 `--mode manus`。
+软件已完成原版短轨迹逐周期对照和合成 Manus＋官方 Hand2＋C++ HDF5 的仿真联调；
+新后端的真实 PICO＋手柄＋Manus 现场验收待执行。
+详见 [mapped-palm 移植验证记录](docs/mapped-palm-porting.md)。
+
+**已知限制（2026-09-13）：** mapped-palm 已完成真实 PICO＋VR 手柄的仅机械臂仿真测试，
+包括 Z 标定、`s` 启动、`q` 回 Home 和完整录制。大幅转腕时仍可能出现明显位置误差；
+同一转腕输入的原版独立回放也复现了该现象，两边逐周期输出对照通过。
+这不是“固定位置、只转姿态”模式，不能以求解成功代替跟踪精度验收。
+详情见 [转腕对照报告](docs/mapped-palm-rotation-comparison.md)。
+新后端＋真实 Manus 的完整现场验收、实时性能和真机控制仍未通过本轮验证。
+
+### PICO VR 多设备与启动检查
 
 多设备示例（将 `PICO_SERIAL` 替换为 `adb devices -l` 中的实际 serial）：
 

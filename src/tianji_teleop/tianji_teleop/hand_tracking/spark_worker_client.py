@@ -21,6 +21,8 @@ from ..worker_environment import isolated_worker_environment
 
 
 class SparkWorkerClient:
+    ALGORITHM = SPARK_BACKEND
+    WIRE_PREFIX = 'spark'
     def __init__(self, *, worker, config, model, urdf,
                  required_capability='simulation', timeout_seconds=20.,
                  deterministic_test=False, startup_handshake=False):
@@ -46,6 +48,7 @@ class SparkWorkerClient:
         self._tick = 0
         self._now = 0
         self._execution_epoch = 1
+        self.last_timing = {}
         self._process = subprocess.Popen(command, stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, bufsize=0, env=isolated_worker_environment())
         self._selector = selectors.DefaultSelector()
@@ -68,8 +71,8 @@ class SparkWorkerClient:
                         raise ValueError('oversized SPARK startup handshake')
                 if data.count(b'\n') != 1 or not data.endswith(b'\n'):
                     raise ValueError('unsolicited SPARK startup output')
-                expected = dict(schema_version=1, kind='spark_worker_ready',
-                                algorithm=SPARK_BACKEND, native_ticks=0)
+                expected = dict(schema_version=1, kind=self.WIRE_PREFIX + '_worker_ready',
+                                algorithm=self.ALGORITHM, native_ticks=0)
                 ready = strict_loads(data)
                 if (not isinstance(ready, dict) or ready != expected or
                         any(type(ready[k]) is not type(v) for k, v in expected.items())):
@@ -90,16 +93,26 @@ class SparkWorkerClient:
                 received = tick.sample.observation.frame.received_timestamp_ns
                 if not 0 < received <= tick.now_ns:
                     raise ValueError('sample receive time must be positive and not in the future')
+            self.last_timing = {}
+            started = time.perf_counter()
             request = encode_tick(tick).encode('ascii')
             if len(request) > 2048:
                 raise ValueError('SPARK request exceeds bounded IPC size')
             try:
+                encoded = time.perf_counter()
                 result = self._exchange(request, f'tick {tick.tick_id}')
-                _validate_result(result, tick, self._deterministic)
+                exchanged = time.perf_counter()
+                _validate_result(result, tick, self._deterministic,
+                                 algorithm=self.ALGORITHM, wire_prefix=self.WIRE_PREFIX)
+                validated = time.perf_counter()
             except BaseException:
                 self._shutdown()
                 raise
             self._tick, self._now = tick.tick_id, tick.now_ns
+            # Owner-thread diagnostics, deliberately excluded from wire results.
+            self.last_timing = dict(request_encode=encoded-started,
+                ipc_roundtrip_decode=exchanged-encoded,
+                result_validate=validated-exchanged)
             return result
 
     def _exchange(self, request, context):
@@ -142,7 +155,7 @@ class SparkWorkerClient:
             request = ('TJSR1 ' + str(execution_epoch) + ' ' + ' '.join(map(repr, q)) + '\n').encode('ascii')
             try:
                 ack = self._exchange(request, f'reset epoch {execution_epoch}')
-                expected = dict(schema_version=1, kind='spark_reset_ack', execution_epoch=execution_epoch,
+                expected = dict(schema_version=1, kind=self.WIRE_PREFIX + '_reset_ack', execution_epoch=execution_epoch,
                     position_rad=q, velocity_rad_s=[0.] * 14, acceleration_rad_s2=[0.] * 14)
                 if (not isinstance(ack, dict) or ack != expected or
                         type(ack.get('schema_version')) is not int or type(ack.get('execution_epoch')) is not int or
@@ -181,7 +194,7 @@ class SparkWorkerClient:
         self.close()
 
 
-def _validate_result(row, tick, deterministic):
+def _validate_result(row, tick, deterministic, *, algorithm=SPARK_BACKEND, wire_prefix='spark'):
     def finite(value):
         if isinstance(value, dict):
             return all(finite(v) for v in value.values())
@@ -190,8 +203,8 @@ def _validate_result(row, tick, deterministic):
         return type(value) is not float or math.isfinite(value)
     if not finite(row):
         raise ValueError('non-finite SPARK result or diagnostic')
-    expected = dict(schema_version=1, kind='spark_bilateral_result',
-                    algorithm=SPARK_BACKEND, state_source='model_reference',
+    expected = dict(schema_version=1, kind=wire_prefix + '_bilateral_result',
+                    algorithm=algorithm, state_source='model_reference',
                     simulation_only=True, deterministic_test=deterministic,
                     tick_id=tick.tick_id, timestamp_ns=tick.now_ns)
     if not isinstance(row, dict) or any(type(row.get(k)) is not type(v) or row[k] != v

@@ -26,6 +26,23 @@ from .live_simulation import SparkLiveSimulation
 _LIVE_THREAD_SWITCH_INTERVAL_S = 0.001
 
 
+def startup_summary(run_id, resolved):
+    """Human-readable startup; full asset provenance stays in recording metadata."""
+    config = resolved['config']
+    return (f"Teleop ready: run_id={run_id}; IK={config['ik_backend']}; "
+            f"hands={config['hands_enabled']}; rate={config['rate_hz']} Hz; "
+            f"Z calibration={resolved.get('mapped_palm_height_calibration', False)}; "
+            f"record={resolved.get('record_path')}")
+
+
+def live_exit_trigger(failure, state, exit_after_home, trigger):
+    if failure or state == 'fault':
+        return 'fault'
+    if trigger == 'control_stop' and exit_after_home and state == 'idle':
+        return 'operator_shutdown'
+    return trigger
+
+
 def _close_live_recording(recorder, *, exit_code):
     """Persist the final process result before ExitStack cleanup runs."""
     if recorder is not None:
@@ -89,9 +106,15 @@ def run_live(root, args, resolved):
         raise RuntimeError('use the managed run_session launcher; explicit session identities required')
     run_id, instance, expected_router = (os.environ[k] for k in required)
     stop = Event()
+    exit_trigger = 'control_stop'
     keys = queue.Queue(maxsize=64)
+    height_enabled = resolved.get('mapped_palm_height_calibration', False)
+    simulation_class, control_class = SparkLiveSimulation, SparkControlLoop
+    if height_enabled:
+        from .mapped_height_simulation import MappedHeightSimulation, MappedHeightControlLoop
+        simulation_class, control_class = MappedHeightSimulation, MappedHeightControlLoop
     def key_callback(value):
-        key = decode_key(value)
+        key = 'c' if height_enabled and value in (ord('c'), ord('C')) else decode_key(value)
         if key is not None:
             try:
                 keys.put_nowait(key)
@@ -109,6 +132,8 @@ def run_live(root, args, resolved):
             from ...recording.async_dual import AsyncDualRecorder
             from ...recording.live_capture import LiveCapture
             recorder = stack.enter_context(AsyncDualRecorder(args.record, router_zid=router,
+                robot_model=('mapped_palm/marvin_m6_wuji2'
+                    if resolved['config']['retarget_owner'] == 'mapped_palm' else 'spark/marvin_m6_wuji2'),
                 metadata=dict(run_id=run_id, resolved_configuration=resolved,
                               real_time_qualified=False, input_clock='host_monotonic_ns')))
             capture = LiveCapture(recorder, run_id=run_id)
@@ -122,7 +147,8 @@ def run_live(root, args, resolved):
         if not args.disable_hands:
             hand_client = _make_hand_client(root, resolved['config']['active_hand_sides'])
             stack.callback(hand_client.close)
-        core = SparkLiveSimulation(root, run_id=run_id, router_zid=router, instance_id=instance,
+        core = simulation_class(root, run_id=run_id, router_zid=router, instance_id=instance,
+            backend=resolved['config']['ik_backend'],
             session=output.session_proxy(), hand_sides=tuple(resolved['config']['active_hand_sides']),
             hand_source=slot if hand_client else None, hand_backend=hand_client,
             hand_command_sink=capture.hand_output if capture else None,
@@ -131,9 +157,16 @@ def run_live(root, args, resolved):
                 else 'manus_expired_input', row)) if capture else None)
         stack.callback(core.close)
         overlay = None
+        mapped_overlay = None
         if args.spark_overlay:
             from ...executors.mujoco.spark_overlay import SparkOverlay
-            overlay = SparkOverlay(core.source_instance_id)
+            from ...hand_tracking.input_modes import MAPPED_PALM_BACKEND
+            if resolved['config']['ik_backend'] == MAPPED_PALM_BACKEND:
+                from ...executors.mujoco.mapped_palm_overlay import MappedPalmOverlay
+                mapped_overlay = MappedPalmOverlay(core.source_instance_id)
+                overlay = mapped_overlay
+            else:
+                overlay = SparkOverlay(core.source_instance_id, algorithm=resolved['config']['ik_backend'])
         if capture:
             capture.audit('lifecycle', dict(stage='core_ready', authorities=core.authorities,
                 manus_receiver_instance_id=instance + '-manus' if hand_client else None,
@@ -190,6 +223,7 @@ def run_live(root, args, resolved):
             output.put_json(RAW_REFERENCE_TJVR, ReferenceTjvrRaw(frame, router).to_dict())
 
         receiver = ReferenceTjvrUdp(receiver_instance_id=core.source_instance_id,
+            target_source=resolved['tjvr_stream_contract'].get('target_source', 'packet'),
             host=args.tjvr_bind, port=args.tjvr_port, raw_frame_sink=raw_frame,
             max_position_jump_m=resolved['tjvr_stream_contract']['max_position_jump_m'],
             max_orientation_jump_rad=resolved['tjvr_stream_contract']['max_orientation_jump_rad'],
@@ -201,7 +235,10 @@ def run_live(root, args, resolved):
                 if capture:
                     capture.audit('operator_result', snapshot.report)
                 return
-            if overlay and snapshot.result.native_result is not None:
+            if mapped_overlay is not None:
+                mapped_overlay.ingest_cycle(snapshot.result.native_result, snapshot.result.native_attempt,
+                    execution_epoch=snapshot.execution_epoch, active=snapshot.session_state.state == 'teleop')
+            elif overlay and snapshot.result.native_result is not None:
                 overlay.ingest_native(snapshot.result.native_result,
                                       execution_epoch=snapshot.execution_epoch)
             if capture:
@@ -227,8 +264,13 @@ def run_live(root, args, resolved):
             return (guard.failure or receiver.failure or side_effects.failure or output.failure or
                     (recorder.failure if recorder else None))
 
+        def stop_signal(signum, _frame):
+            nonlocal exit_trigger
+            exit_trigger = signal.Signals(signum).name
+            stop.set()
+
         for sig in (signal.SIGINT, signal.SIGTERM):
-            previous = signal.signal(sig, lambda *_: stop.set())
+            previous = signal.signal(sig, stop_signal)
             stack.callback(signal.signal, sig, previous)
         if sys.stdin.isatty():
             saved = termios.tcgetattr(sys.stdin.fileno())
@@ -246,7 +288,7 @@ def run_live(root, args, resolved):
             viewer = stack.enter_context(mujoco.viewer.launch_passive(
                 core.sim.model, render_data, key_callback=key_callback))
 
-        control = SparkControlLoop(core, receiver, stop_event=stop,
+        control = control_class(core, receiver, stop_event=stop,
             period_s=1. / resolved['config']['rate_hz'], failure_fn=live_failure,
             snapshot_sink=side_effects)
 
@@ -254,18 +296,26 @@ def run_live(root, args, resolved):
             for report in control.poll_reports():
                 print(json.dumps(report), flush=True)
 
-        print(json.dumps(dict(kind='dual_live_started', run_id=run_id, router_zid=router,
-            tjvr_bind=list(receiver.address), resolved=resolved, authorities=core.authorities)), flush=True)
+        print(startup_summary(run_id, resolved), flush=True)
         print('s: start (requires fresh input); h: return Home; r: rearm at Home (then new input + s); '
               'q: return and exit. Fault requires restart.', flush=True)
+        if height_enabled:
+            print('c: hold both arms horizontal for 2 seconds (Z-only calibration), then s to start.', flush=True)
         started = time.monotonic()
+        next_render = started
         control.start()
+        from .stall_probe import ControlStallProbe
+        stall_probe = ControlStallProbe(control.diagnostic_snapshot)
+        stack.callback(stall_probe.close)
         try:
+            stall_probe.start()
             while not stop.is_set():
                 if viewer is not None and not viewer.is_running():
+                    exit_trigger = 'viewer_closed'
                     stop.set()
                     break
                 if args.duration_s is not None and time.monotonic() - started >= args.duration_s:
+                    exit_trigger = 'duration_elapsed'
                     stop.set()
                     break
                 if select.select([sys.stdin], [], [], 0)[0]:
@@ -274,10 +324,12 @@ def run_live(root, args, resolved):
                         key_callback(value)
                 while not keys.empty():
                     key = keys.get_nowait()
-                    action = 'rearm' if key == 'r' else 'start' if key == 's' else 'shutdown' if key == 'q' else 'return'
+                    action = ('calibrate' if key == 'c' and height_enabled else
+                              'rearm' if key == 'r' else 'start' if key == 's' else 'shutdown' if key == 'q' else 'return')
                     control.submit(action)
                 emit_reports()
-                if viewer is not None:
+                if viewer is not None and time.monotonic() >= next_render:
+                    next_render = time.monotonic() + 1. / 60.
                     import mujoco
                     snapshot = control.latest
                     with viewer.lock():
@@ -286,6 +338,10 @@ def run_live(root, args, resolved):
                                 render_data, snapshot.arm_state.position_rad,
                                 {side: state.position_rad for side, state in snapshot.hand_states.items()})
                         viewer.user_scn.ngeom = 0
+                        if mapped_overlay is not None:
+                            mapped_overlay.update_render_targets(core.sim.model, render_data, mujoco,
+                                                                 time.monotonic_ns(),
+                                                                 fk_current=snapshot is not None)
                         if overlay:
                             overlay.append(viewer.user_scn, mujoco, time.monotonic_ns())
                     viewer.sync()
@@ -293,6 +349,7 @@ def run_live(root, args, resolved):
         finally:
             stop.set()
             control.join(timeout=5)
+            stall_probe.close()
             if control.is_alive():
                 raise RuntimeError('Spark control loop did not stop')
 
@@ -307,6 +364,13 @@ def run_live(root, args, resolved):
         reason = failure or control.reason
         report = dict(kind='dual_live_complete', state=state, reason=reason,
             native_ticks=control.native_ticks, late_cycles=control.late_cycles,
+            native_ticks_total=control.native_ticks_total,
+            exit_trigger=live_exit_trigger(failure, state, control.exit_after_home, exit_trigger),
+            home_return_completed=control.exit_after_home and state == 'idle',
+            timing=control.timing,
+            control_stalls=stall_probe.samples,
+            control_stalls_dropped=stall_probe.dropped,
+            control_stall_probe_error=stall_probe.error,
             control_ticks=control.tick_count, real_time_qualified=False)
         exit_code = 1 if failure or state == 'fault' else 0
         try:

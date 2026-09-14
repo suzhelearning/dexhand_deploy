@@ -1,6 +1,9 @@
 # 五工程联合路线参考契约（源码核对记录）
 
-版本见 `dual_input_migration_manifest.md`。本记录区分已核实行为与尚未完成的运行验证，不能作为等价性通过报告。
+版本见 `dual_input_migration_manifest.md`。本记录保存阶段性的源码核对和验证证据，不能作为完整等价性通过报告。
+下文“待完成”“接线未完成”指记录当时的状态；当前操作与交付范围见
+[README](../README.md) 和 [真实输入仿真验收单](real-input-simulation-acceptance.md)。
+后续进展不改变本记录中已限定的对照范围，也不自动补足未测试分支。
 
 ## 已核实行为
 

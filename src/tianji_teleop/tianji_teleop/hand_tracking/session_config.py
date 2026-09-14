@@ -7,7 +7,7 @@ from copy import deepcopy
 import math
 from collections.abc import Mapping
 
-from .input_modes import resolve_input_mode, validate_ik_input, SPARK_BACKEND
+from .input_modes import resolve_input_mode, validate_ik_input, SPARK_BACKEND, MAPPED_PALM_BACKEND
 
 _INPUT = {'input_mode', 'hand_input', 'arm_input', 'operator_input'}
 _COMMON = _INPUT | {'required_capability', 'active_sides', 'active_hand_sides', 'ik_backend',
@@ -53,8 +53,11 @@ def resolve_session(value, *, disable_hands=False):
         raise ValueError('unknown arm target processor')
     if config['joint_trajectory'] not in ('passthrough', 'ruckig'):
         raise ValueError('unknown joint trajectory processor')
-    if config['ik_backend'] == SPARK_BACKEND:
-        if (config['arm_pose_mapper'] != 'none' or config['retarget_owner'] != 'spark' or
+    if config['ik_backend'] in (SPARK_BACKEND, MAPPED_PALM_BACKEND):
+        if config['ik_backend'] == MAPPED_PALM_BACKEND and config['retarget_owner'] == 'spark':
+            config['retarget_owner'] = 'mapped_palm'
+        owner = 'spark' if config['ik_backend'] == SPARK_BACKEND else 'mapped_palm'
+        if (config['arm_pose_mapper'] != 'none' or config['retarget_owner'] != owner or
                 sorted(config['active_sides']) != ['left', 'right'] or config['joint_limit_source'] != 'urdf'):
             raise ValueError('SPARK owns bilateral skeleton retargeting; no pose remapping or shared YAML limits')
         if config.get('reference_execution_mode') != 'reference_direct':

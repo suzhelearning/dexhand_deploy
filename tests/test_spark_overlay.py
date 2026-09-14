@@ -5,11 +5,25 @@ import mujoco
 import numpy as np
 
 from tianji_teleop.hand_tracking.reference_tjvr import parse_reference_tjvr_packet
-from tianji_teleop.hand_tracking.input_modes import SPARK_BACKEND
+from tianji_teleop.hand_tracking.input_modes import SPARK_BACKEND, MAPPED_PALM_BACKEND
 from tests.test_reference_tjvr_receiver import packet
 
 
 class SparkOverlayTest(unittest.TestCase):
+    def test_mapped_overlay_selects_identity_and_labels_without_accepting_spark(self):
+        from tianji_teleop.executors.mujoco.spark_overlay import SparkOverlay
+        overlay = SparkOverlay('receiver', algorithm=MAPPED_PALM_BACKEND)
+        self.assertFalse(overlay.ingest_native(self.native(), execution_epoch=1))
+        row = self.native()
+        row['algorithm'] = MAPPED_PALM_BACKEND
+        self.assertTrue(overlay.ingest_native(row, execution_epoch=1))
+        markers, _ = overlay.geometry(1001)
+        self.assertEqual([m['label'] for m in markers],
+                         ['Mapped-palm IK target left', 'Mapped-palm IK target right'])
+        self.assertFalse(self.make().ingest_native(row, execution_epoch=1))
+        with self.assertRaises(ValueError):
+            SparkOverlay('receiver', algorithm='unknown')
+
     def make(self):
         name = 'tianji_teleop.executors.mujoco.spark_overlay'
         self.assertIsNotNone(importlib.util.find_spec(name))

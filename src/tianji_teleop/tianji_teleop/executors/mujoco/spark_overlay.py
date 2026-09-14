@@ -10,15 +10,19 @@ from threading import Lock
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from ...hand_tracking.input_modes import SPARK_BACKEND
+from ...hand_tracking.input_modes import SPARK_BACKEND, MAPPED_PALM_BACKEND
 from ...hand_tracking.reference_tjvr import ReferenceTjvrFrame
 
 
 class SparkOverlay:
-    def __init__(self, receiver_instance_id):
+    def __init__(self, receiver_instance_id, *, algorithm=SPARK_BACKEND):
         if not isinstance(receiver_instance_id, str) or not receiver_instance_id:
             raise ValueError('overlay receiver identity required')
         self._receiver = receiver_instance_id
+        if algorithm not in (SPARK_BACKEND, MAPPED_PALM_BACKEND):
+            raise ValueError('unsupported overlay algorithm')
+        self._algorithm = algorithm
+        self._label = 'SPARK' if algorithm == SPARK_BACKEND else 'Mapped-palm'
         self._lock = Lock()
         self._raw = None
         self._native = None
@@ -36,7 +40,7 @@ class SparkOverlay:
     def ingest_native(self, value, *, execution_epoch):
         try:
             if (type(execution_epoch) is not int or not 0 < execution_epoch < 2**63 or
-                    value['algorithm'] != SPARK_BACKEND or type(value['tick_id']) is not int or
+                    value['algorithm'] != self._algorithm or type(value['tick_id']) is not int or
                     value['tick_id'] <= 0 or type(value['timestamp_ns']) is not int or value['timestamp_ns'] <= 0):
                 return False
             for side in ('left', 'right'):
@@ -79,7 +83,7 @@ class SparkOverlay:
             stale = not 0 <= now_ns - native['timestamp_ns'] <= 200_000_000
             for side in ('left', 'right'):
                 arm = native[side]
-                marker(f'SPARK IK target {side}' + (' [stale]' if stale else ''), arm['target_position'],
+                marker(f'{self._label} IK target {side}' + (' [stale]' if stale else ''), arm['target_position'],
                        (.5, .5, .5, 1.) if stale else (1., .75, .05, 1.), arm['target_quaternion_xyzw'])
         return markers, bones
 

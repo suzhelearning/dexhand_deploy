@@ -230,8 +230,19 @@ class SparkControlLoop:
         self._reason = 'startup'
         self._tick_count = 0
         self._native_ticks = 0
+        self._native_ticks_total = 0
+        self._timing = {}
         self._late_cycles = 0
         self._exit_after_home = False
+        self._diagnostic_phase = ('stopped', 0., 'idle', 0)
+
+    def diagnostic_snapshot(self):
+        # Immutable tuple publication by the single control owner. The probe
+        # must not wait on control locks to diagnose a blocked control thread.
+        return (self._thread.ident if self._thread else None, self._diagnostic_phase)
+
+    def _phase(self, name):
+        self._diagnostic_phase = (name, time.monotonic(), self._state, self._tick_count)
 
     @property
     def failure(self) -> str | None:
@@ -262,6 +273,29 @@ class SparkControlLoop:
     def native_ticks(self) -> int:
         with self._lock:
             return self._native_ticks
+
+    @property
+    def native_ticks_total(self) -> int:
+        with self._lock:
+            return self._native_ticks_total
+
+    @property
+    def exit_after_home(self) -> bool:
+        return self._exit_after_home
+
+    @property
+    def timing(self):
+        with self._lock:
+            return {name: dict(count=n, mean_ms=total / n * 1000,
+                               max_ms=maximum * 1000,
+                               over_period=over)
+                    for name, (n, total, maximum, over) in self._timing.items()}
+
+    def _measure(self, name, duration):
+        with self._lock:
+            n, total, maximum, over = self._timing.get(name, (0, 0., 0., 0))
+            self._timing[name] = (n + 1, total + duration, max(maximum, duration),
+                                  over + int(duration > self._period_s))
 
     @property
     def late_cycles(self) -> int:
@@ -336,18 +370,27 @@ class SparkControlLoop:
                 outcome = self._core.request(action)
                 report = dict(kind='operator_result', action=action,
                               accepted=outcome.accepted, reason=outcome.reason)
-                if action == 'shutdown':
+                if action == 'shutdown' and outcome.accepted:
                     self._exit_after_home = True
             self._emit_report(report)
+
+    def _deadline_after_barrier(self, deadline):
+        """Default reference schedule; specialized idle barriers may reanchor."""
+        return deadline + self._period_s
 
     def _run(self) -> None:
         deadline = self._clock()
         try:
             while not self._stop.is_set():
-                if self._process_actions():
-                    deadline += self._period_s
+                cycle_start = time.perf_counter()
+                self._phase('actions')
+                skip_tick = self._process_actions()
+                self._measure('actions', time.perf_counter() - cycle_start)
+                if skip_tick:
+                    deadline = self._deadline_after_barrier(deadline)
                     remaining = deadline - self._clock()
                     if remaining > 0:
+                        self._phase('waiting')
                         self._stop.wait(remaining)
                     else:
                         with self._lock:
@@ -355,11 +398,21 @@ class SparkControlLoop:
                         # Preserve the absolute deadline so a late control
                         # tick can catch up on the next iteration.
                     continue
+                input_start = time.perf_counter()
+                self._phase('input_health')
+                self._measure('schedule_lag', max(0., self._clock() - deadline))
+                sample = self._receiver.try_read_latest()
+                failure = self._failure_fn()
+                step_start = time.perf_counter()
+                self._phase('core_step')
                 result = self._core.step(
-                    self._receiver.try_read_latest(),
-                    source_failure=self._failure_fn(),
+                    sample, source_failure=failure,
                 )
+                snapshot_start = time.perf_counter()
+                self._phase('snapshot')
                 snapshot = LiveCycleSnapshot.from_core(self._core, result)
+                snapshot_end = time.perf_counter()
+                self._phase('publish_snapshot')
                 with self._lock:
                     self._latest = snapshot
                     self._state = snapshot.session_state.state
@@ -367,9 +420,16 @@ class SparkControlLoop:
                     self._tick_count += 1
                     if snapshot.result.native_result is not None:
                         self._native_ticks = snapshot.result.native_result.get('tick_id', self._native_ticks)
+                        self._native_ticks_total += 1
                 # This call is deliberately a put_nowait boundary.  It must
                 # never run recording, serialization, rendering, or network IO.
                 self._snapshot_sink.submit(snapshot)
+                self._measure('input_health', step_start - input_start)
+                self._measure('core_step', snapshot_start - step_start)
+                self._measure('snapshot', snapshot_end - snapshot_start)
+                for name, duration in getattr(self._core, 'last_timing', {}).items():
+                    self._measure(name, duration)
+                self._measure('cycle_work', time.perf_counter() - cycle_start)
                 if self._core.failure or self.state == 'fault':
                     self._stop.set()
                 elif self._exit_after_home and self.state == 'idle':
@@ -382,6 +442,9 @@ class SparkControlLoop:
                     # Preserve the absolute deadline; resetting it here
                     # would add a full period after every overrun.
                 else:
+                    self._phase('waiting')
                     self._stop.wait(remaining)
         except Exception as exc:
             self._latch_failure(exc)
+        finally:
+            self._phase('stopped')

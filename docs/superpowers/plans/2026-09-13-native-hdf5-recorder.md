@@ -1,6 +1,7 @@
 # Native HDF5 recorder implementation plan
 
-> Execute sequentially with executing-plans; no subagents and no commits.
+> Historical implementation record. Current scope and execution authority follow
+> [AGENTS.md](../../../AGENTS.md); this plan does not authorize restarting sessions or committing changes.
 
 **Goal:** Sustain VR/Manus recording without changing teleoperation or session schema 1.2.
 

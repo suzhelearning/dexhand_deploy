@@ -22,6 +22,36 @@ def check_tjvr_recording(path):
     thresholds = [contract.get(name) for name in ('max_position_jump_m', 'max_orientation_jump_rad')]
     if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0 for value in thresholds):
         raise ValueError('recorded TJVR jump thresholds must be finite and positive')
+    target_source = contract.get('target_source', 'packet')
+    if target_source not in ('packet', 'mapped_corrected_palm'):
+        raise ValueError('unknown recorded TJVR target source')
+    raw_count = len(raw)
+    receiver = raw[0]['receiver_instance_id'] if raw else None
+    previous_sequence, previous_time = 0, 0
+    # Validate the entire raw stream before excluding undecidable targets.
+    # Tracking loss does not exempt a row from receiver/ordering provenance.
+    for row in raw:
+        sequence, stamp = row['receiver_frame_sequence'], row['received_timestamp_ns']
+        if (row['receiver_instance_id'] != receiver or sequence <= previous_sequence or
+                stamp < previous_time or stamp <= 0):
+            raise ValueError('TJVR raw must preserve one receiver and strictly increasing receive ordinals')
+        previous_sequence, previous_time = sequence, stamp
+    invalid_selected_targets = 0
+    if target_source == 'mapped_corrected_palm':
+        from ..hand_tracking.mapped_palm_input import select_mapped_palm_frame
+        selected_raw = []
+        for row in raw:
+            observation = parse_reference_tjvr_packet(row['raw_packet'],
+                receiver_instance_id=row['receiver_instance_id'],
+                receiver_frame_sequence=row['receiver_frame_sequence'],
+                received_timestamp_ns=row['received_timestamp_ns'])
+            try:
+                select_mapped_palm_frame(observation.frame)
+            except ValueError:
+                invalid_selected_targets += 1
+            else:
+                selected_raw.append(row)
+        raw = selected_raw
     run_id = metadata.get('run_id')
     if not isinstance(run_id, str) or not run_id.strip():
         raise ValueError('recorded run_id required')
@@ -29,13 +59,16 @@ def check_tjvr_recording(path):
         raise ValueError('raw TJVR and recorded stream decisions both required; cannot infer missing history')
     gate = ReferenceTjvrStreamGate(*thresholds)
     report = dict(passed=True, scope='tjvr_raw_to_stream_decision_consistency',
-        raw_frames=len(raw), recorded_decisions=len(audits), matched_decisions=0,
+        raw_frames=raw_count, recorded_decisions=len(audits), matched_decisions=0,
         accepted=0, rejected=0, resynchronizations=0, first_difference=None,
         operator_events_executed=0, complete_plan_acceptance=False,
         limitations=['uses installed gate, not an independent original algorithm oracle',
             'no mapping, IK, authorization or actuator replay',
             'malformed datagrams are not recorded; receiver ordinals may have gaps',
             'cannot prove completeness if raw and matching audits were both removed'])
+    if target_source == 'mapped_corrected_palm':
+        report.update(target_source=target_source, invalid_selected_targets=invalid_selected_targets,
+                      gate_frames=len(raw))
 
     def difference(index, field):
         report['passed'] = False
@@ -44,18 +77,15 @@ def check_tjvr_recording(path):
 
     if len(raw) != len(audits):
         difference(min(len(raw), len(audits)), 'decision_count')
-    receiver = raw[0]['receiver_instance_id']
-    previous_sequence, previous_time, generation = 0, 0, 0
+    generation = 0
     accepted_frames = {}
     for index, row in enumerate(raw):
         sequence, stamp = row['receiver_frame_sequence'], row['received_timestamp_ns']
-        if (row['receiver_instance_id'] != receiver or sequence <= previous_sequence or
-                stamp < previous_time or stamp <= 0):
-            raise ValueError('TJVR raw must preserve one receiver and strictly increasing receive ordinals')
-        previous_sequence, previous_time = sequence, stamp
         observation = parse_reference_tjvr_packet(row['raw_packet'], receiver_instance_id=receiver,
             receiver_frame_sequence=sequence, received_timestamp_ns=stamp)
-        decision = gate.evaluate(observation.frame)
+        gate_frame = (select_mapped_palm_frame(observation.frame)
+                      if target_source == 'mapped_corrected_palm' else observation.frame)
+        decision = gate.evaluate(gate_frame)
         generation += int(decision.stream_discontinuity)
         if decision.accepted:
             accepted_frames[sequence] = ReceivedTjvrFrame(
