@@ -45,6 +45,10 @@ class HandRetargetLoop:
         self._processed = 0
         self._input_snapshot = None
         self._input_history = deque(maxlen=256)
+        self._input_rows = {}
+        self._coalesced_output_callbacks = 0
+        self._unresolved_output_callbacks = 0
+        self._last_accounted_sequence = 0
         self._seen_valid_sides = set()
         self._status_sequence = 0
         self._max_retarget_duration_ns = 0
@@ -110,10 +114,13 @@ class HandRetargetLoop:
                     max_callback_age_ns=self._max_callback_age_ns,
                     expired_callbacks=self._expired_callbacks,
                     superseded_callbacks=self._superseded_callbacks,
+                    coalesced_output_callbacks=self._coalesced_output_callbacks,
+                    pending_output_callbacks=len(self._input_rows),
+                    unresolved_output_callbacks=self._unresolved_output_callbacks,
                     tracking_hold_sides=sorted(set(required_sides) - valid) if holding else [],
                     input_timestamp_ns=snapshot['timestamp_ns'] if snapshot else None,
-                    latest_input_timestamp_ns=self._input_snapshot['timestamp_ns']
-                    if self._input_snapshot else None,
+                    latest_input_timestamp_ns=(self.producer.latest_input_snapshot or
+                                               self._input_snapshot or {}).get('timestamp_ns'),
                     readiness_reason=readiness_reason),
                 self.producer.publisher_instance_id, self.producer.router_zid)
 
@@ -140,6 +147,58 @@ class HandRetargetLoop:
                 timestamp_ns=row.received_timestamp_ns, age_ns=now - row.received_timestamp_ns,
                 freshness_ns=self.producer.freshness_ns, reason=reason))
 
+    def _remember_input(self, row):
+        with self._lock:
+            self._input_rows[row.sequence] = row
+            # Never silently discard an association that a delayed worker may
+            # still return. Fault explicitly if the bounded backlog is full.
+            if len(self._input_rows) > 1024:
+                raise RuntimeError('hand output association queue overflow')
+
+    def _collect_commands(self, now_ns):
+        """Poll completed retarget work independently of source callbacks."""
+        accounted = None
+        snapshot = None
+        with self._lock:
+            # Keep the session transition and publication in one owner lock.
+            # A stop/rearm event queued concurrently therefore cannot be
+            # overtaken by a deferred native result from the previous phase.
+            self._drain_sessions()
+            commands = self.producer.commands(now_ns)
+            if not self.producer.healthy:
+                raise RuntimeError(self.producer.reason or 'hand producer failed')
+            snapshot = self.producer.input_snapshot
+            if snapshot is not None and snapshot['sequence'] > self._last_accounted_sequence:
+                sequence = snapshot['sequence']
+                row = self._input_rows.pop(sequence, None)
+                if row is None:
+                    raise RuntimeError('hand output has no admitted input association')
+                for skipped in [key for key in self._input_rows if key < sequence]:
+                    self._input_rows.pop(skipped, None)
+                    self._coalesced_output_callbacks += 1
+                self._last_accounted_sequence = sequence
+                self._input_snapshot = snapshot
+                self._input_history.append(snapshot)
+                self._seen_valid_sides.update(snapshot['valid_sides'])
+                self._processed += 1
+                accounted = row
+        if accounted is not None and self._processed_input_sink is not None:
+            self._processed_input_sink(accounted, snapshot)
+        with self._lock:
+            # Audit can block or fail. Accept stop events while it runs, then
+            # fence the already generated commands before publication.
+            interrupted = any(state.state != 'teleop' for state in self._sessions)
+            self._drain_sessions()
+            now = self._clock()
+            if (self._stop.is_set() or self._failure or self.source.failure or interrupted or
+                    not self.producer.tracking_authorized(now) or
+                    any(not 0 <= now - row.timestamp_ns <= self.producer.freshness_ns
+                        for row in commands.values())):
+                return {}
+            if commands:
+                self._publish(commands)
+        return commands
+
     def _run(self):
         try:
             while not self._stop.is_set():
@@ -149,6 +208,7 @@ class HandRetargetLoop:
                     self._drain_sessions()
                 if self.source.failure:
                     raise RuntimeError(self.source.failure)
+                self._collect_commands(self._clock())
                 row = self.source.try_read()
                 if row is None:
                     self._stop.wait(.005)
@@ -193,24 +253,21 @@ class HandRetargetLoop:
                     raise RuntimeError(self.producer.reason or
                         f'hand callback rejected: sequence={row.sequence}, age_ns={age}, '
                         f'freshness_ns={self.producer.freshness_ns}, receiver={row.receiver_instance_id}')
-                if self._processed_input_sink is not None:
-                    self._processed_input_sink(row, self.producer.input_snapshot)
+                self._remember_input(row)
                 with self._lock:
-                    self._processed += 1
-                    self._input_snapshot = self.producer.input_snapshot
-                    self._input_history.append(self._input_snapshot)
-                    self._seen_valid_sides.update(self._input_snapshot['valid_sides'])
                     self._drain_sessions()
                     if self._stop.is_set() or self._failure:
                         return
                     if self.source.failure:
                         raise RuntimeError(self.source.failure)
-                    commands = self.producer.commands(self._clock())
-                    if commands:
-                        self._publish(commands)
+                self._collect_commands(self._clock())
         except Exception as exc:
             with self._lock:
                 self._failure = f'hand processing failed: {exc}'
+        finally:
+            with self._lock:
+                self._unresolved_output_callbacks += len(self._input_rows)
+                self._input_rows.clear()
 
     def close(self):
         self._stop.set()

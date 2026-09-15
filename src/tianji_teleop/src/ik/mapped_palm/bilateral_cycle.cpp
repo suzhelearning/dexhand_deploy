@@ -44,6 +44,7 @@ struct NativeMappedPalmCycle::Impl {
   std::array<PicoEeHeadroomGovernor, 2> headroom;
   bool paused;
   double left_height_offset{}, right_height_offset{};
+  double left_x_offset{},right_x_offset{};
   std::uint64_t last_tick{}, applied_epoch{}, applied_sequence{};
   std::int64_t last_now{};
   const double dt;
@@ -104,6 +105,8 @@ struct NativeMappedPalmCycle::Impl {
           candidate.setMode(TargetMode::kManual, time);
           auto mapped = selectMappedCorrectedPalm(*frame);
           if (mapped.valid) {
+            mapped.left.position.x() += left_x_offset;
+            mapped.right.position.x() += right_x_offset;
             mapped.left.position.z() += left_height_offset;
             mapped.right.position.z() += right_height_offset;
             const double age = 1e-9 * static_cast<double>(std::max<std::int64_t>(0, now - frame->bridge_send_monotonic_ns));
@@ -193,6 +196,12 @@ void NativeMappedPalmCycle::configure_height(double left, double right) {
     throw std::invalid_argument("height configuration requires tick zero and bounded finite offsets");
   impl_->left_height_offset = left;
   impl_->right_height_offset = right;
+}
+void NativeMappedPalmCycle::configure_xz(double lx,double rx,double lz,double rz) {
+  for(double v:{lx,rx,lz,rz}) if(!std::isfinite(v) || std::abs(v)>1.)
+    throw std::invalid_argument("XZ offsets must be finite within 1 m");
+  configure_height(lz,rz);
+  impl_->left_x_offset=lx;impl_->right_x_offset=rx;
 }
 void NativeMappedPalmCycle::reset_at_rest(const Vec7& l, const Vec7& r) {
   auto next = std::make_unique<Impl>(impl_->config, impl_->model_path, impl_->urdf_path,

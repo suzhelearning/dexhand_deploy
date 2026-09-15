@@ -24,6 +24,7 @@ class NativeMappedPalmCycle {
   void reset_at_rest(const Vec7& left, const Vec7& right);
   ArmMotionState reference_state(ArmSide side) const;
   void configure_height(double left, double right);
+  void configure_xz(double lx,double rx,double lz,double rz);
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

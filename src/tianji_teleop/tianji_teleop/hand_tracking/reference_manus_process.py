@@ -28,7 +28,8 @@ class ManusCallback:
 class ReferenceManusProcess:
     def __init__(self, *, command, receiver_instance_id, sides=('left', 'right'),
                  capacity=256, cwd=None, env=None, clock=time.monotonic_ns,
-                 right_glove=None, left_glove=None, raw_line_sink=None, callback_sink=None):
+                 right_glove=None, left_glove=None, raw_line_sink=None, callback_sink=None,
+                 parser_backend='python', parser_library=None):
         if (not isinstance(command, (list, tuple)) or not command or
                 any(not isinstance(v, str) or not v for v in command)):
             raise ValueError('rawviz command must be an explicit nonempty argument vector')
@@ -51,11 +52,22 @@ class ReferenceManusProcess:
         self._failure = None
         self._sequence = 0
         self._received_ns = 0
-        self._processor = RawvizHandInputProcessor(
-            HandInputAssembler('right' in sides, 'left' in sides), self._enqueue,
-            right_glove=right_glove, left_glove=left_glove)
-        self._process = subprocess.Popen(command, cwd=cwd, env=env,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, bufsize=0)
+        if parser_backend not in ('python','cpp'):
+            raise ValueError('Manus parser backend must be python or cpp')
+        if parser_backend == 'cpp':
+            from .native_manus_parser import NativeManusProcessor
+            self._processor = NativeManusProcessor(self._enqueue,sides=sides,
+                right_glove=right_glove,left_glove=left_glove,library=parser_library)
+        else:
+            self._processor = RawvizHandInputProcessor(
+                HandInputAssembler('right' in sides, 'left' in sides), self._enqueue,
+                right_glove=right_glove, left_glove=left_glove)
+        try:
+            self._process = subprocess.Popen(command, cwd=cwd, env=env,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, bufsize=0)
+        except BaseException:
+            self._close_parser()
+            raise
         self._thread = Thread(target=self._receive, name='reference-manus-input', daemon=True)
         try:
             self._thread.start()
@@ -63,6 +75,7 @@ class ReferenceManusProcess:
             self._process.terminate()
             self._process.wait(timeout=2)
             self._process.stdout.close()
+            self._close_parser()
             raise
 
     @property
@@ -132,6 +145,10 @@ class ReferenceManusProcess:
                     self._failure = f'Manus input failed: {exc}'
                     self._queue.clear()
 
+    def _close_parser(self):
+        close = getattr(self._processor, 'close', None)
+        if close is not None: close()
+
     def close(self, *, clear_pending=True):
         if type(clear_pending) is not bool:
             raise TypeError('clear_pending must be a bool')
@@ -147,6 +164,7 @@ class ReferenceManusProcess:
         if self._thread.is_alive():
             raise RuntimeError('Manus input did not stop; raw line sink must not block')
         self._process.stdout.close()
+        self._close_parser()
         if clear_pending:
             with self._lock:
                 self._queue.clear()

@@ -165,6 +165,66 @@ pixi run build-hdf5-recorder
 `pico_left_palm_tcp.yaml`、`pico_right_palm_tcp.yaml`、
 `pico_left_wrist_pivot.yaml`、`pico_right_wrist_pivot.yaml`。
 
+#### 可选：人体骨长对称化（VR 手柄路线）
+
+当前内嵌标定菜单在每次骨长 candidate 成功激活后，默认自动执行 `symmetric_max` 收尾。
+两侧 TCP、腕心和骨长文件齐全并通过校验后，生成新的只读用途快照
+`原始目录/symmetric_profiles/<版本>/`，再原子更新 `原始目录/runtime_symmetric` 链接。
+旧版本保留，原始测量文件不改写成对称值。缺件时提示 pending；生成失败时保留旧链接，
+并明确提示“本侧原始骨长已保存，但对称运行配置未更新”（退出码 3）。
+快照沿用各侧当前有效标定，不表示两侧都是本次重新测量。
+
+在已完成标定所需设备和 PICO 原始数据准备后，按侧执行；TCP、腕心未完成时先使用
+`left all` / `right all` 依次完成，而不是直接进行 geometry：
+
+```bash
+pixi run --manifest-path vendor/pico_tracker/pixi.toml bash vendor/pico_tracker/scripts/calibrate_pico_arm.sh left geometry
+pixi run --manifest-path vendor/pico_tracker/pixi.toml bash vendor/pico_tracker/scripts/calibrate_pico_arm.sh right geometry
+```
+
+之后 VR 遥操命令使用固定入口（自定义原始目录时替换路径）：
+
+```bash
+--pico-calibration-dir "$HOME/.config/pico_tracker/runtime_symmetric"
+```
+
+未选择该目录的遥操仍使用原始配置。若只想保留原始独立骨长，标定命令追加
+`--geometry-policy original`，遥操选择原始目录；旧对称快照不会删除或更新。
+`status` 只读显示测量及已有快照路径，不重新生成。禁止在派生目录中采集标定。
+
+已有有效双侧标定也可仅执行收尾，不采集、不启动设备：
+
+```bash
+pixi run python vendor/pico_tracker/src/pico_bridge/scripts/pico_calibration_finalize.py \
+  --source "$HOME/.config/pico_tracker"
+```
+
+下面仍保留手动指定新目录的入口，适合独立快照和 A/B 对照：
+
+先完成原始骨长标定，再生成独立派生目录。该策略对上臂、前臂分别取左右最大值，
+让 M0 使用同一组长度重建左右人体手臂；不修改硬件驱动、原始标定和质量报告。
+最长值不一定是真值，明显异常时仍应重新标定，而不是用该策略代替测量。
+
+```bash
+PICO_SYMMETRIC_DIR="$PWD/recordings/calibration_profiles/symmetric_$(date +%Y%m%d_%H%M%S_%N)"
+pixi run python scripts/create_pico_symmetric_profile.py \
+  --source "$HOME/.config/pico_tracker" \
+  --output "$PICO_SYMMETRIC_DIR"
+pixi run build-embedded-pico
+```
+
+在下方 VR 遥操启动命令中追加 `--pico-calibration-dir "$PICO_SYMMETRIC_DIR"`。
+未指定派生目录时保留原行为，PICO2 裸手路线不受此选项影响。
+派生目录中的 `pico_geometry_policy.json` 记录原始长度、文件指纹及有效长度；
+M0 会打印 `Explicit symmetric_max runtime geometry`，并在状态中标明运行时覆盖。
+原始标定文件的副本仍保留测量值，不应把它们误认为有效对称长度。
+文件缺失、指纹变化或生成未完成时拒绝加载。不要在派生目录内重新标定；
+原始标定更新后另建派生目录。工具拒绝覆盖已有目录。
+
+这只统一人体骨架几何，不保证左右掌心位移或 IK 跟踪误差相同。
+骨长策略本身不需要 `--mapped-palm-common-x-reference`；可不带该选项做对照。
+`c` 的 X/Z 工作空间对齐仍是独立功能，不由骨长对称化代替。
+
 启动原版 PICO wholebody APK 后，确认设备为 `device`。该路线使用原版 `9999` 端口和
 `com.PICO.wholebody_stream.unity`；不要把 PICO2 裸手的 `10002` 转发混用：
 
@@ -373,6 +433,451 @@ VR 会话可视化刷新上限为 60 Hz，机械臂控制仍按 200 Hz 调度。
 软件已完成原版短轨迹逐周期对照和合成 Manus＋官方 Hand2＋C++ HDF5 的仿真联调；
 新后端的真实 PICO＋手柄＋Manus 现场验收待执行。
 详见 [mapped-palm 移植验证记录](docs/mapped-palm-porting.md)。
+
+VR/TJVR 两个原生 IK 后端可在原启动命令上追加 `--native-result-format binary`，
+试用 C++ 固定布局周期结果；默认仍为 `json`。先重新构建所选后端的 native worker。
+该选项保留完整诊断和标定/复位行为，不适用于 PICO2 裸手入口。
+目前仅完成周期结果传输，Python 控制调度尚未迁移；离线首轮平均收益有限。
+构建、测量方式与后续范围见 [C++ 控制迁移记录](docs/native-control-migration.md)。
+
+另可运行 `pixi run build-native-control`，然后在 VR/TJVR 命令追加
+`--execution-guard cpp`，将每周期的执行回执检查交给 C++；默认仍为 `python`。
+此选项可独立使用，保留身份/超时/双臂一致性/故障锁存与 Home/rearm 语义，
+不适用于 PICO2 裸手入口。它尚未迁移整个协调器和控制调度；局部提速不代表整条遥操提速。
+
+MuJoCo 关节应用与反馈读取也提供可选 C++ 实现：先运行
+`pixi run build-native-mujoco`，再在上述 VR/TJVR 命令追加 `--simulation-backend cpp`。
+默认仍为 `python`；它可与 `--execution-guard cpp`、`--native-result-format binary`
+独立组合。C++ 使用同一 MuJoCo 模型/TCP，执行批量关节写入、`mj_forward` 和反馈复制；
+Viewer、控制调度和授权状态机尚未整体迁移。当前离线输出对照通过，但未证明整链路
+提速，也未做本选项的真实输入验收；PICO2 裸手继续使用原路径。更新 pixi 环境后需重新构建。
+
+协调器关节命令数值模块可追加 `--coordinator-math cpp`（先重新运行
+`pixi run build-native-control`，默认 `python`）。迁移范围为硬限位、步长/时间窗检查、
+可选裁剪和 Home 插值；会话状态机、身份/新鲜度门控、故障保持及发布权仍由原协调器管理。
+仅支持 VR/TJVR，与上述三个选项独立组合，不是完整 C++ 调度器。离线数值对照结果及
+正常壁钟预算下的差异说明见 [迁移记录](docs/native-control-migration.md)。
+
+官方 Hand2 低通滤波也提供可选 C++ 实现，两条启用手部的仿真路线均可使用：
+先运行 `pixi run build-native-hand`，再在原启动命令前添加环境变量
+`TIANJI_HAND_FILTER_BACKEND=cpp`（与 `TIANJI_ROUTER_ENDPOINT=...` 同级）。
+移除该变量或设为 `python` 即使用原实现。缺少库或加载失败会报错，不静默回退。
+此选项只替换每侧 20 关节低通滤波，保留原系数、单精度舍入、丢帧 reset、限位及关节顺序；
+此滤波选项本身不替换优化求解器。驱动/SDK 均不变，尚未做该选项的真实设备验收，不宣称整链路提速。
+启用 C++ 时录制元数据会记录滤波库、源码与适配器摘要。
+
+手骨架坐标预处理可独立添加 `TIANJI_HAND_GEOMETRY_BACKEND=cpp`，也可与上述滤波变量
+组合。先重新执行 `pixi run build-native-hand`（需要项目 `ik-build` 或 Hand2 环境中的
+Eigen 头文件）。此选项迁移轴反射、SVD 腕坐标系、左右手坐标变换、配置旋转和指根偏移；
+此几何选项本身不替换优化求解器。配置在启动时固定，库加载失败不回退；腕/食指根/中指根三点共线等
+退化输入会显式报错，而不采用不唯一的坐标轴。默认仍为 `python`，移除变量即可恢复。
+录制元数据包含 `hand_geometry` 实现摘要；离线对照不等于真实输入验收或整链路性能保证。
+
+Hand2 优化器现在另有独立 C++ 选项，**原版 Python 源码及默认入口保留不变**：
+
+```bash
+pixi run build-native-hand-optimizer
+```
+
+需要已安装项目 `ik-build` 和 `tools/wuji_hand_native` 的锁定环境。然后在原来的
+PICO2 或 VR＋Manus 启动命令前添加 `TIANJI_HAND_OPTIMIZER_BACKEND=cpp`，与 router
+环境变量同级；移除它或设为 `python` 即恢复原版。它独立于上述几何/滤波开关，不会自动
+启用其他 C++ 选项。当前仅支持原 `AdaptiveOptimizerAnalytical` 的 20-DOF Hand2 配置。
+C++ 执行 FK/Jacobian、目标与解析梯度、SLSQP 回调及 warm-start；保留原参数、50 次评估、
+`ftol_abs=1e-4`、float32 输出和 reset 语义。缺少库、ABI/配置错误会拒绝启动，不静默切回 Python。
+库只在隔离手部 worker 中加载；HDF5 元数据记录 `hand_optimizer` 实现/依赖锁摘要。
+已有两路录制的离线数值对照通过，但尚未进行该新选项的真实设备验收。Python worker、
+输入封装及整体现场调度仍未全部迁移，不能把这个选项当作完整 C++ 现场运行时。
+
+#### 可选：C++ Hand2 worker + 固定频率调度链
+
+如果要把驱动输出之后的 Hand2 几何、优化、滤波、限位、关节排列和固定频率调度放进同一
+C++ 子进程，可显式启用：
+
+```bash
+pixi run build-native-hand-scheduler
+# 在启用 hands 的 pico2_hands_sim、pico_vr_manus_sim 或 vr_manus_sim 命令中追加：
+--hand-scheduler-backend cpp
+```
+
+该选项使用固定 little-endian `TJHS/TJHI/TJHO` 协议，C++ scheduler 自己维护 session、
+epoch、generation、新鲜度、latest-input、输出队列和故障锁存；Python 只提交已校验的输入，
+由独立 reader 消费固定频率结果，提交不会等待 Hand2 求解。PICO 双侧只接受同一输入序列的
+匹配结果，VR/Manus 结果在控制 loop 没有新回调时也会被消费。PICO/Manus 原有驱动、SDK、
+原始输入适配、Python 授权发布及 MuJoCo 手部 executor 保持不变。它不能与
+`--hand-worker-backend cpp` 同时使用。默认仍是 Python，缺少原生产物会在启动前报错，不会
+静默回退；启用时录制 metadata 会保存 scheduler/optimizer、协议 ABI 及源码摘要。这样是
+手部 worker/调度子链的 C++ 化，不等于整个现场 session、输入解析或 HDF5 热路径已经
+全部 C++ 化；原版 Python 实现仍可直接用于 A/B 对照。
+
+原生异步手部链路使用会话输入序号屏障隔离旧结果；PICO 左右手每次共同处理一帧，
+期间只保留最新等待帧。过期帧不生成有效关节命令，worker 超时或读取失败会上报故障。
+该入口已增加离线边界回归，真实设备性能和长时间稳定性仍需单独测试。
+
+### C++ 组合链路现场试用：PICO＋VR 手柄＋Manus
+
+更新代码后构建（本机本轮已构建）：
+
+```bash
+pixi run build-native-hand-scheduler
+pixi run build-native-control
+pixi run build-native-mujoco
+```
+
+沿用上文 router、wholebody APK 和 Manus 标定准备。下面启用原生手部调度器、
+SPARK 二进制周期结果、C++ 执行检查、协调器数值模块及 MuJoCo 关节接口：
+
+```bash
+MANUS_RAWVIZ=/实际路径/manus/rawviz.out
+TELEOP_TEST_ID=$(date +%Y%m%d_%H%M%S_%N)
+mkdir -p recordings/device_acceptance
+
+TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447 \
+pixi run bash scripts/run_session.sh \
+  --profile pico_vr_manus_sim \
+  --viewer \
+  --manus-rawviz "$MANUS_RAWVIZ" \
+  --manus-user gjy \
+  --tjvr-bind 127.0.0.1 \
+  --tjvr-port 15000 \
+  --hand-scheduler-backend cpp \
+  --native-result-format binary \
+  --execution-guard cpp \
+  --simulation-backend cpp \
+  --coordinator-math cpp \
+  --spark-overlay \
+  --pico-startup-timeout-s 30 \
+  --record "recordings/device_acceptance/cpp_vr_manus_${TELEOP_TEST_ID}.h5"
+```
+
+启动摘要应包含 `hand_scheduler=cpp; simulation=cpp`。在启动终端按 `s` 开始，
+`h` 回 Home，`q` 回 Home 后退出；Ctrl-C 直接停止，不表示回位完成。
+这是可选原生模块组合，现场会话接线仍含 Python。完整原生主调度入口见下节，
+不要直接与本命令的四个机械臂适配选项叠加。也不要加 `--disable-hands` 或
+`--hand-worker-backend cpp`，它们与本测试的原生手部调度器不兼容。
+
+PICO2 裸手试用继续采用前文 `pico2_hands_sim` 完整命令，仅追加
+`--hand-scheduler-backend cpp`；上述四个机械臂适配选项仅用于 VR/TJVR 路线。
+首次试用建议完成静止手指、逐指弯曲、双手同时动作、`h → r → s`，最后按 `q` 保存录制。
+原始输入保持录制；状态诊断中的 `coalesced_output_callbacks` 表示应用端未采用的中间结果，
+不表示优化器从未处理该输入。`pending_output_callbacks` 是仍待关联的输入，
+`unresolved_output_callbacks` 是退出时未得到可关联结果的输入。
+
+#### 实验选项：Manus 原生解析器
+
+在原有 **启用手部** 的 `pico_vr_manus_sim` 或 `vr_manus_sim` 命令中追加
+`--manus-parser-backend cpp`，先运行：
+
+```bash
+pixi run build-native-hand
+```
+
+启动摘要包含 `manus_parser=cpp`。它只替换 rawviz 输出之后的解析、语义 21 点选择和
+双手回调组装；rawviz、SDK、USB 配置、接收时间戳和原始行录制不变。
+可与 `--hand-scheduler-backend cpp` 组合。省略选项或设为 `python` 保留原解析器。
+不能与 `--disable-hands` 组合，也不是给 PICO2 裸手入口使用的参数。
+
+保留 float32、Y 翻转、右手在前、重复帧拒绝、失效后等待新帧及显式手套绑定。
+原生解析资源有界：单行 65536 字节、64 个手套流、每流 512 个元数据节点；超界明确失败，
+不静默丢掉记录。支持正常 rawviz ASCII 数值协议，源序号/时间为 int64；SDK 发布时间等
+未参与映射的整数元数据保留在原始记录中。二进制及源码哈希写入会话来源记录。
+这个参数用于 Python 主调度器中的可选解析模块；下节原生联合主调度器内置 C++ Manus
+解析，不需要此 ctypes 解析器选项。PICO2 和 Python 路线默认行为不变。
+
+#### 实验入口：完整 C++ VR＋Manus 主调度链路
+
+内嵌 PICO bridge 的世界 X 偏移可用 `--pico-world-x-offset-m 0.20` 覆盖，
+表示总偏移 0.20 m（比默认 0.10 m 增加 0.10 m），不是在默认值上再叠加 0.20 m。
+仅用于 `pico_vr_manus_sim`，接受 [-1,1] m 的十进制数，重启生效。
+它在 PICO 世界坐标系中应用，经过映射后不一定等于机器人基坐标系 X 的同向平移；
+不改变 Z 标定。省略参数保持原版默认值，不改变 PICO2 裸手路线。
+
+Python 与 C++ 的 VR＋Manus **现场仿真入口**统一从 `src/tianji_teleop/config/robot/arm.yaml`
+读取 Home：左臂 `[55,-65,-70,-60,60,0,0]°`，右臂 `[-55,-65,70,-60,-60,0,0]°`。
+启动姿态、`h` 返回姿态及原生 IK 内部初始／重置状态使用同一组值。
+SPARK、mapped-palm 的原版参考 YAML 和离线原版对照默认初始姿态不修改。
+因此现场启动姿态已不等同于原版默认姿态；Home 也不是关节全零。
+
+Manus 联合入口按 **200 ms 接收时间间隔**维护手部滤波／优化器连续性：
+调度器正常跳过旧帧不会重置历史，超过该间隔及显式 epoch 重置才清空。
+原始输入序号仍用于关联、发布及录制；左右手分别维护连续性。
+此设置仅由原生 Manus 联合入口启用，PICO2 和独立 worker 默认行为不变。
+更新后执行 `pixi run build-native-hand-scheduler` 并重启会话生效。
+
+SPARK 的同 epoch 输入恢复策略默认保持原版。若跳变门控恢复后反复进入固定目标
+接管，可在下方 C++ 启动命令追加 `--spark-resync-policy resume`：从当前模型状态
+继续追踪，首次接管及 tracking epoch 变化仍执行原版接管。省略该参数或使用
+`--spark-resync-policy reference` 可作原版对照。仅支持 C++ 调度器＋SPARK IK，
+不适用于 mapped-palm 或 PICO2 裸手；不放宽输入新鲜度、跳变或关节约束。
+更新此功能需先执行 `pixi run --manifest-path tools/spark_native/pixi.toml build`。
+该选项的软件测试不替代真实输入体验及安全验收。
+
+软件离线组合测试已通过（SPARK、mapped-palm 两种 IK）；**真实 PICO＋VR＋Manus 联合
+验收尚未完成**。只用于 MuJoCo，不控制真机。保留上文 Python 入口用于回归。
+
+先完成上文 wholebody APK、router、PICO 标定和 Manus 人员标定准备，再构建：
+
+```bash
+pixi run build-native-hand-scheduler
+pixi run build-hdf5-recorder
+pixi run build-native-session-gateway
+```
+
+```bash
+MANUS_RAWVIZ=/实际路径/manus/rawviz.out
+TELEOP_TEST_ID=$(date +%Y%m%d_%H%M%S_%N)
+mkdir -p recordings/device_acceptance
+
+TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447 \
+pixi run bash scripts/run_session.sh \
+  --profile pico_vr_manus_sim \
+  --viewer --viewer-backend cpp \
+  --scheduler-backend cpp \
+  --hand-scheduler-backend cpp \
+  --publication-backend cpp \
+  --recording-adapter cpp \
+  --manus-rawviz "$MANUS_RAWVIZ" --manus-user gjy \
+  --ik-backend spark_upper_qpoases_headroom_feedforward_velocity_qp \
+  --arm-target-processor passthrough --joint-trajectory passthrough \
+  --command-step-clipping false --joint-limit-source urdf \
+  --tjvr-bind 127.0.0.1 --tjvr-port 15000 \
+  --spark-overlay --pico-startup-timeout-s 30 \
+  --record "recordings/device_acceptance/native_joint_${TELEOP_TEST_ID}.h5"
+```
+
+摘要应显示 `scheduler=cpp`、`hands=True`，并使用原生发布、录制和 Viewer。
+`s` 接管；`h` 回 Home，自动重置成功且新输入有效后可再 `s`；`r` 保留手动重置；
+`q` 回 Home 并排空录制后退出。启动时要求双手结果年龄不超过 50 ms（且受原新鲜度配置约束）；
+不要求处理序号恰好等于持续到来的最新输入。结果尚未就绪时，`s` 会被拒绝，等待后重试。
+双手均需有效，不支持此入口单手降级；禁止叠加 `--disable-hands` 或旧四个机械臂适配选项。
+
+此入口原生处理 TJVR/Manus 解析、Hand2、控制调度、MuJoCo、发布及逐帧录制；Python
+仍负责冷启动、schema 创建、进程监督和终端按键。PICO driver/M0/TJVR 发送、rawviz/SDK
+及所有硬件驱动不变。控制计算只保留最新等待样本，不中断正在计算的帧；原始回调仍全部录制，
+因此计算结果序号允许跳过中间输入。联合录制使用有界批次，不丢弃原始行；异常退出不能标记完整。
+
+#### mapped-palm：双臂前伸 X/Z 标定（C++）
+
+**PICO＋VR 手柄、只测机械臂的快捷入口：**设备和依赖已准备好、Zenoh router 已运行时，
+在工程根目录直接执行：
+
+```bash
+bash scripts/run_pico_vr_arms_cpp.sh
+```
+
+此脚本复用本节已测的 C++ mapped-palm、X/Z 标定、PICO 世界 X 总偏移 0.20 m，
+关闭 Manus 和手部控制；权重读取当前 `bandwidth.yaml`（当前位置惩罚 90,000）。
+默认加载 PICO 标定目录，不额外指定 `runtime_symmetric`，不启用左右 X 取小值。
+每次自动在 `recordings/device_acceptance/` 新建录制。可用 `--record-dir PATH` 改保存目录，
+相对路径以工程根目录为基准；`--dry-run` 只查看命令，不创建录制或连接设备。
+脚本不自动构建、不启动 router，也不修改标定、ADB 配置或系统权限；
+实际头显启动和端口转发仍由原有内嵌会话管理器处理。首次构建步骤见下方。
+`TIANJI_ROUTER_ENDPOINT` 可指定已有 router，未设置时使用 `tcp/127.0.0.1:7447`。
+没有 router 时先在另一终端运行：
+
+```bash
+./vendor/zenoh-router/zenohd -l tcp/127.0.0.1:7447 --no-multicast-scouting
+```
+
+点击 MuJoCo 窗口：双手水平前伸按 `c`、保持约两秒，成功后按 `s`；`h` 回 Home，
+`r` 手动重置，`q` 回 Home 并保存退出。此快捷脚本只用于 MuJoCo，不控制真机。
+
+2026-09-15 现场更新：真实 PICO＋VR 手柄、仅机械臂的 C++ 仿真已测试，
+用户反馈位置权重 **90,000** 的效果不错。此次 `c` 标定、`s` 接管、回 Home 和正常退出
+均收到成功结果，HDF5 `complete=true`，退出码 0。
+本轮没有 Manus 输入，不代表 90,000 配置的联合手套、长时稳定性或真机验收完成。
+
+当前配置 `src/tianji_teleop/src/ik/mapped_palm/config/bandwidth.yaml`：
+
+| 参数 | 当前值 | 原版 baseline |
+| --- | ---: | ---: |
+| `hierarchical_qp.slack_weight_position` | 90,000 | 30,000 |
+| `hierarchical_qp.slack_weight_orientation` | 30,000 | 30,000 |
+| `slack_position_scale` / `slack_orientation_scale` | 1 / 2 | 1 / 2 |
+
+这是明确的本地调参，不再宣称该配置与原版完全一致；来源清单保留原版哈希及修改记录。
+仅位置松弛惩罚改变，其他 bandwidth 参数未变；配置在启动时加载，重启生效。
+更高权重不保证所有动作更准确，限位、不可达目标和姿态取舍仍然存在。
+
+本机默认 `~/.config/pico_tracker` 原始骨长 YAML 已按用户要求直接修改：
+左右上臂均为 `0.2763150140848072 m`，前臂均为 `0.24751718659563757 m`。
+所以本次不需要 `--pico-calibration-dir`，也没有启用 `--mapped-palm-common-x-reference`。
+这是本机外部配置，不随 git 分发；其他电脑需准备自己的有效标定。
+重新进行骨长测量可能改写原始长度：自动对称化收尾生成的是独立快照，不回写原始 YAML，
+不能据此保证重新标定后的默认目录仍然对称。
+
+本次录制：`recordings/device_acceptance/native_arms_position90k_20260915_060300_742965540.h5`，
+run ID `c4b114e5-6fac-478d-b475-1cabe8f164d8`。退出摘要为 7,768 个控制周期、21 个 late cycles；
+`real_time_qualified=false`，不视为硬实时保证。此前一次 60,000 测试因电脑卡死后手动重启，
+录制未完整关闭，不应作为完整对照；卡死原因尚未确定，不能归因于权重。
+
+使用 PICO＋VR 手柄＋Manus 控制 MuJoCo 天机机械臂和舞肌二代手，
+不控制机器人真机。头显运行 VR 手柄路线的 wholebody APK，不是裸手路线的 APK。
+先完成上文设备、SDK、PICO/Manus 标定准备；首次使用或更新代码后构建：
+
+```bash
+pixi run --manifest-path tools/mapped_palm_native/pixi.toml build
+pixi run build-embedded-pico
+pixi run build-native-hand-scheduler
+pixi run build-hdf5-recorder
+pixi run build-native-session-gateway
+```
+
+终端一：启动 router，已有可用 router 时不要重复运行。
+
+```bash
+./vendor/zenoh-router/zenohd -l tcp/127.0.0.1:7447 --no-multicast-scouting
+```
+
+终端二：在工程根目录执行完整启动命令。`MANUS_RAWVIZ` 改为本机实际路径；
+本机此前使用 `/home/zj/current_robotics/pico-manus-teleop/manus/rawviz.out`。
+
+```bash
+adb devices -l
+MANUS_RAWVIZ=/实际路径/manus/rawviz.out
+TELEOP_TEST_ID=$(date +%Y%m%d_%H%M%S_%N)
+mkdir -p recordings/device_acceptance
+RECORDING="recordings/device_acceptance/native_joint_mapped_xz_${TELEOP_TEST_ID}.h5"
+
+TIANJI_ROUTER_ENDPOINT=tcp/127.0.0.1:7447 \
+pixi run bash scripts/run_session.sh \
+  --profile pico_vr_manus_sim \
+  --viewer --viewer-backend cpp \
+  --scheduler-backend cpp --hand-scheduler-backend cpp \
+  --publication-backend cpp --recording-adapter cpp \
+  --manus-rawviz "$MANUS_RAWVIZ" --manus-user gjy \
+  --ik-backend pico_ee_mapped_corrected_palm_velocity_qp \
+  --mapped-palm-xz-calibration \
+  --arm-target-processor passthrough --joint-trajectory passthrough \
+  --command-step-clipping false --joint-limit-source urdf \
+  --tjvr-bind 127.0.0.1 --tjvr-port 15000 \
+  --pico-world-x-offset-m 0.20 \
+  --spark-overlay --pico-startup-timeout-s 30 \
+  --record "$RECORDING"
+```
+
+本命令沿用此次测试的上游 PICO 世界 X **总偏移 0.20 m**，不是再加 0.20 m；
+它和标定得到的机器人目标 X 偏移不是同一参数。改变上游偏移后需重启并重新标定。
+
+如需双臂使用同一个标定 X 基准，在上述命令追加
+`--mapped-palm-common-x-reference`（必须同时启用 `--mapped-palm-xz-calibration`）。
+取左右机器人参考 TCP 的 `X0=min(Xref_left,Xref_right)`，后续分别使用
+`Xtarget_left=X0+(Xhuman_left-Xcal_left)`、`Xtarget_right=X0+(Xhuman_right-Xcal_right)`。
+因此在标定采样均值处，双臂期望 X 相等；左右补偿量仍可不同。Z、Y、姿态和 Home 不变。
+窗口会显示 `X reference: shared minimum robot TCP X`。省略此选项保留原独立参考。
+当前模型左右参考 X 本就接近，效果可能与原模式接近；不保证实际 TCP 无跟踪误差，
+也不进行骨长尺度归一化。重启并重新按 `c` 后生效。
+这里不需要裸手路线的 `adb forward tcp:10002 tcp:10002`。
+仅测试机械臂时，删除 `--manus-rawviz`、`--manus-user`、
+`--hand-scheduler-backend cpp`，追加 `--disable-hands`，其余参数不变。
+
+看到 `Teleop ready`，确认摘要包含 `calibration=XZ`、`scheduler=cpp`、
+`publication=cpp`、`recording_adapter=cpp`、`viewer=cpp`；联合模式应为 `hands=True`。
+点击 MuJoCo 窗口使其获得键盘焦点，按以下顺序操作：
+
+C++ Viewer 左上角会显示标定状态与最近一次按键回执：`SAMPLING` 为采样中
+（显示左右样本数），`Waiting for reset / calibration ACK` 为等待确认，
+`SUCCESS` 后才尝试按 `s`。`FAILED` 后显示具体原因；若保留旧标定，会提示
+`Previous calibration retained`。`Last action ... REJECTED` 表示按键已收到但条件未满足。
+窗口使用英文提示；`tracking identity/epoch changed` 表示采样期间追踪身份或 epoch 变化，
+应保持追踪稳定后重新标定，不是 QP 求解失败。更新状态栏后需重新构建并重启会话。
+
+- 在 Home 且输入正常时，双手水平向前伸直，按 `c` 并保持稳定约 2 秒。
+- 参考关节为左右臂均 `[0,-90,0,0,0,0,0]°`，通过当前 mapped-palm 模型的
+  `hand_tcp_frame_L/R` 正运动学计算参考 X/Z；不是改变 Home。
+- 左右分别计算 `参考 TCP X/Z − 采样掌心 X/Z`。只加 X/Z 常量偏移，Y 和姿态不变；
+  不修改 PICO 原始骨架，也不重复叠加上游世界 X 偏移。
+- `c` 不驱动机械臂伸直；标定确认完成且新输入有效后按 `s` 接管。
+  `h` 回 Home 后保留标定，自动重置成功后可再 `s`；`r` 仍可手动重置。
+- `q` 回 Home、排空录制并退出。每次重新启动使用新录制文件，并重新按 `c` 标定；
+  正在遥操时不要按 `c`，需先按 `h` 等待回 Home。
+- 该参考只对齐位置，**不强制 IK 解等于参考关节角**；伸直附近仍可能受奇异性、
+  姿态目标和关节约束影响，需实际输入仿真验收。
+
+此模式要求 `--scheduler-backend cpp --publication-backend cpp --viewer --viewer-backend cpp
+--recording-adapter cpp --record <新文件>`。原 `--mapped-palm-height-calibration` 仍为 Z-only，
+两者互斥；不加标定参数保持原映射。PICO2 裸手、SPARK、Python 入口及硬件驱动不变。
+录制的 native cycle 增加 `target_x_offsets_m`，原始 TJVR 不变。
+
+2026-09-15 已确认真实 PICO/双 Manus 接入及全 C++ X/Z 会话启动成功。
+此前 28 项回归和三种配置的离线联合流程通过。真实输入现场结果见本节顶部的
+2026-09-15 记录；该仅机械臂测试不替代所有配置、联合手套及长时验收。
+
+#### 实验选项：C++ 双臂调度器的原生消息发布
+
+仅用于 VR/TJVR、`--disable-hands --scheduler-backend cpp` 路线。先构建：
+
+```bash
+pixi run build-native-session-gateway
+```
+
+在已有 **C++ 仅机械臂**测试命令中追加 `--publication-backend cpp`，启动摘要应显示
+`scheduler=cpp; publication=cpp`。消息编码和 Zenoh put 在独立 C++ 有界输出队列的消费线程
+执行，与 Python 快照通道解耦，不在控制线程执行；Python 不再重复发布这些机械臂主题。
+任一路溢出或输出失败会结束会话；成功完成回执须等待所有消费者排空。
+保持显式 `TIANJI_ROUTER_ENDPOINT`。旧可执行文件没有对应启动确认时会拒绝启动，不能
+仅更新 Python 文件而不重新构建。省略该参数或设 `--publication-backend python` 保留原发布路径。
+
+仅选择这个选项时仍不是全链路 C++：默认由 Python 处理录制适配、显示和键盘。
+完整手部需使用上节的显式联合配置。PICO2 与 Python VR+Manus 默认命令不变。已完成离线字段、
+故障回归，未完成新发布选项的真实输入仿真验收。
+同录制局部性能对照及剩余工作见 [C++ 迁移记录](docs/native-control-migration.md)。
+联合重置必须等待机械臂和手部 worker 都确认后才推进 epoch；PICO2 独立左右手的
+完整原生主会话接线不包含在这个 VR＋Manus 入口内。
+
+#### 实验选项：C++ 双臂调度器的原生录制接线
+
+仅用于 VR/TJVR、`--disable-hands --scheduler-backend cpp` 路线，需 `--record`。
+先构建：
+
+```bash
+pixi run build-hdf5-recorder
+pixi run build-native-session-gateway
+```
+
+在已有 C++ 仅机械臂测试命令中追加 `--recording-adapter cpp`，启动摘要应显示
+`recording_adapter=cpp`。原始 TJVR、完整周期、操作结果和录制生命周期进入独立 C++
+录制队列；Python 仅创建 schema、移交文件描述符和管理进程，不重复逐帧录制。
+可与 `--publication-backend cpp` 组合。省略选项或设为 `python` 保留现有录制接线
+（现有接线的磁盘写入器本身也可能是 C++，两者不要混淆）。
+
+文件独占创建，不覆盖历史记录；队列/写入/关闭失败不能标为完整。
+已完成两种 IK 网关的离线合成输入与 Home 退出录制验证，尚未完成真实设备长时验收
+及录制端到端性能对照。联合手部按上节配置启用；所有驱动不变。
+
+#### 实验选项：C++ 双臂调度器的原生窗口
+
+先运行 `pixi run build-native-session-gateway`，构建环境需有 GLFW 开发头文件和链接库，
+运行环境需有可用图形显示。在已有 C++ 仅机械臂命令中追加：
+
+```bash
+--viewer --viewer-backend cpp --spark-overlay
+```
+
+仅机械臂使用 `--scheduler-backend cpp --disable-hands`；联合手部使用上节完整配置。摘要包含 `viewer=cpp`，
+Python 不再创建 MuJoCo 窗口。默认仍为 `--viewer-backend python`；该参数不用于 PICO2 裸手入口。
+窗口中按 `s/h/r/q` 通过同一状态机启动、回 Home、手动 rearm 和回 Home 后退出；开启高度标定时
+支持 `c`。关闭窗口也请求正常 Home 退出；Ctrl-C 仍是直接停止。终端按键继续可用。
+左键拖动旋转视角，右键拖动平移，滚轮缩放。
+
+C++ 调度器更新后须重新运行 `pixi run build-native-session-gateway`。
+`h` 回到精确 Home 后会自动执行原生重置；看到 `auto_rearm` 的 `accepted: true` 后，
+保持输入有效即可再按 `s` 接管，无须先手动按 `r`。重置不会自动开始运动。
+`r` 仍保留为 Home 下的手动重置，自动重置成功后也可使用；重置期间不重复启动重置事务。
+输入不新鲜时自动重置会等待满足条件；重置失败进入故障，不绕过保护。
+此行为仅用于 C++ 调度器，Python 默认路线不变。
+
+独立 C++ model/data 消费最新显示快照，不修改执行器关节。骨架保持原世界坐标，
+mapped-palm 仅显示实际采用的输入骨架，Z 标定点单独显示，不给整条骨架增加偏移。
+显示不可用时明确报错，不静默回退。可与 `--publication-backend cpp --recording-adapter cpp`
+组合；三项原生时 Python 不再重建完整周期快照，但仍管理进程、身份和接收诊断协议。
+当发布和窗口均为 cpp，且未录制或录制接线也为 cpp 时，自动协商
+`diagnostics=summary`：Python 只接收约 10 Hz 状态摘要，状态/epoch 变化立即通知，
+退出前补发最终计数；操作回复、故障和完成回执不节流。原始包、完整 IK 周期仍交给
+原生录制/发布消费者。任一消费者仍需 Python 时保留完整协议，旧二进制不支持摘要握手则拒绝启动。
+**不是全链路零 Python**，也不代表完整 Manus 主调度已迁移。
+当前已完成离线几何对照、按键/状态机和无显示失败测试；实际 GLFW 画面、真实输入组合
+验收及端到端性能尚待验证。
 
 **已知限制（2026-09-13）：** mapped-palm 已完成真实 PICO＋VR 手柄的仅机械臂仿真测试，
 包括 Z 标定、`s` 启动、`q` 回 Home 和完整录制。大幅转腕时仍可能出现明显位置误差；

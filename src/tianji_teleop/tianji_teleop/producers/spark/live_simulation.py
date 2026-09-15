@@ -28,7 +28,8 @@ from ...hand_tracking.input_modes import SPARK_BACKEND
 class SparkLiveSimulation:
     def __init__(self, root, *, run_id, router_zid, instance_id, clock=time.monotonic_ns,
                  hand_sides=(), hand_source=None, hand_backend=None, session=None, hand_command_sink=None,
-                 hand_expired_input_sink=None, backend=SPARK_BACKEND):
+                 hand_expired_input_sink=None, backend=SPARK_BACKEND, native_result_format='json',
+                 execution_guard='python', simulation_backend='python', coordinator_math='python'):
         for value in (run_id, router_zid, instance_id):
             if not isinstance(value, str) or not value.strip() or '/' in value:
                 raise ValueError('explicit run/router/instance identities required')
@@ -58,7 +59,7 @@ class SparkLiveSimulation:
         assets = root / 'src/tianji_teleop'
         selected = bilateral_assets(root, backend)
         config, model_path, urdf = (selected[k] for k in ('config', 'model', 'urdf'))
-        robot = reference_robot_config(config, urdf, assets / 'config/robot/arm.yaml')
+        robot = reference_robot_config(config, urdf, assets / 'config/robot/arm.yaml', use_arm_home=True)
         producer_suffix = 'spark' if backend == SPARK_BACKEND else 'mapped-palm'
         coordinator_id, producer_id, executor_id = (instance_id + '-' + name for name in ('coord', producer_suffix, 'sim'))
         def authority(logical, identity, enabled=True):
@@ -71,6 +72,7 @@ class SparkLiveSimulation:
                            for side in ('left', 'right')})
         model = mujoco.MjModel.from_xml_path(str(model_path))
         self.sim = AuthorizedHandMujoco(model=model, data=mujoco.MjData(model), robot_config=robot,
+            simulation_backend=simulation_backend,
             publisher_instance_id=executor_id, coordinator_instance_id=coordinator_id,
             router_zid=router_zid, hand_sides=self.hand_sides, clock=clock,
             hand_producer_id='official_wuji_hand2', hand_producer_instance_id=instance_id + '-hand',
@@ -80,13 +82,16 @@ class SparkLiveSimulation:
             settings = ArmCommandCoordinator._coordinator_config(assets / 'config/coordinator/arm_v131.yaml')
             settings['command_step_clipping_enabled'] = False
             self.coordinator = ArmCommandCoordinator(session, publisher_instance_id=coordinator_id,
+                command_math=coordinator_math,
                 router_zid=router_zid, robot_config=robot, coordinator_config=settings, clock=clock,
                 profile=dict(required_capability='simulation', active_sides=['left', 'right'],
                     active_hand_sides=list(hand_sides),
                     authorities=self.authorities, bilateral_proposals=dict(run_id=run_id, execution_epoch=1)))
             client = SparkWorkerClient if backend == SPARK_BACKEND else selected['client']
             worker = client(worker=selected['worker'],
-                config=config, model=model_path, urdf=urdf, startup_handshake=True)
+                config=config, model=model_path, urdf=urdf, startup_handshake=True,
+                home_config=assets / 'config/robot/arm.yaml',
+                **({'result_format': native_result_format} if native_result_format != 'json' else {}))
         except BaseException:
             if self.coordinator is not None:
                 self.coordinator.close()
@@ -94,6 +99,7 @@ class SparkLiveSimulation:
             raise
         try:
             self.producer = SparkProducer(worker, run_id=run_id, execution_epoch=1,
+                execution_guard=execution_guard,
                 publisher_instance_id=producer_id, coordinator_instance_id=coordinator_id,
                 router_zid=router_zid, receiver_instance_id=self.source_instance_id,
                 maximum_receipt_age_ns=100_000_000, session_timeout_ns=200_000_000, max_in_flight=1,
@@ -172,6 +178,13 @@ class SparkLiveSimulation:
             co.rearm_bilateral_at_home(epoch)
             self.sim.on_session_state(co.state)
             self.sim.rearm_bilateral_at_home(epoch)
+            # The optional native hand scheduler keeps the same execution
+            # epoch as the arm owner. Python workers do not expose this method
+            # and retain their established rearm behavior.
+            if self.hand_loop is not None:
+                set_epoch = getattr(self.hand_loop.producer.backend, 'set_execution_epoch', None)
+                if callable(set_epoch):
+                    set_epoch(epoch)
             self._input_after_ns = self.clock()
             co.update_component(self.producer.status(now), received_ns=now)
             with self._hand_lock:

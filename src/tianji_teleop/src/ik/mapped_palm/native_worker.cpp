@@ -1,5 +1,7 @@
 // Bounded stdin/stdout IPC only. This executable cannot publish robot commands.
 #include "bilateral_cycle.hpp"
+#include "../native_binary_results.hpp"
+#include "../native_home_config.hpp"
 #include <charconv>
 #include <iomanip>
 #include <iostream>
@@ -47,7 +49,8 @@ void arm(std::ostream& out, const ArmMotionState& state,
 }
 
 std::string encode(const BilateralCycleResult& result, std::int64_t now, bool deterministic,
-                   const std::optional<Eigen::Vector2d>& height) {
+                   const std::optional<Eigen::Vector2d>& height,
+                   const std::optional<Eigen::Vector2d>& x_offsets) {
   std::ostringstream out;
   out << std::setprecision(17) << std::boolalpha;
   out << "{\"schema_version\":1,\"kind\":\"mapped_palm_bilateral_result\","
@@ -61,6 +64,7 @@ std::string encode(const BilateralCycleResult& result, std::int64_t now, bool de
   out << ",\"button_action\":" << static_cast<int>(result.button_action);
   out << ",\"control_executed\":" << result.control_executed;
   if (height) { out << ",\"target_height_offsets_m\":"; array(out, *height); }
+  if (x_offsets) { out << ",\"target_x_offsets_m\":"; array(out, *x_offsets); }
   out << ",\"left\":"; arm(out, result.left, result.control.left, result.left_headroom);
   out << ",\"right\":"; arm(out, result.right, result.control.right, result.right_headroom);
   out << '}';
@@ -70,16 +74,24 @@ std::string encode(const BilateralCycleResult& result, std::int64_t now, bool de
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 4 || argc > 6) throw std::invalid_argument(
+    if (argc < 4 || argc > 9) throw std::invalid_argument(
         "usage: mapped_palm_native_worker CONFIG MODEL URDF [--deterministic-test] [--startup-handshake]");
-    bool deterministic = false, handshake = false;
+    bool deterministic = false, handshake = false, binary = false;
+    std::string home_config;
     for (int i = 4; i < argc; ++i) {
       const std::string option(argv[i]);
-      if (option == "--deterministic-test" && !deterministic) deterministic = true;
+      if (option == "--home-config" && home_config.empty() && i+1<argc) home_config=argv[++i];
+      else if (option == "--deterministic-test" && !deterministic) deterministic = true;
       else if (option == "--startup-handshake" && !handshake) handshake = true;
+      else if (option == "--binary-results" && !binary) binary = true;
       else throw std::invalid_argument("unknown or duplicate worker option");
     }
+    if (binary) {
+      std::ios::sync_with_stdio(false);
+      std::cin.tie(nullptr);
+    }
     auto config = loadConfig(argv[1]);
+    apply_deployment_home(config, home_config);
     if (deterministic) {
       // Only the explicit offline test mode relaxes wall-clock budgets. Keep
       // iteration counts/constraints/objectives unchanged. Never use this mode
@@ -97,11 +109,21 @@ int main(int argc, char** argv) {
     char buffer[2048];
     std::int64_t execution_epoch = 1;
     std::optional<Eigen::Vector2d> height;
+    std::optional<Eigen::Vector2d> x_offsets;
     while (std::cin.getline(buffer, sizeof(buffer))) {
       if (std::cin.eof()) throw std::invalid_argument("incomplete IPC frame without newline");
       std::istringstream line(buffer);
       std::vector<std::string> tokens;
       for (std::string token; line >> token;) tokens.push_back(token);
+      if(tokens.size()==5 && tokens[0]=="TJMX1") {
+        Eigen::Vector4d v;
+        for(int i=0;i<4;++i) {std::size_t used=0;v[i]=std::stod(tokens[i+1],&used);
+          if(used!=tokens[i+1].size()) throw std::invalid_argument("invalid XZ offset");}
+        cycle.configure_xz(v[0],v[1],v[2],v[3]);
+        x_offsets=v.head<2>();height=v.tail<2>();
+        std::cout<<std::setprecision(17)<<"{\"kind\":\"mapped_palm_xz_ack\",\"offsets_xxzz_m\":";
+        array(std::cout,v);std::cout<<'}'<<std::endl;continue;
+      }
       if (tokens.size() == 3 && tokens[0] == "TJMH1") {
         Eigen::Vector2d offsets;
         for (int i = 0; i < 2; ++i) {
@@ -130,6 +152,7 @@ int main(int argc, char** argv) {
         }
         cycle.reset_at_rest(q.head<7>(), q.tail<7>());
         if (height) cycle.configure_height((*height)[0], (*height)[1]);
+        if(x_offsets) cycle.configure_xz((*x_offsets)[0],(*x_offsets)[1],(*height)[0],(*height)[1]);
         const auto left = cycle.reference_state(ArmSide::kLeft);
         const auto right = cycle.reference_state(ArmSide::kRight);
         // Acknowledgement reads initialized controller state, not input echo.
@@ -178,7 +201,21 @@ int main(int argc, char** argv) {
         frame->resynchronization_generation = generation;
         frame->stream_discontinuity = discontinuity != 0;
       }
-      std::cout << encode(cycle.step(tick, now, frame), now, deterministic, height) << std::endl;
+      const auto started = tianji_native_wire::Clock::now();
+      const auto result = cycle.step(tick, now, frame);
+      const auto solve_ns = tianji_native_wire::elapsed_ns(started);
+      if (binary) {
+        tianji_native_wire::ResultWriter out(x_offsets?3:2);
+        out.common(result, now, deterministic);
+        out.boolean(height.has_value());
+        out.real(height ? (*height)[0] : 0.); out.real(height ? (*height)[1] : 0.);
+        if(x_offsets) out.array(*x_offsets);
+        out.arm(result.left, result.control.left, result.left_headroom.scale);
+        out.arm(result.right, result.control.right, result.right_headroom.scale);
+        out.finish(solve_ns);
+      } else {
+        std::cout << encode(result, now, deterministic, height, x_offsets) << std::endl;
+      }
     }
     if (!std::cin.eof()) throw std::invalid_argument("oversized/incomplete IPC frame");
     return 0;

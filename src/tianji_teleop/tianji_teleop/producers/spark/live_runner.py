@@ -31,6 +31,9 @@ def startup_summary(run_id, resolved):
     config = resolved['config']
     return (f"Teleop ready: run_id={run_id}; IK={config['ik_backend']}; "
             f"hands={config['hands_enabled']}; rate={config['rate_hz']} Hz; "
+            f"hand_scheduler={resolved.get('hand_scheduler_backend', 'python')}; "
+            f"manus_parser={resolved.get('manus_parser_backend', 'python')}; "
+            f"simulation={resolved.get('simulation_backend', 'python')}; "
             f"Z calibration={resolved.get('mapped_palm_height_calibration', False)}; "
             f"record={resolved.get('record_path')}")
 
@@ -88,15 +91,29 @@ def decode_key(value):
     return key if key in ('s', 'h', 'r', 'q') else None
 
 
-def _make_hand_client(root, sides, *, client_factory=None):
+def _make_hand_client(root, sides, *, client_factory=None, worker_backend=None,
+                      scheduler_backend='python'):
     sides = tuple(sides)
     if sides not in (('left',), ('right',), ('left', 'right'), ('right', 'left')):
         raise ValueError('explicit enabled hand sides required for the hand worker')
+    if scheduler_backend not in ('python', 'cpp'):
+        raise ValueError('hand scheduler backend must be python or cpp')
+    if scheduler_backend == 'cpp':
+        if client_factory is not None or worker_backend not in (None, 'python'):
+            raise ValueError('native hand scheduler cannot be combined with a worker factory/backend')
+        from ..native_hand_scheduler import NativeHandSchedulerClient
+        return NativeHandSchedulerClient(
+            python=root / 'tools/wuji_hand_native/.pixi/envs/default/bin/python',
+            single_hand_side='left' if sides == ('left',) else 'right',
+            startup_handshake=True, async_mode=True)
     factory = OfficialHandClient if client_factory is None else client_factory
-    return factory(python=root / 'tools/wuji_hand_native/.pixi/envs/default/bin/python',
+    options = dict(python=root / 'tools/wuji_hand_native/.pixi/envs/default/bin/python',
         script=root / 'scripts/wuji_hand_worker.py', startup_handshake=True,
         filter_continuity_ns=200_000_000,
         single_hand_side='left' if sides == ('left',) else 'right')
+    if worker_backend is not None:
+        options['worker_backend'] = worker_backend
+    return factory(**options)
 
 
 def run_live(root, args, resolved):
@@ -104,6 +121,9 @@ def run_live(root, args, resolved):
     required = ('TIANJI_RUN_ID', 'TIANJI_DUAL_INSTANCE_ID', 'TIANJI_ROUTER_ZID')
     if os.environ.get('TIANJI_DUAL_MANAGED') != '1' or any(not os.environ.get(k) for k in required):
         raise RuntimeError('use the managed run_session launcher; explicit session identities required')
+    if resolved.get('scheduler_backend', 'python') == 'cpp':
+        from .native_live_runner import run_live_native
+        return run_live_native(root, args, resolved)
     run_id, instance, expected_router = (os.environ[k] for k in required)
     stop = Event()
     exit_trigger = 'control_stop'
@@ -145,10 +165,16 @@ def run_live(root, args, resolved):
         hand_client = None
         slot = _InputSlot()
         if not args.disable_hands:
-            hand_client = _make_hand_client(root, resolved['config']['active_hand_sides'])
+            hand_client = _make_hand_client(root, resolved['config']['active_hand_sides'],
+                                            worker_backend=resolved.get('hand_worker_backend'),
+                                            scheduler_backend=resolved.get('hand_scheduler_backend', 'python'))
             stack.callback(hand_client.close)
         core = simulation_class(root, run_id=run_id, router_zid=router, instance_id=instance,
             backend=resolved['config']['ik_backend'],
+            native_result_format=resolved.get('native_result_format', 'json'),
+            execution_guard=resolved.get('execution_guard', 'python'),
+            simulation_backend=resolved.get('simulation_backend', 'python'),
+            coordinator_math=resolved.get('coordinator_math', 'python'),
             session=output.session_proxy(), hand_sides=tuple(resolved['config']['active_hand_sides']),
             hand_source=slot if hand_client else None, hand_backend=hand_client,
             hand_command_sink=capture.hand_output if capture else None,
@@ -208,6 +234,7 @@ def run_live(root, args, resolved):
             manus_env, _ = manus_environment(args.manus_rawviz, library_dir=args.manus_library_dir)
             slot.source = ReferenceManusProcess(command=[str(args.manus_rawviz), '--user', args.manus_user],
                 env=manus_env,
+                parser_backend=resolved.get('manus_parser_backend','python'),
                 receiver_instance_id=instance + '-manus', sides=core.hand_sides,
                 right_glove=args.right_glove, left_glove=args.left_glove,
                 cwd=os.path.dirname(os.path.abspath(os.fspath(args.manus_rawviz))),

@@ -78,6 +78,45 @@ class HandRetargetLoopTest(unittest.TestCase):
         source.rows.append(self.row())
         self.assertEqual(published, [])
 
+    def test_failed_processed_input_audit_prevents_publication(self):
+        def audit(row, snapshot):
+            raise RuntimeError('audit unavailable')
+        loop, source, published = self.setup_loop(processed_input_sink=audit)
+        loop.update_session(self.state('teleop', 1))
+        source.rows.append(self.row())
+        self.wait_until(lambda: loop.failure is not None)
+        self.assertIn('audit unavailable', loop.failure)
+        self.assertEqual(published, [])
+
+    def test_async_reader_failure_reported_without_new_input(self):
+        class FailedReader(Backend):
+            async_retarget = True
+            def submit_retarget(self, *args, **kwargs):
+                raise AssertionError('no input expected')
+            def poll_retarget(self):
+                raise RuntimeError('reader pipe closed')
+        loop, _, published = self.setup_loop(FailedReader())
+        self.wait_until(lambda: loop.failure is not None)
+        self.assertIn('reader pipe closed', loop.failure)
+        self.assertFalse(loop.status(1_000_000_000, ('left', 'right')).healthy)
+        self.assertEqual(published, [])
+
+    def test_stop_during_processed_audit_prevents_publication(self):
+        entered, release = Event(), Event()
+        def audit(row, snapshot):
+            entered.set()
+            release.wait(1)
+        loop, source, published = self.setup_loop(processed_input_sink=audit)
+        self.addCleanup(release.set)
+        loop.update_session(self.state('teleop', 1))
+        source.rows.append(self.row())
+        self.assertTrue(entered.wait(1))
+        self.assertTrue(loop.update_session(self.state('returning', 2)))
+        release.set()
+        loop.close()
+        self.assertIsNone(loop.failure)
+        self.assertEqual(published, [])
+
     def test_readiness_needs_fresh_valid_required_sides(self):
         loop, source, _ = self.setup_loop()
         self.assertTrue(hasattr(loop, 'status'))
@@ -170,3 +209,70 @@ class HandRetargetLoopTest(unittest.TestCase):
         self.wait_until(lambda: loop.processed_callbacks == 2)
         self.assertFalse(loop.status(2_000_000_005, ('left', 'right')).ready)
         self.assertFalse(loop.status(999_999_999, ('left', 'right')).ready)
+
+    def test_async_backend_is_polled_without_waiting_for_a_new_callback(self):
+        class DeferredBackend(Backend):
+            async_retarget = True
+
+            def __init__(self):
+                super().__init__()
+                self.submitted = []
+                self.ready = False
+
+            def submit_retarget(self, points, *, sequence, timestamp_ns):
+                self.submitted.append((points, sequence, timestamp_ns))
+                return dict(sequence=sequence, timestamp_ns=timestamp_ns,
+                            valid_sides=['left', 'right'])
+
+            def poll_retarget(self):
+                if not self.ready or not self.submitted:
+                    return None
+                _, sequence, timestamp_ns = self.submitted.pop(0)
+                row = super().retarget([], sequence=sequence, timestamp_ns=timestamp_ns)
+                return row
+
+        backend = DeferredBackend()
+        loop, source, published = self.setup_loop(backend)
+        loop.update_session(self.state('teleop', 1))
+        source.rows.append(self.row())
+        self.wait_until(lambda: len(backend.submitted) == 1)
+        self.assertEqual(loop.processed_callbacks, 0)
+        self.assertEqual(published, [])
+        backend.ready = True
+        self.wait_until(lambda: len(published) == 1)
+        self.assertEqual(loop.processed_callbacks, 1)
+
+    def test_async_coalescing_and_shutdown_account_for_all_admitted_inputs(self):
+        class LatestBackend(Backend):
+            async_retarget = True
+            def __init__(self):
+                super().__init__()
+                self.pending = None
+                self.ready = False
+                self.accepted = 0
+            def submit_retarget(self, points, *, sequence, timestamp_ns):
+                self.pending = (sequence, timestamp_ns)
+                self.accepted += 1
+                return dict(sequence=sequence, timestamp_ns=timestamp_ns, valid_sides=['left', 'right'])
+            def poll_retarget(self):
+                if not self.ready or self.pending is None:
+                    return None
+                sequence, timestamp = self.pending
+                self.pending = None
+                return super().retarget([], sequence=sequence, timestamp_ns=timestamp)
+        backend = LatestBackend()
+        loop, source, _ = self.setup_loop(backend)
+        source.rows.extend(replace(self.row(), sequence=i) for i in range(1, 4))
+        self.wait_until(lambda: backend.accepted == 3)
+        backend.ready = True
+        self.wait_until(lambda: loop.processed_callbacks == 1)
+        status = loop.status(1_000_000_000, ('left', 'right')).diagnostics
+        self.assertEqual(status.get('coalesced_output_callbacks'), 2)
+        self.assertEqual(status.get('pending_output_callbacks'), 0)
+        backend.ready = False
+        source.rows.append(replace(self.row(), sequence=4))
+        self.wait_until(lambda: backend.accepted == 4)
+        loop.close()
+        status = loop.status(1_000_000_000, ('left', 'right')).diagnostics
+        self.assertEqual(status.get('unresolved_output_callbacks'), 1)
+        self.assertEqual(status.get('pending_output_callbacks'), 0)

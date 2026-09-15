@@ -28,6 +28,21 @@ def _pid_is_live(pid: int) -> bool:
 
 
 class EmbeddedPicoLauncherTest(unittest.TestCase):
+    def test_world_x_offset_rejects_nonfinite_before_start(self):
+        result=subprocess.run(['bash',str(SUPERVISOR),'--profile','pico_vr_manus_sim',
+            '--pico-world-x-offset-m','nan'],text=True,capture_output=True,timeout=10)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('X offset',result.stderr)
+
+    def test_native_viewer_requires_display_before_device_start(self):
+        result = subprocess.run(
+            ['bash', str(SUPERVISOR), '--profile', 'pico_vr_manus_sim',
+             '--disable-hands', '--scheduler-backend', 'cpp',
+             '--viewer-backend', 'cpp', '--resolve-only'],
+            text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--viewer-backend cpp requires --viewer', result.stderr)
+
     def test_lifecycle_order_and_downstream_argument_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -102,6 +117,7 @@ label=""
 if [[ "$joined" == *start_pico_driver.sh* ]]; then label=driver; fi
 if [[ "$joined" == *start_pico_m0.sh* ]]; then label=m0; fi
 if [[ "$joined" == *start_tianji_mujoco_teleop.launch.py* ]]; then label=bridge; fi
+if [[ "$label" == bridge ]]; then printf 'bridge-argv %s\\n' "$*" >> "$event_log"; fi
 if [[ -z "$label" ]]; then exit 0; fi
 if [[ "$label" == m0 ]]; then
   setsid bash -c 'trap "exit 0" TERM INT; while true; do sleep 0.05; done' &
@@ -150,6 +166,17 @@ while true; do sleep 0.05; done
                 "--profile",
                 "pico_vr_manus_sim",
                 "--disable-hands",
+                "--manus-parser-backend", "python",
+                "--native-result-format",
+                "binary",
+                "--execution-guard",
+                "cpp",
+                "--simulation-backend",
+                "cpp",
+                "--coordinator-math",
+                "cpp",
+                "--scheduler-backend",
+                "cpp",
                 "--tjvr-bind",
                 "127.0.0.1",
                 "--tjvr-port",
@@ -162,6 +189,7 @@ while true; do sleep 0.05; done
                 str(config_dir),
                 "--pico-startup-timeout-s",
                 "2",
+                "--pico-world-x-offset-m", "0.20",
             ]
             process = subprocess.Popen(command, env=environment, text=True)
             nested_process_group: int | None = None
@@ -175,6 +203,8 @@ while true; do sleep 0.05; done
                     time.sleep(0.02)
                 self.assertIsNone(process.poll())
                 self.assertIn("downstream\n", events.read_text())
+                self.assertIn('0.20', events.read_text())
+                self.assertIn('pico_world_x_offset_m:=', events.read_text())
                 nested_pid = int(nested_pid_file.read_text())
                 nested_process_group = os.getpgid(nested_pid)
                 events_before_duplicate = events.read_text()
@@ -227,7 +257,8 @@ while true; do sleep 0.05; done
                     except OSError:
                         pass
 
-            events_list = [line for line in events.read_text().splitlines() if line]
+            events_list = [line for line in events.read_text().splitlines()
+                           if line and not line.startswith('bridge-argv ')]
             collapsed = []
             for event in events_list:
                 if event not in {"adb", "bridge"} or not collapsed or collapsed[-1] != event:
@@ -256,6 +287,13 @@ while true; do sleep 0.05; done
                 adb_commands,
             )
             self.assertIn("--profile vr_manus_sim", downstream_command)
+            self.assertIn("--manus-parser-backend python", downstream_command)
+            self.assertIn("--native-result-format binary", downstream_command)
+            self.assertIn("--execution-guard cpp", downstream_command)
+            self.assertIn("--simulation-backend cpp", downstream_command)
+            self.assertIn("--coordinator-math cpp", downstream_command)
+            self.assertIn("--scheduler-backend cpp", downstream_command)
+            self.assertIn("--hand-scheduler-backend python", downstream_command)
             self.assertIn("--tjvr-port 15001", downstream_command)
             self.assertIn(f"--record {record}", downstream_command)
             self.assertNotIn("--pico-calibration-dir", downstream_command)

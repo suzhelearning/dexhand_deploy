@@ -17,15 +17,26 @@ export PICO_TRACKER_CONFIG_DIR="$config_dir"
 
 last_operation=""
 calibration_verbose="${PICO_CALIBRATION_VERBOSE:-0}"
+geometry_policy="symmetric_max"
 filtered_arguments=()
-for argument in "$@"; do
-  if [[ "$argument" == "--verbose" ]]; then
-    calibration_verbose="1"
-  else
-    filtered_arguments+=("$argument")
-  fi
+while (($#)); do
+  case "$1" in
+    --verbose) calibration_verbose="1"; shift ;;
+    --geometry-policy)
+      [[ $# -ge 2 ]] || { echo '--geometry-policy requires original or symmetric_max' >&2; exit 2; }
+      geometry_policy="$2"; shift 2 ;;
+    *) filtered_arguments+=("$1"); shift ;;
+  esac
 done
 set -- "${filtered_arguments[@]}"
+case "$geometry_policy" in
+  original|symmetric_max) ;;
+  *) echo '--geometry-policy requires original or symmetric_max' >&2; exit 2 ;;
+esac
+if [[ -e "$config_dir/pico_geometry_policy.json" && "${1:-}" != status && "${1:-}" != --help && "${1:-}" != -h ]]; then
+  echo '拒绝在派生运行目录中标定；请将 PICO_TRACKER_CONFIG_DIR 设置为原始标定目录。' >&2
+  exit 2
+fi
 
 set +u
 source "$repo_root/install/local_setup.bash"
@@ -49,6 +60,8 @@ usage() {
   $0 <left|right> <tcp|wrist|geometry|all>
   $0 status                  查看左右侧 artifact 状态
   $0 [以上参数] --verbose     显示完整 validator/Gate JSON
+  $0 [以上参数] --geometry-policy <symmetric_max|original>
+                             默认 symmetric_max；双侧有效后自动生成 runtime_symmetric
 
 默认 ROS_DOMAIN_ID=$ROS_DOMAIN_ID，ROS_LOCALHOST_ONLY=$ROS_LOCALHOST_ONLY
 EOF
@@ -279,6 +292,11 @@ run_wrist() (
   fi
 )
 
+finalize_geometry() {
+  python "$repo_root/src/pico_bridge/scripts/pico_calibration_finalize.py" \
+    --source "$config_dir" --policy "$geometry_policy"
+}
+
 run_geometry() {
   local side="$1"
   shift
@@ -321,6 +339,10 @@ run_geometry() {
   fi
   echo
   print_artifact_result "$side" geometry "$active" "$session_dir"
+  if ! finalize_geometry; then
+    echo '本侧原始骨长已成功保存，但对称运行配置生成失败；旧派生入口未更新。请修正上述问题后重新生成。' >&2
+    return 3
+  fi
 }
 
 show_one_status() {
@@ -342,6 +364,10 @@ show_one_status() {
 show_status() {
   show_one_status left
   show_one_status right
+  if [[ -L "$config_dir/runtime_symmetric" ]]; then
+    echo "对称运行配置（历史快照；重新标定失败时不会更新）: $config_dir/runtime_symmetric"
+    readlink -- "$config_dir/runtime_symmetric"
+  fi
 }
 
 choose_side() {
@@ -391,6 +417,8 @@ post_geometry_menu() {
     echo
     if ((result == 0)); then
       echo "$side 上臂/前臂骨长标定完成。"
+    elif ((result == 3)); then
+      echo "$side 原始骨长已保存，但对称运行配置未更新；请检查生成错误。"
     else
       echo "$side 上臂/前臂骨长标定未通过 Gate；capture 和 candidate 已保留，未激活。"
     fi

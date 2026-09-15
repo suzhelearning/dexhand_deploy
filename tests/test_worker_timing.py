@@ -13,6 +13,7 @@ class WorkerTimingTest(unittest.TestCase):
         client._closed = False
         client._tick = client._now = 0
         client._deterministic = True
+        client._binary_results = False
         result = {'sentinel': 1}
         with patch.object(client, '_exchange', return_value=result), \
              patch('tianji_teleop.hand_tracking.spark_worker_client._validate_result'), \

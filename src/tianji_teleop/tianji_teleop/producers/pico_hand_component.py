@@ -19,7 +19,8 @@ class PicoHandComponent:
     def __init__(self, session, *, root, publisher_instance_id, router_zid,
                  coordinator_instance_id, receiver_instance_id, connection_generation,
                  expected_tokens, required_capability, client_factory=OfficialHandClient,
-                 audit_processed_inputs=False):
+                 audit_processed_inputs=False, hand_worker_backend=None,
+                 hand_scheduler_backend='python'):
         if required_capability != 'simulation':
             raise ValueError('PICO hand component requires simulation capability')
         for identity in (publisher_instance_id, router_zid, coordinator_instance_id, receiver_instance_id):
@@ -27,6 +28,12 @@ class PicoHandComponent:
                 raise ValueError('explicit single-component PICO identities required')
         if type(connection_generation) is not int or not 0 <= connection_generation < 2**63:
             raise ValueError('explicit PICO connection generation required')
+        if hand_worker_backend not in (None, 'python', 'cpp'):
+            raise ValueError('hand_worker_backend must be python, cpp, or None')
+        if hand_scheduler_backend not in ('python', 'cpp'):
+            raise ValueError('hand_scheduler_backend must be python or cpp')
+        if hand_scheduler_backend == 'cpp' and hand_worker_backend not in (None, 'python'):
+            raise ValueError('native hand scheduler cannot be combined with native hand worker')
         own = f'tj/live/producer/hand/official_wuji_hand2/{publisher_instance_id}'
         coordinator = f'tj/live/coordinator/arm/arm/{coordinator_instance_id}'
         self._guard = LiveDomainGuard(expected_tokens)
@@ -51,8 +58,18 @@ class PicoHandComponent:
                 raise RuntimeError(self._guard.failure)
             clients = {}
             for side in ('left', 'right'):
-                client = client_factory(python=root / 'tools/wuji_hand_native/.pixi/envs/default/bin/python',
-                    script=root / 'scripts/wuji_hand_worker.py', single_hand_side=side, startup_handshake=True)
+                if hand_scheduler_backend == 'cpp':
+                    from .native_hand_scheduler import NativeHandSchedulerClient
+                    client = NativeHandSchedulerClient(
+                        python=root / 'tools/wuji_hand_native/.pixi/envs/default/bin/python',
+                        single_hand_side=side, startup_handshake=True,
+                        generation=connection_generation, async_mode=True)
+                else:
+                    options = dict(python=root / 'tools/wuji_hand_native/.pixi/envs/default/bin/python',
+                        script=root / 'scripts/wuji_hand_worker.py', single_hand_side=side, startup_handshake=True)
+                    if hand_worker_backend is not None:
+                        options['worker_backend'] = hand_worker_backend
+                    client = client_factory(**options)
                 self._stack.callback(client.close)
                 clients[side] = client
             if self._guard.failure:

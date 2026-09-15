@@ -30,8 +30,29 @@ class PicoHandLiveCliTest(unittest.TestCase):
         result = self.module().bindings(self.environment())
         self.assertEqual(result['receiver_instance_id'], 'pico')
         self.assertEqual(result['connection_generation'], 1)
+        self.assertEqual(result['hand_worker_backend'], 'python')
+        self.assertEqual(result['hand_scheduler_backend'], 'python')
         self.assertIn('tj/live/executor/hand/wuji_left/sim', result['expected_tokens'])
         self.assertIn('tj/live/producer/hand/official_wuji_hand2/hand', result['expected_tokens'])
+
+    def test_explicit_cpp_worker_backend_is_bound_without_changing_component_ownership(self):
+        result = self.module().bindings(dict(self.environment(),
+            TIANJI_HAND_WORKER_BACKEND='cpp'))
+        self.assertEqual(result['hand_worker_backend'], 'cpp')
+        self.assertEqual(result['connection_generation'], 1)
+
+    def test_explicit_cpp_scheduler_backend_is_bound_without_changing_component_ownership(self):
+        result = self.module().bindings(dict(self.environment(),
+            TIANJI_HAND_SCHEDULER_BACKEND='cpp'))
+        self.assertEqual(result['hand_scheduler_backend'], 'cpp')
+        self.assertEqual(result['hand_worker_backend'], 'python')
+        self.assertEqual(result['connection_generation'], 1)
+
+    def test_native_scheduler_cannot_be_combined_with_native_worker(self):
+        with self.assertRaisesRegex(ValueError, 'native hand scheduler'):
+            self.module().bindings(dict(self.environment(),
+                TIANJI_HAND_SCHEDULER_BACKEND='cpp',
+                TIANJI_HAND_WORKER_BACKEND='cpp'))
 
     def test_unmanaged_real_and_wrong_router_fail_before_opening_resources(self):
         module = self.module()

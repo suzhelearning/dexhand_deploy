@@ -369,6 +369,46 @@ def test_stale_palm_holds_last_valid_corrected_side_output():
     assert node._side_status["left"]["output_mode"] == "hold_last_corrected"
 
 
+@pytest.mark.parametrize("wrist_x", [0.15, 0.35, 0.50, 0.65])
+def test_symmetric_lengths_survive_runtime_correction_and_ik_adapter(wrist_x):
+    from pico_palm_skeleton_filter_core import SideCalibration
+    from pico_symmetric_geometry import symmetric_lengths
+
+    upper, forearm = symmetric_lengths({"left": (.2705, .1762), "right": (.2763, .2475)})
+    node = _runtime_side_node_for_stale_palm()
+    positions = np.zeros((24, 3))
+    orientations = np.tile([0., 0., 0., 1.], (24, 1))
+    palms = {}
+    for side, y in (("left", .2), ("right", -.2)):
+        shoulder, elbow, wrist, hand = SIDE_INDICES[side]
+        positions[shoulder] = [0, y, 1]
+        positions[elbow] = [.2, y, .8]
+        positions[wrist] = [wrist_x, y, 1]
+        positions[hand] = [wrist_x + .03, y, 1]
+        palms[side] = PalmSample(1_000_000_000, positions[hand].copy(), orientations[hand], "pico", 3)
+        node._side_state[side] = SimpleNamespace(
+            calibration=SideCalibration(upper, forearm, np.zeros(3), orientations[hand]),
+            previous_elbow_position=None, wrist_to_palm_distance_m=.03,
+            previous_corrected_positions=None, previous_corrected_orientations_xyzw=None,
+        )
+        node._side_status[side] = {}
+    node._nearest_palm = lambda stamp, side, **kwargs: palms[side]
+    output, rotations = positions.copy(), orientations.copy()
+    for side in palms:
+        node._process_side(side, 1_000_000_000, positions, orientations, output, rotations)
+        assert node._side_status[side]["corrected"]
+        shoulder, elbow, wrist, hand = SIDE_INDICES[side]
+        assert np.linalg.norm(output[elbow]-output[shoulder]) == pytest.approx(upper)
+        assert np.linalg.norm(output[wrist]-output[elbow]) == pytest.approx(forearm)
+    message = _pose_array()
+    for index, pose in enumerate(message.poses):
+        pose.position.x, pose.position.y, pose.position.z = output[index]
+        pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = rotations[index]
+    adapted = pose_array_with_ik_arm_frames(message, left_offset_rad=np.pi/2, right_offset_rad=-np.pi/2)
+    adapted_positions, _ = pose_array_to_arrays(adapted)
+    np.testing.assert_allclose(adapted_positions, output)
+
+
 def test_stale_palm_without_previous_correction_keeps_raw_smpl_output():
     indices = np.asarray(SIDE_INDICES["left"], dtype=int)
     node = _runtime_side_node_for_stale_palm()

@@ -11,14 +11,14 @@ from ...hand_tracking.reference_tjvr_receiver import ReceivedTjvrFrame
 from ...hand_tracking.spark_replay import ReplayTick
 from ...protocol.bilateral import ArmBilateralProposal
 from ...protocol.messages import ArmJointProposal, ARM_JOINT_NAMES, ComponentStatus, SessionState
-from .execution import ExecutionGuard, _positive
+from .execution import execution_guard_type, _positive
 
 
 class SparkProducer:
     def __init__(self, backend, *, run_id, execution_epoch, publisher_instance_id,
                  coordinator_instance_id, router_zid, receiver_instance_id,
                  maximum_receipt_age_ns, session_timeout_ns, max_in_flight,
-                 producer_id='ik_spark_headroom', algorithm=SPARK_BACKEND):
+                 producer_id='ik_spark_headroom', algorithm=SPARK_BACKEND, execution_guard='python'):
         if algorithm not in (SPARK_BACKEND, MAPPED_PALM_BACKEND):
             raise ValueError('unsupported bilateral reference algorithm')
         self.algorithm = algorithm
@@ -30,7 +30,8 @@ class SparkProducer:
         self.router_zid = router_zid
         self.receiver_instance_id = receiver_instance_id
         self.producer_id = producer_id
-        self.guard = ExecutionGuard(run_id=run_id, execution_epoch=execution_epoch,
+        self._guard_type = execution_guard_type(execution_guard)
+        self.guard = self._guard_type(run_id=run_id, execution_epoch=execution_epoch,
             coordinator_instance_id=coordinator_instance_id, router_zid=router_zid,
             maximum_receipt_age_ns=maximum_receipt_age_ns, max_in_flight=max_in_flight)
         self.session_timeout_ns = _positive(session_timeout_ns, 'session_timeout_ns')
@@ -92,7 +93,7 @@ class SparkProducer:
                 type(execution_epoch) is not int or execution_epoch != self.guard.execution_epoch + 1):
             raise ValueError('rearm requires explicit idle pause and next execution epoch')
         ack = self.backend.reset_at_rest(positions, execution_epoch=execution_epoch)
-        self.guard = ExecutionGuard(run_id=self.guard.run_id, execution_epoch=execution_epoch,
+        self.guard = self._guard_type(run_id=self.guard.run_id, execution_epoch=execution_epoch,
             coordinator_instance_id=self.guard.coordinator_instance_id, router_zid=self.router_zid,
             maximum_receipt_age_ns=self.guard.maximum_receipt_age_ns, max_in_flight=self.guard.max_in_flight)
         # Keep input identity/sequence/time and status counters monotonic. Drop

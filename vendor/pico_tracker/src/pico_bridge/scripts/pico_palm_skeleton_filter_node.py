@@ -27,6 +27,7 @@ from pico_calibration_artifact import (
     file_sha256 as calibration_file_sha256,
     validate_artifact as validate_calibration_artifact,
 )
+from pico_symmetric_geometry import apply_profile as apply_geometry_profile
 
 from pico_palm_skeleton_filter_core import (
     DEFAULT_LEFT_SHOULDER_LOCAL_X_OFFSET_RAD,
@@ -416,6 +417,9 @@ class PicoPalmSkeletonFilterNode(Node):
                     )
             elif require_geometry[side]:
                 raise ValueError(f"{side}_arm_geometry_artifact is required")
+        loaded_geometry, geometry_policy = apply_geometry_profile(loaded_geometry,geometry_paths)
+        if geometry_policy is not None:
+            self.get_logger().warning('Explicit symmetric_max runtime geometry: '+json.dumps(geometry_policy['effective_lengths_m']))
         if self._max_skew_s <= 0.0:
             raise ValueError("max_skew_s must be positive")
         if self._min_calibration_samples < 1:
@@ -538,6 +542,9 @@ class PicoPalmSkeletonFilterNode(Node):
             for side in SIDE_INDICES
         }
         for side, geometry in loaded_geometry.items():
+            if geometry_policy is not None:
+                self._side_status[side]['geometry_source']='symmetric_max_runtime_override'
+                self._side_status[side]['geometry_policy']=geometry_policy
             if geometry is None:
                 continue
             self._side_status[side]["baseline_ready"] = True

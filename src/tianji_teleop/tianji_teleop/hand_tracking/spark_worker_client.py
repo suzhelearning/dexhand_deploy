@@ -25,7 +25,7 @@ class SparkWorkerClient:
     WIRE_PREFIX = 'spark'
     def __init__(self, *, worker, config, model, urdf,
                  required_capability='simulation', timeout_seconds=20.,
-                 deterministic_test=False, startup_handshake=False):
+                 deterministic_test=False, startup_handshake=False, result_format='json', home_config=None):
         if required_capability != 'simulation':
             raise ValueError('SPARK worker currently supports simulation only')
         if (type(timeout_seconds) not in (int, float) or
@@ -35,11 +35,18 @@ class SparkWorkerClient:
             raise ValueError('deterministic_test must be boolean')
         if type(startup_handshake) is not bool:
             raise ValueError('startup_handshake must be boolean')
+        if result_format not in ('json', 'binary'):
+            raise ValueError('native result format must be json or binary')
+        self._binary_results = result_format == 'binary'
         command = [str(Path(p).resolve(strict=True)) for p in (worker, config, model, urdf)]
+        if home_config is not None:
+            command.extend(['--home-config', str(Path(home_config).resolve(strict=True))])
         if deterministic_test:
             command.append('--deterministic-test')
         if startup_handshake:
             command.append('--startup-handshake')
+        if self._binary_results:
+            command.append('--binary-results')
         self.startup_ready = False
         self._timeout = float(timeout_seconds)
         self._deterministic = deterministic_test
@@ -100,7 +107,8 @@ class SparkWorkerClient:
                 raise ValueError('SPARK request exceeds bounded IPC size')
             try:
                 encoded = time.perf_counter()
-                result = self._exchange(request, f'tick {tick.tick_id}')
+                result = (self._exchange_binary(request, f'tick {tick.tick_id}')
+                          if self._binary_results else self._exchange(request, f'tick {tick.tick_id}'))
                 exchanged = time.perf_counter()
                 _validate_result(result, tick, self._deterministic,
                                  algorithm=self.ALGORITHM, wire_prefix=self.WIRE_PREFIX)
@@ -110,10 +118,35 @@ class SparkWorkerClient:
                 raise
             self._tick, self._now = tick.tick_id, tick.now_ns
             # Owner-thread diagnostics, deliberately excluded from wire results.
-            self.last_timing = dict(request_encode=encoded-started,
+            self.last_timing.update(request_encode=encoded-started,
                 ipc_roundtrip_decode=exchanged-encoded,
                 result_validate=validated-exchanged)
             return result
+
+    def _exchange_binary(self, request, context):
+        from .native_binary_results import payload_size, decode_result, native_timing
+        if len(request) > 2048:
+            raise ValueError('SPARK request exceeds bounded IPC size')
+        if os.write(self._process.stdin.fileno(), request) != len(request):
+            raise RuntimeError('incomplete SPARK request write')
+        data = bytearray()
+        expected = None
+        deadline = time.monotonic() + self._timeout
+        while expected is None or len(data) < expected:
+            remaining = deadline-time.monotonic()
+            if remaining <= 0 or not self._selector.select(remaining):
+                raise TimeoutError(f'native binary worker timed out at {context}')
+            chunk = os.read(self._process.stdout.fileno(), 2049)
+            if not chunk:
+                raise RuntimeError('native worker exited without a complete result')
+            data.extend(chunk)
+            if len(data) >= 8 and expected is None:
+                expected = 8 + payload_size(data[:8], self.WIRE_PREFIX)
+            if expected is not None and len(data) > expected:
+                raise RuntimeError('unsolicited native binary output')
+        decoded = decode_result(data, self.WIRE_PREFIX)
+        self.last_timing.update(native_timing(data))
+        return decoded
 
     def _exchange(self, request, context):
         # Every request fits PIPE_BUF. The owner serializes request/response.

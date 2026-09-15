@@ -7,6 +7,16 @@ by constructing a new execution epoch after a latched integration fault.
 import math
 
 
+def execution_guard_type(implementation='python'):
+    if implementation == 'python':
+        return ExecutionGuard
+    if implementation == 'cpp':
+        from .native_execution import NativeExecutionGuard, load_native
+        load_native()  # fail explicitly before entering the control loop
+        return NativeExecutionGuard
+    raise ValueError('execution guard must be python or cpp')
+
+
 def _positive(value, name):
     if type(value) is not int or not 0 < value < 2**63:
         raise ValueError(f'{name} must be positive int64')

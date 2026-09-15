@@ -9,6 +9,7 @@ session producer. Exceptions end this process, never silently restart filters.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -24,13 +25,37 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--single-hand-side', choices=('left', 'right'), default='right')
     parser.add_argument('--startup-handshake', action='store_true')
+    parser.add_argument('--filter-backend', choices=('python', 'cpp'),
+                        default=os.environ.get('TIANJI_HAND_FILTER_BACKEND', 'python'))
+    parser.add_argument('--filter-library', type=Path)
+    parser.add_argument('--geometry-backend', choices=('python', 'cpp'),
+                        default=os.environ.get('TIANJI_HAND_GEOMETRY_BACKEND', 'python'))
+    parser.add_argument('--geometry-library', type=Path)
+    parser.add_argument('--optimizer-backend', choices=('python', 'cpp'),
+                        default=os.environ.get('TIANJI_HAND_OPTIMIZER_BACKEND', 'python'))
+    parser.add_argument('--optimizer-library', type=Path)
     parser.add_argument('--left-config', type=Path,
         default=OFFICIAL / 'example/config/adaptive_analytical_manus_wuji_hand_2_left.yaml')
     parser.add_argument('--right-config', type=Path,
         default=OFFICIAL / 'example/config/adaptive_analytical_manus_wuji_hand_2_right.yaml')
     args = parser.parse_args()
+    if args.filter_backend not in ('python', 'cpp'):
+        parser.error('TIANJI_HAND_FILTER_BACKEND must be python or cpp')
+    if args.geometry_backend not in ('python', 'cpp'):
+        parser.error('TIANJI_HAND_GEOMETRY_BACKEND must be python or cpp')
+    if args.optimizer_backend not in ('python', 'cpp'):
+        parser.error('TIANJI_HAND_OPTIMIZER_BACKEND must be python or cpp')
     bridge = OfficialWujiHand2Bridge(OFFICIAL, single_hand_side=args.single_hand_side,
                                      left_config=args.left_config, right_config=args.right_config)
+    if args.filter_backend == 'cpp':
+        from tianji_teleop.producers.native_hand_filter import install_native_filters
+        install_native_filters(bridge, library=args.filter_library)
+    if args.geometry_backend == 'cpp':
+        from tianji_teleop.producers.native_hand_geometry import install_native_geometry
+        install_native_geometry(bridge, library=args.geometry_library)
+    if args.optimizer_backend == 'cpp':
+        from tianji_teleop.producers.native_hand_optimizer import install_native_optimizers
+        install_native_optimizers(bridge, library=args.optimizer_library)
     if args.startup_handshake:
         # The pinned retargeter imports Rotation inside its first callback.
         # Load that dependency before advertising readiness, without feeding

@@ -40,3 +40,15 @@ class SparkBackendSelectionTest(unittest.TestCase):
         self.assertEqual(robot.limits('left')[0][0], -1.5708)
         self.assertEqual(robot.limits('right')[1][0], 1.5708)
         self.assertEqual(base.read_bytes(), before)
+
+    def test_live_home_comes_from_arm_yaml(self):
+        import yaml
+        factory = self.module()
+        base = ROOT / 'src/tianji_teleop/config/robot/arm.yaml'
+        robot = factory.reference_robot_config(
+            ROOT/'src/tianji_teleop/config/producers/spark_reference.yaml',
+            ROOT/'src/tianji_teleop/assets/spark/marvin_m6_s_ccs_696_v4_local.urdf',
+            base, use_arm_home=True)
+        expected = yaml.safe_load(base.read_text())
+        self.assertEqual(list(robot.left_home_rad), expected['left_home_rad'])
+        self.assertEqual(list(robot.right_home_rad), expected['right_home_rad'])

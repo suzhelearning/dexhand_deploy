@@ -14,11 +14,25 @@ display_mode=""
 record_path=""
 spark_overlay=false
 mapped_palm_height_calibration=false
+mapped_palm_xz_calibration=false
+mapped_palm_common_x_reference=false
+native_result_format=""
+execution_guard=""
+simulation_backend=""
+coordinator_math=""
+scheduler_backend=""
+spark_resync_policy="reference"
+publication_backend=""
+recording_adapter=""
+viewer_backend=""
+hand_worker_backend="${TIANJI_HAND_WORKER_BACKEND:-python}"
+hand_scheduler_backend="${TIANJI_HAND_SCHEDULER_BACKEND:-python}"
 tjvr_bind="127.0.0.1"
 tjvr_port="15000"
 duration_s=""
 manus_rawviz=""
 manus_user=""
+manus_parser_backend=""
 manus_library_dir=""
 right_glove=""
 left_glove=""
@@ -34,6 +48,8 @@ pico_calibration_dir="${PICO_TRACKER_CONFIG_DIR:-${HOME}/.config/pico_tracker}"
 pico_app_package="com.PICO.wholebody_stream.unity"
 pico_ros_domain="${PICO_ROS_DOMAIN_ID:-${ROS_DOMAIN_ID:-120}}"
 pico_startup_timeout_s="20"
+pico_world_x_offset_m="0.10"
+pico_world_x_offset_explicit=false
 adb_serial="${ADB_SERIAL:-}"
 pico_calibration_dir_explicit=false
 pico_app_package_explicit=false
@@ -51,16 +67,30 @@ usage() {
 输入选项：
   --disable-hands
   --manus-rawviz PATH --manus-user USER
+  --manus-parser-backend python|cpp（默认 python；cpp 需 build-native-hand，不改 SDK）
   --manus-library-dir PATH --right-glove ID --left-glove ID
   --tjvr-bind HOST --tjvr-port PORT --duration-s SECONDS
   --record PATH --spark-overlay --viewer|--headless
+  --native-result-format json|binary（默认 json；可选 C++ 二进制周期结果）
+  --execution-guard python|cpp（默认 python；可选 C++ 回执检查）
+  --simulation-backend python|cpp（默认 python；可选 C++ MuJoCo 执行）
+  --coordinator-math python|cpp（默认 python；可选 C++ 协调器数值核心）
+  --scheduler-backend python|cpp（默认 python；cpp 仅支持 --disable-hands 的原生 C++ arms-only 调度器）
+  --publication-backend python|cpp（默认 python；cpp 需要 --scheduler-backend cpp）
+  --recording-adapter python|cpp（cpp 需要 --scheduler-backend cpp 和 --record）
+  --viewer-backend python|cpp（cpp 需要 --scheduler-backend cpp 和 --viewer）
+  --hand-worker-backend python|cpp（默认 python；cpp 使用 C++ Hand2 热路径，需先构建 native worker）
+  --hand-scheduler-backend python|cpp（默认 python；cpp 使用 C++ Hand2 固定频率调度与 retarget 热路径）
   --mapped-palm-height-calibration（仅 mapped-palm：c 仅Z标定，再 s 开始）
+  --mapped-palm-xz-calibration（全 C++ mapped-palm：c 前伸 X/Z 标定，J2=-90°）
+  --mapped-palm-common-x-reference（配合 X/Z：双臂共用较小机器人参考 X）
 
 PICO 上游选项：
   --pico-calibration-dir PATH
   --pico-app-package PACKAGE
   --pico-ros-domain ID
   --pico-startup-timeout-s SECONDS
+  --pico-world-x-offset-m METERS（默认 0.10，范围 [-1,1]；PICO 世界 X 总偏移）
   --adb-serial SERIAL（多台 ADB 设备时可选）
 EOF
 }
@@ -97,12 +127,26 @@ while (($#)); do
       display_mode=headless; shift ;;
     --record) record_path="${2:-}"; shift 2 ;;
     --spark-overlay) spark_overlay=true; shift ;;
+    --execution-guard) execution_guard="${2:?missing execution guard}"; shift 2 ;;
+    --simulation-backend) simulation_backend="${2:?missing simulation backend}"; shift 2 ;;
+    --coordinator-math) coordinator_math="${2:?missing coordinator math}"; shift 2 ;;
+    --native-result-format) native_result_format="${2:?missing result format}"; shift 2 ;;
+    --spark-resync-policy) spark_resync_policy="${2:?missing SPARK resync policy}"; shift 2 ;;
+    --scheduler-backend) scheduler_backend="${2:?missing scheduler backend}"; shift 2 ;;
+    --publication-backend) publication_backend="${2:?missing publication backend}"; shift 2 ;;
+    --recording-adapter) recording_adapter="${2:?missing recording adapter}"; shift 2 ;;
+    --viewer-backend) viewer_backend="${2:?missing viewer backend}"; shift 2 ;;
+    --hand-worker-backend) hand_worker_backend="${2:?missing hand worker backend}"; shift 2 ;;
+    --hand-scheduler-backend) hand_scheduler_backend="${2:?missing hand scheduler backend}"; shift 2 ;;
     --mapped-palm-height-calibration) mapped_palm_height_calibration=true; shift ;;
+    --mapped-palm-xz-calibration) mapped_palm_xz_calibration=true; shift ;;
+    --mapped-palm-common-x-reference) mapped_palm_common_x_reference=true; shift ;;
     --tjvr-bind) tjvr_bind="${2:-}"; shift 2 ;;
     --tjvr-port) tjvr_port="${2:-}"; shift 2 ;;
     --duration-s) duration_s="${2:-}"; shift 2 ;;
     --manus-rawviz) manus_rawviz="${2:-}"; shift 2 ;;
     --manus-user) manus_user="${2:-}"; shift 2 ;;
+    --manus-parser-backend) manus_parser_backend="${2:?missing Manus parser backend}"; shift 2 ;;
     --manus-library-dir) manus_library_dir="${2:-}"; shift 2 ;;
     --right-glove) right_glove="${2:-}"; shift 2 ;;
     --left-glove) left_glove="${2:-}"; shift 2 ;;
@@ -118,6 +162,7 @@ while (($#)); do
     --pico-app-package) pico_app_package="${2:-}"; pico_app_package_explicit=true; shift 2 ;;
     --pico-ros-domain) pico_ros_domain="${2:-}"; pico_ros_domain_explicit=true; shift 2 ;;
     --pico-startup-timeout-s) pico_startup_timeout_s="${2:-}"; pico_startup_timeout_explicit=true; shift 2 ;;
+    --pico-world-x-offset-m) pico_world_x_offset_m="${2:?missing PICO X offset}"; pico_world_x_offset_explicit=true; shift 2 ;;
     --adb-serial) adb_serial="${2:-}"; adb_serial_explicit=true; shift 2 ;;
     --pico-overlay|--ik-target-overlay|--xr-overlay)
       fail "$1 不属于 pico_vr_manus_sim；PICO 原始可视化请使用内嵌 M0 的 --viewer"
@@ -140,6 +185,9 @@ else
   fail 'PICO ROS domain 必须是 0..232 的整数'
 fi
 is_positive_decimal "$pico_startup_timeout_s" || fail 'PICO startup timeout 必须是正数'
+[[ "$pico_world_x_offset_m" =~ ^-?([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] &&
+  awk -v value="$pico_world_x_offset_m" 'BEGIN { exit !(value >= -1 && value <= 1) }' ||
+  fail 'PICO world X offset 必须是 [-1,1] m 内的有限十进制数'
 if [[ -n "$duration_s" ]]; then
   is_positive_decimal "$duration_s" || fail '--duration-s 必须是正数'
 fi
@@ -168,12 +216,78 @@ for value_name in ik_backend arm_pose_mapper arm_target_processor joint_trajecto
   esac
 done
 
-if [[ "$mapped_palm_height_calibration" == true && "$ik_backend" != pico_ee_mapped_corrected_palm_velocity_qp ]]; then
+if [[ "$mapped_palm_height_calibration" == true && "$mapped_palm_xz_calibration" == true ]]; then
+  fail '请选择 Z-only 或 X/Z 标定，不能同时启用'
+fi
+[[ "$mapped_palm_common_x_reference" != true || "$mapped_palm_xz_calibration" == true ]] ||
+  fail '--mapped-palm-common-x-reference requires --mapped-palm-xz-calibration'
+if [[ "$mapped_palm_xz_calibration" == true ]]; then
+  [[ "$scheduler_backend" == cpp && "$publication_backend" == cpp &&
+     "$viewer_backend" == cpp && "$recording_adapter" == cpp &&
+     "$display_mode" == viewer && -n "$record_path" ]] ||
+    fail 'X/Z 标定需要全 C++ scheduler/publication/viewer/recording，以及 --viewer --record'
+fi
+if [[ ( "$mapped_palm_height_calibration" == true || "$mapped_palm_xz_calibration" == true ) && "$ik_backend" != pico_ee_mapped_corrected_palm_velocity_qp ]]; then
   fail '--mapped-palm-height-calibration 必须显式选择 mapped-palm IK'
+fi
+[[ -z "$native_result_format" || "$native_result_format" == json || "$native_result_format" == binary ]] ||
+  fail '--native-result-format 必须为 json 或 binary'
+[[ -z "$execution_guard" || "$execution_guard" == python || "$execution_guard" == cpp ]] ||
+  fail '--execution-guard 必须为 python 或 cpp'
+[[ -z "$simulation_backend" || "$simulation_backend" == python || "$simulation_backend" == cpp ]] ||
+  fail '--simulation-backend 必须为 python 或 cpp'
+[[ -z "$coordinator_math" || "$coordinator_math" == python || "$coordinator_math" == cpp ]] ||
+  fail '--coordinator-math 必须为 python 或 cpp'
+[[ -z "$publication_backend" || "$publication_backend" == python || "$publication_backend" == cpp ]] ||
+  fail '--publication-backend 必须为 python 或 cpp'
+[[ "$publication_backend" != cpp || "$scheduler_backend" == cpp ]] ||
+  fail '--publication-backend cpp requires --scheduler-backend cpp'
+[[ -z "$recording_adapter" || "$recording_adapter" == python || "$recording_adapter" == cpp ]] ||
+  fail '--recording-adapter 必须为 python 或 cpp'
+[[ "$recording_adapter" != cpp || "$scheduler_backend" == cpp ]] ||
+  fail '--recording-adapter cpp requires --scheduler-backend cpp'
+[[ "$recording_adapter" != cpp || -n "$record_path" ]] ||
+  fail '--recording-adapter cpp requires --record'
+[[ -z "$viewer_backend" || "$viewer_backend" == python || "$viewer_backend" == cpp ]] ||
+  fail '--viewer-backend 必须为 python 或 cpp'
+[[ -z "$manus_parser_backend" || "$manus_parser_backend" == python || "$manus_parser_backend" == cpp ]] ||
+  fail 'Manus parser 必须为 python 或 cpp'
+if [[ "$manus_parser_backend" == cpp ]]; then
+  [[ "$disable_hands" != true ]] || fail 'native Manus parser requires hands'
+  [[ -f "${ROOT}/build/hand-native/libtianji_hand_manus.so" ]] || fail '请先运行 pixi run build-native-hand'
+fi
+[[ "$viewer_backend" != cpp || "$scheduler_backend" == cpp ]] ||
+  fail '--viewer-backend cpp requires --scheduler-backend cpp'
+[[ "$viewer_backend" != cpp || "$display_mode" == viewer ]] ||
+  fail '--viewer-backend cpp requires --viewer'
+[[ -z "$scheduler_backend" || "$scheduler_backend" == python || "$scheduler_backend" == cpp ]] ||
+  fail '--scheduler-backend 必须为 python 或 cpp'
+[[ "$hand_worker_backend" == python || "$hand_worker_backend" == cpp ]] ||
+  fail '--hand-worker-backend 必须为 python 或 cpp'
+[[ "$hand_scheduler_backend" == python || "$hand_scheduler_backend" == cpp ]] ||
+  fail '--hand-scheduler-backend 必须为 python 或 cpp'
+if [[ "$hand_scheduler_backend" == cpp ]]; then
+  [[ "$disable_hands" != true ]] ||
+    fail '--hand-scheduler-backend cpp 需要启用 hands，不能与 --disable-hands 同时使用'
+  [[ "$hand_worker_backend" == python ]] ||
+    fail '--hand-scheduler-backend cpp 不能与 --hand-worker-backend cpp 同时使用'
 fi
 
 if [[ "$resolve_only" == true ]]; then
+  [[ "$pico_world_x_offset_explicit" != true ]] || fail 'PICO world X offset 是运行选项，不支持 --resolve-only'
+  [[ -z "$execution_guard" ]] || fail '--execution-guard 是运行选项，不支持 --resolve-only'
+  [[ -z "$simulation_backend" ]] || fail '--simulation-backend 是运行选项，不支持 --resolve-only'
+  [[ -z "$coordinator_math" ]] || fail '--coordinator-math 是运行选项，不支持 --resolve-only'
+  [[ -z "$scheduler_backend" ]] || fail '--scheduler-backend 是运行选项，不支持 --resolve-only'
+  [[ -z "$publication_backend" ]] || fail '--publication-backend 是运行选项，不支持 --resolve-only'
+  [[ -z "$recording_adapter" ]] || fail '--recording-adapter 是运行选项，不支持 --resolve-only'
+  [[ -z "$viewer_backend" ]] || fail '--viewer-backend 是运行选项，不支持 --resolve-only'
+  [[ -z "$manus_parser_backend" ]] || fail '--manus-parser-backend 是运行选项，不支持 --resolve-only'
+  [[ "$hand_worker_backend" == python ]] || fail '--hand-worker-backend cpp 是运行选项，不支持 --resolve-only'
+  [[ "$hand_scheduler_backend" == python ]] || fail '--hand-scheduler-backend cpp 是运行选项，不支持 --resolve-only'
+  [[ -z "$native_result_format" ]] || fail '--native-result-format 是运行选项，不支持 --resolve-only'
   [[ "$mapped_palm_height_calibration" != true ]] || fail '高度标定是运行选项，不支持 --resolve-only'
+  [[ "$mapped_palm_xz_calibration" != true ]] || fail 'X/Z 标定是运行选项，不支持 --resolve-only'
   [[ -z "${record_path}${duration_s}${manus_rawviz}${manus_user}${manus_library_dir}${right_glove}${left_glove}" &&
      "$pico_calibration_dir_explicit" != true &&
      "$pico_app_package_explicit" != true &&
@@ -201,9 +315,20 @@ fi
 if [[ "$disable_hands" == true ]]; then
   [[ -z "${manus_rawviz}${manus_user}${manus_library_dir}${right_glove}${left_glove}" ]] ||
     fail '--disable-hands 时不能提供 Manus 设备参数'
+  [[ "$hand_worker_backend" == python ]] ||
+    fail '--hand-worker-backend cpp 需要启用 hands，不能与 --disable-hands 同时使用'
+  [[ "$hand_scheduler_backend" == python ]] ||
+    fail '--hand-scheduler-backend cpp 需要启用 hands，不能与 --disable-hands 同时使用'
 else
   [[ -n "$manus_rawviz" && -n "$manus_user" ]] ||
     fail '启用 Manus 时必须提供 --manus-rawviz 和 --manus-user'
+fi
+
+if [[ "$hand_scheduler_backend" == cpp ]]; then
+  [[ -x "$ROOT/build/hand-native/tianji_hand_native_scheduler" ]] ||
+    fail '缺少 C++ Hand2 scheduler；请先运行 pixi run build-native-hand-scheduler'
+  [[ -f "$ROOT/build/hand-native/libtianji_hand_optimizer.so" ]] ||
+    fail '缺少 C++ Hand2 optimizer library；请先运行 pixi run build-native-hand-scheduler'
 fi
 
 calibration_dir="$(normalize_existing_dir "$pico_calibration_dir")" ||
@@ -225,7 +350,20 @@ if [[ -n "$record_path" ]]; then
 fi
 
 downstream_args=(--profile vr_manus_sim)
+[[ -z "$execution_guard" ]] || downstream_args+=(--execution-guard "$execution_guard")
+[[ -z "$simulation_backend" ]] || downstream_args+=(--simulation-backend "$simulation_backend")
+[[ -z "$coordinator_math" ]] || downstream_args+=(--coordinator-math "$coordinator_math")
+[[ -z "$scheduler_backend" ]] || downstream_args+=(--scheduler-backend "$scheduler_backend")
+downstream_args+=(--spark-resync-policy "$spark_resync_policy")
+[[ -z "$publication_backend" ]] || downstream_args+=(--publication-backend "$publication_backend")
+[[ -z "$recording_adapter" ]] || downstream_args+=(--recording-adapter "$recording_adapter")
+[[ -z "$viewer_backend" ]] || downstream_args+=(--viewer-backend "$viewer_backend")
+downstream_args+=(--hand-worker-backend "$hand_worker_backend")
+downstream_args+=(--hand-scheduler-backend "$hand_scheduler_backend")
+[[ -z "$native_result_format" ]] || downstream_args+=(--native-result-format "$native_result_format")
 [[ "$mapped_palm_height_calibration" != true ]] || downstream_args+=(--mapped-palm-height-calibration)
+[[ "$mapped_palm_xz_calibration" != true ]] || downstream_args+=(--mapped-palm-xz-calibration)
+[[ "$mapped_palm_common_x_reference" != true ]] || downstream_args+=(--mapped-palm-common-x-reference)
 [[ "$disable_hands" != true ]] || downstream_args+=(--disable-hands)
 [[ -z "$display_mode" ]] || downstream_args+=("--$display_mode")
 [[ -z "$record_path" ]] || downstream_args+=(--record "$record_path")
@@ -234,6 +372,7 @@ downstream_args+=(--tjvr-bind "$tjvr_bind" --tjvr-port "$tjvr_port")
 [[ -z "$duration_s" ]] || downstream_args+=(--duration-s "$duration_s")
 [[ -z "$manus_rawviz" ]] || downstream_args+=(--manus-rawviz "$manus_rawviz")
 [[ -z "$manus_user" ]] || downstream_args+=(--manus-user "$manus_user")
+[[ -z "$manus_parser_backend" ]] || downstream_args+=(--manus-parser-backend "$manus_parser_backend")
 [[ -z "$manus_library_dir" ]] || downstream_args+=(--manus-library-dir "$manus_library_dir")
 [[ -z "$right_glove" ]] || downstream_args+=(--right-glove "$right_glove")
 [[ -z "$left_glove" ]] || downstream_args+=(--left-glove "$left_glove")
@@ -269,6 +408,8 @@ runtime_env=(
   "PICO_TRACKER_CONFIG_DIR=$calibration_dir"
   "PICO_TRACKING_EPOCH_STATE_FILE=$calibration_dir/tracking_epoch"
   "ADB_SERIAL=$adb_serial"
+  "TIANJI_HAND_WORKER_BACKEND=$hand_worker_backend"
+  "TIANJI_HAND_SCHEDULER_BACKEND=$hand_scheduler_backend"
 )
 
 run_preflight() {
@@ -494,8 +635,8 @@ fi
 
 start_child bridge "$pixi_bin" run --manifest-path "$BUNDLE_ROOT/pixi.toml" \
   bash -c \
-  'bundle="$1"; bind="$2"; port="$3"; source "$bundle/install/local_setup.bash"; exec ros2 launch pico_bridge start_tianji_mujoco_teleop.launch.py "destination_address:=$bind" "destination_port:=$port" position_retargeting_mode:=robot_arm_segments robot_arm_reach_scale:=0.95' \
-  _ "$BUNDLE_ROOT" "$tjvr_bind" "$tjvr_port"
+  'bundle="$1"; bind="$2"; port="$3"; x_offset="$4"; source "$bundle/install/local_setup.bash"; exec ros2 launch pico_bridge start_tianji_mujoco_teleop.launch.py "destination_address:=$bind" "destination_port:=$port" "pico_world_x_offset_m:=$x_offset" position_retargeting_mode:=robot_arm_segments robot_arm_reach_scale:=0.95' \
+  _ "$BUNDLE_ROOT" "$tjvr_bind" "$tjvr_port" "$pico_world_x_offset_m"
 if ! run_preflight bridge; then
   fail 'TJVR bridge readiness failed'
 fi

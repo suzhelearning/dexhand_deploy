@@ -29,7 +29,10 @@ class ReferenceTjvrUdpTest(unittest.TestCase):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
             for value in (b'bad', packet(1), packet(1), packet(2)):
                 sender.sendto(value, receiver.address)
-        self.wait_for(lambda: receiver.stats()['datagrams'] == 4)
+        # datagrams increments at ingest entry, before parsing/raw callbacks.
+        # accepted increments only after the last frame and its sinks commit.
+        self.wait_for(lambda: receiver.stats()['accepted'] == 2)
+        self.assertEqual(receiver.stats()['datagrams'], 4)
         self.assertEqual(receiver.stats()['malformed'], 1)
         self.assertEqual(len(raw), 3)  # duplicate preserved before gate
         latest = receiver.try_read_latest()

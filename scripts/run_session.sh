@@ -29,6 +29,7 @@ pico_calibration_dir_override=""
 pico_app_package_override=""
 pico_ros_domain_override=""
 pico_startup_timeout_override=""
+pico_world_x_offset_override=""
 xr_manus_rawviz_override=""
 xr_manus_user_override=""
 xr_manus_library_dir_override=""
@@ -39,6 +40,17 @@ xr_sdk_library_dir_override=""
 extra_args=()
 dual_runtime_args=()
 mapped_palm_height_calibration=false
+native_result_format=""
+execution_guard=""
+simulation_backend=""
+coordinator_math=""
+scheduler_backend=""
+publication_backend=""
+recording_adapter=""
+viewer_backend=""
+manus_parser_backend=""
+hand_worker_backend="${TIANJI_HAND_WORKER_BACKEND:-python}"
+hand_scheduler_backend="${TIANJI_HAND_SCHEDULER_BACKEND:-python}"
 original_args=("$@")
 while (($#)); do
   case "$1" in
@@ -46,7 +58,21 @@ while (($#)); do
     --resolve-only) resolve_only=true; shift ;;
     --disable-hands) disable_hands=true; shift ;;
     --spark-overlay) dual_runtime_args+=("$1"); shift ;;
-    --mapped-palm-height-calibration) mapped_palm_height_calibration=true; dual_runtime_args+=("$1"); shift ;;
+    --execution-guard) execution_guard="${2:?missing execution guard}"; dual_runtime_args+=("$1" "$2"); shift 2 ;;
+    --simulation-backend) simulation_backend="${2:?missing simulation backend}"; dual_runtime_args+=("$1" "$2"); shift 2 ;;
+    --coordinator-math) coordinator_math="${2:?missing coordinator math}"; dual_runtime_args+=("$1" "$2"); shift 2 ;;
+    --native-result-format) native_result_format="${2:?missing result format}"; dual_runtime_args+=("$1" "$2"); shift 2 ;;
+    --spark-resync-policy) dual_runtime_args+=("$1" "${2:?missing SPARK resync policy}"); shift 2 ;;
+    --scheduler-backend) scheduler_backend="${2:?missing scheduler backend}"; dual_runtime_args+=("$1" "$2"); shift 2 ;;
+    --publication-backend) publication_backend="${2:?missing publication backend}"; dual_runtime_args+=("$1" "$2"); shift 2 ;;
+    --recording-adapter) recording_adapter="${2:?missing recording adapter}"; dual_runtime_args+=("$1" "$2"); shift 2 ;;
+    --viewer-backend) viewer_backend="${2:?missing viewer backend}"; dual_runtime_args+=("$1" "$2"); shift 2 ;;
+    --hand-worker-backend) hand_worker_backend="${2:?missing hand worker backend}"; shift 2 ;;
+    --hand-scheduler-backend) hand_scheduler_backend="${2:?missing hand scheduler backend}"; shift 2 ;;
+    --mapped-palm-height-calibration|--mapped-palm-xz-calibration|--mapped-palm-common-x-reference) mapped_palm_height_calibration=true; dual_runtime_args+=("$1"); shift ;;
+    --manus-parser-backend)
+      [[ "${2:-}" == python || "${2:-}" == cpp ]] || { echo '错误：Manus parser 必须为 python 或 cpp' >&2; exit 2; }
+      manus_parser_backend="$2"; dual_runtime_args+=("$1" "$2"); shift 2 ;;
     --manus-rawviz|--manus-user|--manus-library-dir|--right-glove|--left-glove|--tjvr-bind|--tjvr-port|--duration-s)
       dual_runtime_args+=("$1" "${2:?missing dual-input runtime value}"); shift 2 ;;
     --xr-sdk-pythonpath)
@@ -68,6 +94,7 @@ while (($#)); do
     --pico-app-package) pico_app_package_override="${2:?missing PICO APK package}"; shift 2 ;;
     --pico-ros-domain) pico_ros_domain_override="${2:?missing PICO ROS domain}"; shift 2 ;;
     --pico-startup-timeout-s) pico_startup_timeout_override="${2:?missing PICO startup timeout}"; shift 2 ;;
+    --pico-world-x-offset-m) pico_world_x_offset_override="${2:?missing PICO X offset}"; shift 2 ;;
     --record) record_path="${2:-}"; shift 2 ;;
     --h5|--input) input_path="${2:-}"; shift 2 ;;
     --speed) playback_speed="${2:-}"; shift 2 ;;
@@ -96,13 +123,27 @@ while (($#)); do
         '新双输入配置只读检查：--profile {pico2_hands_sim|vr_manus_sim|vr_manus_xr_sim|pico_vr_manus_sim} --resolve-only。' \
         '仅新PICO入口可选：--operator-input gesture（armed下双手先释放再张开0.8秒请求启动，默认keyboard）。' \
         'VR+Manus仿真：--profile vr_manus_sim --manus-rawviz PATH --manus-user USER；仅双臂使用 --disable-hands。' \
+        'Manus 接收解析可选：--manus-parser-backend python|cpp；默认 python，cpp 需先 build-native-hand，不改 rawviz 驱动。' \
         'XR+Manus仿真：--profile vr_manus_xr_sim --manus-rawviz PATH --manus-user USER（默认只用头显+双手柄，不需要Tracker）。' \
         'XR原生SDK路径：--xr-sdk-pythonpath PATH 配 Python 扩展，--xr-sdk-library-dir PATH 配 libPXREARobotSDK.so（仅注入 XR 采集进程；也可用对应 TIANJI_XR_SDK_* 环境变量）。' \
         'XR本地运行时：若 vendor/xr_sdk/python 和 vendor/xr_sdk/lib 存在会自动发现；可用 pixi run build-xr-sdk 构建。ADB映射使用 pixi run xr-adb（60061/63901），不操作 PICO2 的 10002。' \
         'XR原始可视化：--profile vr_manus_xr_sim --viewer --xr-overlay（只读显示头显和控制器；额外Tracker若存在也不参与控制）。' \
         'VR诊断/录制：--spark-overlay --record NEW.h5（父目录须存在）；h 回Home，r 联合重置，再用新输入和 s 启动。' \
+        'VR/TJVR 原生结果传输可选：--native-result-format {json|binary}；默认 json。' \
+        'SPARK C++ 同 epoch 恢复可选：--spark-resync-policy {reference|resume}；默认 reference 保留原版接管。' \
+        'VR/TJVR 回执检查可选：--execution-guard {python|cpp}；默认 python。' \
+        'VR/TJVR MuJoCo 执行可选：--simulation-backend {python|cpp}；默认 python。' \
+        'VR/TJVR 协调器数值核心可选：--coordinator-math {python|cpp}；默认 python。' \
+        'VR/TJVR 完整调度器可选：--scheduler-backend {python|cpp}；默认 python，cpp 仅支持 --disable-hands 的原生 C++ arms-only 路径。' \
+        '原生调度器发布可选：--publication-backend {python|cpp}；默认 python，cpp 将机械臂消息编码与 Zenoh 发布放到原生输出线程。' \
+        '原生录制接线可选：--recording-adapter {python|cpp}；cpp 需要 --scheduler-backend cpp 和 --record。' \
+        '原生窗口可选：--viewer-backend {python|cpp}；cpp 需要 --scheduler-backend cpp 和 --viewer。' \
+        'Hand2 worker 可选：--hand-worker-backend {python|cpp}；默认 python，cpp 仅替换驱动后的 retarget/filter 热路径，需先 pixi run build-native-hand-worker。' \
+        'Hand2 调度器可选：--hand-scheduler-backend {python|cpp}；默认 python，cpp 将驱动后的 Hand2 retarget/filter 与固定频率调度放入 C++，需先 pixi run build-native-hand-scheduler；不改变 Python 默认路径。' \
         'hand_tracking 仿真可选：--ik-backend NAME --joint-trajectory {passthrough|ruckig} --command-step-clipping {true|false} --arm-target-processor {passthrough|conditioned}' \
         '内嵌旧版 PICO+手柄入口：--profile pico_vr_manus_sim；上游可选 --pico-calibration-dir PATH --pico-app-package PACKAGE --pico-ros-domain ID --pico-startup-timeout-s SECONDS --adb-serial SERIAL。' \
+        '内嵌 PICO 世界 X 总偏移：--pico-world-x-offset-m 0.20（默认 0.10 m；需重启）。' \
+        '全 C++ mapped-palm 前伸标定：--mapped-palm-xz-calibration（J2=-90°，只对齐 X/Z）。' \
         'PICO 仿真位姿映射：--arm-pose-mapper {relative_home|head_direct|head_palm_direct}（默认 relative_home）' \
         'PICO 原始头显/手腕/26点骨架显示：--profile hand_tracking_sim --viewer --pico-overlay（兼容 --disable-hands）' \
         'Dexhand QP 仿真限位来源：--joint-limit-source {yaml|urdf}（默认 yaml，保留硬限位检查）' \
@@ -119,7 +160,7 @@ if [[ -z "${profile}" ]]; then
   printf '%s\n' '错误：必须指定 --profile。' >&2
   exit 2
 fi
-if [[ -n "${pico_calibration_dir_override}${pico_app_package_override}${pico_ros_domain_override}${pico_startup_timeout_override}" &&
+if [[ -n "${pico_calibration_dir_override}${pico_app_package_override}${pico_ros_domain_override}${pico_startup_timeout_override}${pico_world_x_offset_override}" &&
       "${profile}" != pico_vr_manus_sim ]]; then
   printf '%s\n' '错误：--pico-calibration-dir/--pico-app-package/--pico-ros-domain/--pico-startup-timeout-s 仅支持 pico_vr_manus_sim。' >&2
   exit 2
@@ -129,6 +170,101 @@ if [[ "$mapped_palm_height_calibration" == true ]]; then
     printf '%s\n' '错误：高度标定选项仅支持 mapped-palm 的 VR/TJVR 仿真入口。' >&2; exit 2;
   }
   [[ "$resolve_only" != true ]] || { printf '%s\n' '错误：高度标定是运行选项，不支持 --resolve-only。' >&2; exit 2; }
+fi
+if [[ -n "$native_result_format" ]]; then
+  [[ "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    printf '%s\n' '错误：--native-result-format 仅支持 VR/TJVR 仿真入口。' >&2; exit 2;
+  }
+  [[ "$native_result_format" == json || "$native_result_format" == binary ]] || {
+    printf '%s\n' '错误：--native-result-format 必须为 json 或 binary。' >&2; exit 2;
+  }
+fi
+if [[ -n "$coordinator_math" ]]; then
+  [[ "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    printf '%s\n' '错误：--coordinator-math 仅支持 VR/TJVR 仿真入口。' >&2; exit 2;
+  }
+  [[ "$coordinator_math" == python || "$coordinator_math" == cpp ]] || {
+    printf '%s\n' '错误：--coordinator-math 必须为 python 或 cpp。' >&2; exit 2;
+  }
+fi
+if [[ -n "$simulation_backend" ]]; then
+  [[ "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    printf '%s\n' '错误：--simulation-backend 仅支持 VR/TJVR 仿真入口。' >&2; exit 2;
+  }
+  [[ "$simulation_backend" == python || "$simulation_backend" == cpp ]] || {
+    printf '%s\n' '错误：--simulation-backend 必须为 python 或 cpp。' >&2; exit 2;
+  }
+fi
+if [[ -n "$execution_guard" ]]; then
+  [[ "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    printf '%s\n' '错误：--execution-guard 仅支持 VR/TJVR 仿真入口。' >&2; exit 2;
+  }
+  [[ "$execution_guard" == python || "$execution_guard" == cpp ]] || {
+    printf '%s\n' '错误：--execution-guard 必须为 python 或 cpp。' >&2; exit 2;
+  }
+fi
+if [[ -n "${manus_parser_backend:-}" ]]; then
+  [[ "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    echo '错误：--manus-parser-backend 仅支持 VR/TJVR 仿真入口' >&2; exit 2;
+  }
+  [[ "$manus_parser_backend" != cpp || "$disable_hands" != true ]] || {
+    echo '错误：native Manus parser requires hands' >&2; exit 2;
+  }
+fi
+if [[ -n "$viewer_backend" ]]; then
+  [[ "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    printf '%s\n' '错误：--viewer-backend 仅支持 VR/TJVR 仿真入口。' >&2; exit 2;
+  }
+  [[ "$viewer_backend" == python || "$viewer_backend" == cpp ]] || exit 2
+  [[ "$viewer_backend" != cpp || "$scheduler_backend" == cpp ]] || {
+    printf '%s\n' '错误：--viewer-backend cpp requires --scheduler-backend cpp' >&2; exit 2;
+  }
+fi
+if [[ -n "$recording_adapter" ]]; then
+  [[ "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    printf '%s\n' '错误：--recording-adapter 仅支持 VR/TJVR 仿真入口。' >&2; exit 2;
+  }
+  [[ "$recording_adapter" == python || "$recording_adapter" == cpp ]] || exit 2
+  [[ "$recording_adapter" != cpp || "$scheduler_backend" == cpp ]] || {
+    printf '%s\n' '错误：--recording-adapter cpp requires --scheduler-backend cpp' >&2; exit 2;
+  }
+fi
+if [[ -n "$publication_backend" ]]; then
+  [[ "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    printf '%s\n' '错误：--publication-backend 仅支持 VR/TJVR 仿真入口。' >&2; exit 2;
+  }
+  [[ "$publication_backend" == python || "$publication_backend" == cpp ]] || exit 2
+  [[ "$publication_backend" != cpp || "$scheduler_backend" == cpp ]] || {
+    printf '%s\n' '错误：--publication-backend cpp requires --scheduler-backend cpp' >&2; exit 2;
+  }
+fi
+if [[ -n "$scheduler_backend" ]]; then
+  [[ "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    printf '%s\n' '错误：--scheduler-backend 仅支持 pico_vr_manus_sim 或 vr_manus_sim。' >&2; exit 2;
+  }
+  [[ "$scheduler_backend" == python || "$scheduler_backend" == cpp ]] || {
+    printf '%s\n' '错误：--scheduler-backend 必须为 python 或 cpp。' >&2; exit 2;
+  }
+fi
+[[ "$hand_worker_backend" == python || "$hand_worker_backend" == cpp ]] || {
+  printf '%s\n' '错误：--hand-worker-backend 必须为 python 或 cpp。' >&2; exit 2;
+}
+[[ "$hand_scheduler_backend" == python || "$hand_scheduler_backend" == cpp ]] || {
+  printf '%s\n' '错误：--hand-scheduler-backend 必须为 python 或 cpp。' >&2; exit 2;
+}
+if [[ "$hand_scheduler_backend" == cpp ]]; then
+  [[ "$profile" == pico2_hands_sim || "$profile" == pico_vr_manus_sim || "$profile" == vr_manus_sim ]] || {
+    printf '%s\n' '错误：--hand-scheduler-backend 仅支持 pico2_hands_sim、pico_vr_manus_sim 或 vr_manus_sim。' >&2
+    exit 2
+  }
+  [[ "$disable_hands" != true ]] || {
+    printf '%s\n' '错误：--hand-scheduler-backend cpp 需要启用 hands，不能与 --disable-hands 同时使用。' >&2
+    exit 2
+  }
+  [[ "$hand_worker_backend" == python ]] || {
+    printf '%s\n' '错误：--hand-scheduler-backend cpp 不能与 --hand-worker-backend cpp 同时使用。' >&2
+    exit 2
+  }
 fi
 if [[ "${profile}" == pico_vr_manus_sim ]]; then
   exec bash "${SCRIPT_DIR}/run_embedded_pico_vr_session.sh" "${original_args[@]}"
@@ -158,7 +294,8 @@ if [[ "${profile}" == pico2_hands_sim || "${profile}" == vr_manus_sim ||
         "${confirm_real}" == true || "${pico_overlay}" == true || "${ik_target_overlay}" == true ||
         "${xr_overlay}" == true ||
         ${#extra_args[@]} -gt 0 || ${#dual_runtime_args[@]} -gt 0 ||
-        -n "${xr_sdk_pythonpath_override}${xr_sdk_library_dir_override}" ]]; }; then
+        -n "${xr_sdk_pythonpath_override}${xr_sdk_library_dir_override}" ||
+        "${hand_worker_backend}" != python || "${hand_scheduler_backend}" != python ]]; }; then
     printf '%s\n' '错误：--resolve-only 不接受采集、录制、显示或未识别的运行参数。' >&2
     exit 2
   fi
@@ -205,6 +342,34 @@ PY
     if [[ "${disable_hands}" != true && ! -x "${BUNDLE_ROOT}/tools/wuji_hand_native/.pixi/envs/default/bin/python" ]]; then
       printf '%s\n' '错误：缺少官方 Hand2 独立运行环境。' >&2; exit 2
     fi
+    if [[ "${hand_worker_backend}" == cpp ]]; then
+      [[ "${disable_hands}" != true ]] || {
+        printf '%s\n' '错误：--hand-worker-backend cpp 需要启用 hands，不能与 --disable-hands 同时使用。' >&2
+        exit 2
+      }
+      [[ -x "${ROOT}/build/hand-native/tianji_hand_native_worker" ]] || {
+        printf '%s\n' '错误：缺少 C++ Hand2 worker；请先运行 pixi run build-native-hand-worker。' >&2
+        exit 2
+      }
+      [[ -f "${ROOT}/build/hand-native/libtianji_hand_optimizer.so" ]] || {
+        printf '%s\n' '错误：缺少 C++ Hand2 optimizer library；请先运行 pixi run build-native-hand-worker。' >&2
+        exit 2
+      }
+    fi
+    if [[ "${hand_scheduler_backend}" == cpp ]]; then
+      [[ "${disable_hands}" != true ]] || {
+        printf '%s\n' '错误：--hand-scheduler-backend cpp 需要启用 hands，不能与 --disable-hands 同时使用。' >&2
+        exit 2
+      }
+      [[ -x "${ROOT}/build/hand-native/tianji_hand_native_scheduler" ]] || {
+        printf '%s\n' '错误：缺少 C++ Hand2 scheduler；请先运行 pixi run build-native-hand-scheduler。' >&2
+        exit 2
+      }
+      [[ -f "${ROOT}/build/hand-native/libtianji_hand_optimizer.so" ]] || {
+        printf '%s\n' '错误：缺少 C++ Hand2 optimizer library；请先运行 pixi run build-native-hand-scheduler。' >&2
+        exit 2
+      }
+    fi
   elif [[ "${profile}" == vr_manus_sim ]]; then
   if [[ -n "${input_path}${playback_speed}${observation_config_override}" ||
         "${confirm_real}" == true || "${pico_overlay}" == true || "${ik_target_overlay}" == true ||
@@ -215,6 +380,10 @@ PY
   fi
   [[ -z "${display_mode}" ]] || resolve_args+=("--${display_mode}")
   [[ -z "${record_path}" ]] || resolve_args+=(--record "${record_path}")
+  # Pass the resolved value explicitly so a CLI override cannot be shadowed by
+  # an inherited TIANJI_HAND_WORKER_BACKEND environment variable.
+  resolve_args+=(--hand-worker-backend "${hand_worker_backend}")
+  resolve_args+=(--hand-scheduler-backend "${hand_scheduler_backend}")
     exec bash "${SCRIPT_DIR}/run_vr_manus_session.sh" "${resolve_args[@]}" "${dual_runtime_args[@]}"
   fi
 fi
@@ -935,6 +1104,8 @@ base_env=(
   "TIANJI_RUN_ID=${run_id}"
   "TIANJI_REQUIRED_CAPABILITY=${required_capability}"
   "TIANJI_HAND_MODE=${hand_mode}"
+  "TIANJI_HAND_WORKER_BACKEND=${hand_worker_backend}"
+  "TIANJI_HAND_SCHEDULER_BACKEND=${hand_scheduler_backend}"
   "TIANJI_VALIDATION_CASE_ID=${TIANJI_VALIDATION_CASE_ID:-}"
   "TIANJI_VALIDATION_HAND_MODE=${TIANJI_VALIDATION_HAND_MODE:-}"
   "TIANJI_VALIDATION_PRODUCER=${TIANJI_VALIDATION_PRODUCER:-}"

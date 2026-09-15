@@ -292,7 +292,10 @@ class MujocoExecutor:
         safety_supervisor_instance_id: str | None = None,
         command_timeout_s: float = 0.2,
         clock: Any = time.monotonic_ns,
+        simulation_backend: str = 'python',
     ) -> None:
+        if simulation_backend not in ('python', 'cpp'):
+            raise ValueError('simulation_backend must be python or cpp')
         if not publisher_instance_id or not router_zid or not coordinator_instance_id:
             raise ValueError("executor, router, and coordinator identities are required")
         if command_timeout_s <= 0.0:
@@ -364,6 +367,14 @@ class MujocoExecutor:
         if qpos.ndim != 1:
             raise ValueError("MuJoCo data.qpos must be one-dimensional")
         self._qpos = qpos
+        self._native_kernel = None
+        if simulation_backend == 'cpp':
+            from .native_kernel import NativeMujocoKernel
+            groups = [tuple(int(self._arm_addresses[side][name])
+                            for name in getattr(self.robot, f'{side}_joint_names')) for side in SIDES]
+            groups += [tuple(int(a) for a in self._hand_addresses[side].values())
+                       for side in self.hand_sides]
+            self._native_kernel = NativeMujocoKernel(model, data, tuple(groups))
         self._pending_arm: dict[str, _Pending] = {}
         self._pending_hand: dict[str, _Pending] = {}
         self._arm_baseline: dict[str, tuple[str, int]] = {}
@@ -440,7 +451,8 @@ class MujocoExecutor:
 
     @property
     def arm_state(self) -> ArmJointState:
-        values = [float(self._qpos[address]) for side in SIDES for name in getattr(self.robot, f"{side}_joint_names") for address in (self._arm_addresses[side][name],)]
+        values = (self._native_kernel.positions(0, 2) if self._native_kernel is not None else
+                  [float(self._qpos[address]) for side in SIDES for name in getattr(self.robot, f"{side}_joint_names") for address in (self._arm_addresses[side][name],)])
         return ArmJointState(
             1, self._state_sequence, int(self.clock()), "mujoco",
             list(ALL_ARM_JOINT_NAMES), values, None,
@@ -454,7 +466,9 @@ class MujocoExecutor:
     def hand_state(self, side: str) -> HandJointState:
         if side not in self._hand_addresses:
             raise ValueError(f"hand side is not enabled: {side}")
-        values = [float(self._qpos[address]) for name, address in self._hand_addresses[side].items()]
+        values = (self._native_kernel.positions(2 + self.hand_sides.index(side), 1)
+                  if self._native_kernel is not None else
+                  [float(self._qpos[address]) for name, address in self._hand_addresses[side].items()])
         return HandJointState(
             1, self._state_sequence, int(self.clock()), "mujoco", side,
             list(HAND_JOINT_NAMES[side]), values, None,
@@ -911,10 +925,15 @@ class MujocoExecutor:
     def _publish_status(self) -> None:
         status = self._make_status(ready=self._snapshot_ready and not self._safety_locked, healthy=self._snapshot_ready and not self._safety_locked, phase="soft_stopped" if self._safety_locked else ("waiting_snapshot" if not self._snapshot_ready else "ready"))
         self._status = status
-        self._publish("status", status.to_dict())
+        if self._publishers.get("status") is not None:
+            self._publish("status", status.to_dict())
 
     def _publish_states(self) -> None:
-        self._publish("arm_state", self.arm_state.to_dict())
+        # In-process control reads typed feedback directly. Do not build wire
+        # objects for absent publishers; heartbeat sequences/status must
+        # still advance, including when no transport is attached.
+        if self._publishers.get("arm_state") is not None:
+            self._publish("arm_state", self.arm_state.to_dict())
         self._publish_status()
         now = int(self.clock())
         session_fresh = bool(
@@ -924,8 +943,15 @@ class MujocoExecutor:
         if self.hand_overlay:
             return
         for side in self.hand_sides:
+            state_publisher = self._publishers.get(f"hand_state_{side}")
+            status_publisher = self._publishers.get(f"hand_status_{side}")
+            if state_publisher is None and status_publisher is None:
+                continue
             state = self.hand_state(side)
-            self._publish(f"hand_state_{side}", state.to_dict())
+            if state_publisher is not None:
+                self._publish(f"hand_state_{side}", state.to_dict())
+            if status_publisher is None:
+                continue
             ready = self._snapshot_ready and not self._safety_locked
             healthy = ready and self._healthy
             tracking = bool(
@@ -962,6 +988,7 @@ class MujocoExecutor:
             self._publish_states()
             return {"arm": {}, "hand": {}}
         applied: dict[str, Any] = {"arm": {}, "hand": {}}
+        native_groups = [None] * (2 + len(self.hand_sides)) if self._native_kernel else None
         for side, pending in tuple(self._pending_arm.items()):
             command = pending.command
             if now_ns - command.timestamp_ns > self.command_timeout_ns:
@@ -971,8 +998,11 @@ class MujocoExecutor:
             if not np.isfinite(values).all():
                 self._last_error = f"arm command nonfinite: {side}"
                 continue
-            for name, value in zip(getattr(self.robot, f"{side}_joint_names"), values):
-                self._qpos[self._arm_addresses[side][name]] = float(value)
+            if native_groups is not None:
+                native_groups[SIDES.index(side)] = values.tolist()
+            else:
+                for name, value in zip(getattr(self.robot, f"{side}_joint_names"), values):
+                    self._qpos[self._arm_addresses[side][name]] = float(value)
             applied["arm"][side] = command
         for side, pending in tuple(self._pending_hand.items()):
             command = pending.command
@@ -980,16 +1010,28 @@ class MujocoExecutor:
                 self._last_error = f"hand command stale: {side}"
                 continue
             values = self.hand_config.validate_positions(command.position_rad)
-            for address, value in zip(self._hand_addresses[side].values(), values):
-                self._qpos[address] = value
+            if native_groups is not None:
+                native_groups[2 + self.hand_sides.index(side)] = list(values)
+            else:
+                for address, value in zip(self._hand_addresses[side].values(), values):
+                    self._qpos[address] = value
             applied["hand"][side] = command
         self._command_count += len(applied["arm"]) + len(applied["hand"])
         self._hand_commands_applied += len(applied["hand"])
-        try:
-            import mujoco
-            mujoco.mj_forward(self.model, self.data)
-        except (ImportError, AttributeError, TypeError):
-            pass
+        if self._native_kernel is not None:
+            try:
+                self._native_kernel.apply(native_groups)
+            except Exception as exc:
+                self._healthy = False
+                self._safety_locked = True
+                self._last_error = f'native MuJoCo failed: {exc}'
+                raise
+        else:
+            try:
+                import mujoco
+                mujoco.mj_forward(self.model, self.data)
+            except (ImportError, AttributeError, TypeError):
+                pass
         self._publish_states()
         return applied
 

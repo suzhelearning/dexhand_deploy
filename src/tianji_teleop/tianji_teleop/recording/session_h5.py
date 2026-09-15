@@ -90,7 +90,7 @@ _DUAL_AUDIT_SPECS = (("time_ns", (), np.int64), ("received_timestamp_ns", (), np
 _DUAL_AUDIT_KINDS = frozenset({'lifecycle', 'native_cycle', 'operator_result', 'operator_observation',
     'manus_superseded_input',
     'manus_rawviz_line', 'manus_callback_metadata', 'manus_expired_input', 'hand_output', 'component_status', 'hand_retarget_input',
-    'tjvr_stream_decision'})
+    'tjvr_stream_decision', 'native_tjvr_ingress'})
 
 
 class SessionH5Error(ValueError):

@@ -71,6 +71,18 @@ def _session_metadata(source_type, environment):
         if contract['sides']:
             from .hand_command_check import hand_replay_asset_hashes
             resolved['asset_sha256'] = hand_replay_asset_hashes(Path(__file__).resolve().parents[4])
+            from ..producers.native_hand_filter import recording_metadata
+            hand_filter = recording_metadata(environment)
+            if hand_filter is not None: resolved['hand_filter'] = hand_filter
+            from ..producers.native_hand_geometry import recording_metadata as geometry_metadata
+            hand_geometry = geometry_metadata(environment)
+            if hand_geometry is not None: resolved['hand_geometry'] = hand_geometry
+            from ..producers.native_hand_optimizer import recording_metadata as optimizer_metadata
+            hand_optimizer = optimizer_metadata(environment)
+            if hand_optimizer is not None: resolved['hand_optimizer'] = hand_optimizer
+            from ..producers.native_hand_worker import recording_metadata as worker_metadata
+            hand_worker = worker_metadata(environment)
+            if hand_worker is not None: resolved['hand_worker'] = hand_worker
         metadata = dict(
             run_id=run_id,
             resolved_configuration=resolved,
@@ -94,6 +106,21 @@ def _session_metadata(source_type, environment):
     if resolved['config'].get('active_hand_sides'):
         from .hand_command_check import pico_hand_replay_asset_hashes
         metadata['hand_retarget_asset_sha256'] = pico_hand_replay_asset_hashes(Path(__file__).resolve().parents[4])
+        from ..producers.native_hand_filter import recording_metadata
+        hand_filter = recording_metadata(environment)
+        if hand_filter is not None: metadata['hand_filter'] = hand_filter
+        from ..producers.native_hand_geometry import recording_metadata as geometry_metadata
+        hand_geometry = geometry_metadata(environment)
+        if hand_geometry is not None: metadata['hand_geometry'] = hand_geometry
+        from ..producers.native_hand_optimizer import recording_metadata as optimizer_metadata
+        hand_optimizer = optimizer_metadata(environment)
+        if hand_optimizer is not None: metadata['hand_optimizer'] = hand_optimizer
+        from ..producers.native_hand_worker import recording_metadata as worker_metadata
+        hand_worker = worker_metadata(environment)
+        if hand_worker is not None: metadata['hand_worker'] = hand_worker
+        from ..producers.native_hand_scheduler import recording_metadata as scheduler_metadata
+        hand_scheduler = scheduler_metadata(environment)
+        if hand_scheduler is not None: metadata['hand_scheduler'] = hand_scheduler
     return metadata
 
 

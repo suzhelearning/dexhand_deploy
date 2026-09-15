@@ -33,16 +33,18 @@ class ManagedSession(Session):
 
 
 class PicoHandComponentTest(unittest.TestCase):
-    def make(self, *, fail_side=None, foreign=False, capability='simulation'):
+    def make(self, *, fail_side=None, foreign=False, capability='simulation', hand_worker_backend=None):
         module = 'tianji_teleop.producers.pico_hand_component'
         self.assertIsNotNone(importlib.util.find_spec(module))
         from tianji_teleop.producers.pico_hand_component import PicoHandComponent
         self.session = ManagedSession()
         self.clients = []
+        self.client_options = []
         def factory(**kwargs):
             side = kwargs['single_hand_side']
             if side == fail_side:
                 raise RuntimeError('worker startup failed')
+            self.client_options.append(kwargs)
             client = SideClient(side)
             client.closed = False
             client.close = lambda: setattr(client, 'closed', True)
@@ -55,7 +57,8 @@ class PicoHandComponentTest(unittest.TestCase):
         component = PicoHandComponent(self.session, root=Path(__file__).resolve().parents[1],
             publisher_instance_id='hand', router_zid='router', coordinator_instance_id='coord',
             receiver_instance_id='pico', connection_generation=1, expected_tokens={own, coord},
-            required_capability=capability, client_factory=factory)
+            required_capability=capability, client_factory=factory,
+            hand_worker_backend=hand_worker_backend)
         self.addCleanup(component.close)
         return component
 
@@ -71,6 +74,11 @@ class PicoHandComponentTest(unittest.TestCase):
         self.assertFalse(self.session.tokens)
         self.assertFalse(self.session.callbacks)
         self.assertIsNone(self.session.live_callback)
+
+    def test_explicit_cpp_worker_backend_is_forwarded_to_both_side_workers(self):
+        self.make(hand_worker_backend='cpp')
+        self.assertEqual(len(self.clients), 2)
+        self.assertEqual([item['worker_backend'] for item in self.client_options], ['cpp', 'cpp'])
 
     def test_second_worker_failure_cleans_first_worker(self):
         with self.assertRaisesRegex(RuntimeError, 'startup failed'):

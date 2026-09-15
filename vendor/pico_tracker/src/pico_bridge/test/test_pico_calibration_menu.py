@@ -31,6 +31,28 @@ def test_help_exposes_interactive_and_noninteractive_modes():
     assert result.returncode == 0
     assert "交互式菜单" in result.stderr
     assert "<left|right> <tcp|wrist|geometry|all>" in result.stderr
+    assert '--geometry-policy' in result.stderr
+
+
+def test_geometry_policy_is_validated_before_calibration():
+    result = run_script('--geometry-policy', 'invalid', 'left', 'geometry')
+    assert result.returncode == 2
+    assert 'geometry-policy' in result.stderr
+
+
+def test_derived_directory_cannot_be_recalibrated(tmp_path):
+    config = tmp_path / '.config/pico_tracker'
+    config.mkdir(parents=True)
+    (config / 'pico_geometry_policy.json').write_text('{}')
+    result = run_script('left', 'geometry', home=tmp_path)
+    assert result.returncode == 2
+    assert '派生' in result.stderr
+
+
+def test_finalizer_runs_only_after_geometry_activation():
+    source = SCRIPT.read_text()
+    geometry = source.split('run_geometry()', 1)[1].split('show_one_status()', 1)[0]
+    assert geometry.index('activate_calibration_candidate') < geometry.index('finalize_geometry')
 
 
 def test_wrist_requires_same_side_tcp_before_starting_ros(tmp_path):

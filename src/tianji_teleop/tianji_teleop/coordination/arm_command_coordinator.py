@@ -130,6 +130,7 @@ class ArmCommandCoordinator:
         robot_config: ArmRobotConfig | BilateralArmRobotConfig | Mapping[str, Any] | str | os.PathLike[str] | None = None,
         coordinator_config: Mapping[str, Any] | str | os.PathLike[str] | None = None,
         clock: Callable[[], int] = time.monotonic_ns,
+        command_math: str = 'python',
     ) -> None:
         if not publisher_instance_id or not router_zid:
             raise ValueError("publisher_instance_id and router_zid are required")
@@ -174,6 +175,14 @@ class ArmCommandCoordinator:
             raise ValueError('side-specific reference robot requires a bilateral simulation session')
         self.robot = robot_config if isinstance(robot_config, (ArmRobotConfig, BilateralArmRobotConfig)) else (ArmRobotConfig.from_mapping(robot_config) if isinstance(robot_config, Mapping) else ArmRobotConfig.load(robot_config))
         self.config = self._coordinator_config(coordinator_config)
+        self._command_math = None
+        if command_math not in ('python', 'cpp'):
+            raise ValueError('command_math must be python or cpp')
+        if command_math == 'cpp':
+            if self._bilateral is None:
+                raise ValueError('native command math requires bilateral simulation')
+            from .native_command_math import load_native
+            self._command_math = load_native()
         self._sequence = 0
         self._state = self._make_state("idle", "startup", None)
         self._at_home = LatchedBool(1, 0, 0, True, publisher_instance_id, router_zid)
@@ -872,15 +881,19 @@ class ArmCommandCoordinator:
             if proposal is not None and self._fresh(proposal, timestamp_ns):
                 candidate = proposal.value
                 maximum_step = self.config["maximum_command_step_rad"]
-                position = [
-                    old + max(-maximum_step, min(maximum_step, new - old))
-                    for new, old in zip(candidate.position_rad, self._safe_command[side])
-                ]
-                if not self.config['command_step_clipping_enabled']:
-                    position = list(candidate.position_rad)
                 tracking_hold = candidate.diagnostics.get('tracking_hold') is True
-                if tracking_hold:
-                    position = list(self._safe_command[side])
+                if self._command_math is not None:
+                    position = self._command_math.track(candidate.position_rad, self._safe_command[side],
+                        maximum_step, self.config['command_step_clipping_enabled'], tracking_hold)
+                else:
+                    position = [
+                        old + max(-maximum_step, min(maximum_step, new - old))
+                        for new, old in zip(candidate.position_rad, self._safe_command[side])
+                    ]
+                    if not self.config['command_step_clipping_enabled']:
+                        position = list(candidate.position_rad)
+                    if tracking_hold:
+                        position = list(self._safe_command[side])
                 proposal_seq, target_seq = candidate.sequence, candidate.target_sequence
                 # Heartbeats of the same proposal must not refresh its source
                 # clock. A partially clipped target has not yet been adopted.
@@ -890,12 +903,15 @@ class ArmCommandCoordinator:
         elif mode == "returning":
             start = (self._return_start_command or self._safe_command)[side]
             elapsed = max(0.0, (timestamp_ns - (self._return_started_ns or timestamp_ns)) / 1e9)
-            distance = max(abs(x - y) for x, y in zip(start, home))
-            duration = max(self.config["home_minimum_duration_s"], distance / self.config["home_max_speed_rad_s"])
-            fraction = min(1.0, elapsed / duration)
-            # Preserve the exact endpoint required by the Home/return barrier;
-            # x + 1 * (home - x) can differ from home by one floating-point ULP.
-            position = home if fraction >= 1.0 else [x + fraction * (y - x) for x, y in zip(start, home)]
+            if self._command_math is not None:
+                position = self._command_math.home(start, home, elapsed,
+                    self.config['home_minimum_duration_s'], self.config['home_max_speed_rad_s'])
+            else:
+                distance = max(abs(x - y) for x, y in zip(start, home))
+                duration = max(self.config["home_minimum_duration_s"], distance / self.config["home_max_speed_rad_s"])
+                fraction = min(1.0, elapsed / duration)
+                # Preserve exact Home; interpolation at 1 can differ by one ULP.
+                position = home if fraction >= 1.0 else [x + fraction * (y - x) for x, y in zip(start, home)]
         self._safe_command[side] = position
         if self._bilateral is not None and self._state.state == 'fault':
             # New integration faults hold; old profiles retain bounded Home.
@@ -915,6 +931,27 @@ class ArmCommandCoordinator:
                 continue
             candidate = timed.value
             tracking_hold = candidate.diagnostics.get('tracking_hold') is True
+            if self._command_math is not None:
+                code, delta, allowed, elapsed_s = self._command_math.validate(
+                    candidate.position_rad, self._safe_command[side], self.robot.limits(side),
+                    self.config, now_ns, candidate.timestamp_ns,
+                    self._adopted_proposal_time_ns.get(side, self._teleop_started_ns), tracking_hold,
+                    self.profile.get('required_capability', 'simulation') == 'simulation')
+                if code:
+                    reasons = {1: 'proposal exceeds hard joint limits or is nonfinite',
+                        2: 'arm proposal timestamp precedes adopted command',
+                        3: 'arm proposal source timestamp stale',
+                        4: 'proposal exceeds maximum command step',
+                        5: 'tracking hold is simulation-only'}
+                    if code == 4:
+                        self._step_rejection = {'side': side, 'delta_rad': delta,
+                            'allowed_rad': allowed, 'proposal_elapsed_s': elapsed_s,
+                            'time_window_s': self.config['command_step_time_window_s'],
+                            'proposal_sequence': candidate.sequence}
+                    self._enter_fault(reasons[code])
+                    if code != 4:
+                        return
+                continue
             if tracking_hold and self.profile.get('required_capability', 'simulation') != 'simulation':
                 self._enter_fault("tracking hold is simulation-only")
                 return

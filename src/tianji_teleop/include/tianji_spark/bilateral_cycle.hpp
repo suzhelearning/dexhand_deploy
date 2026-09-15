@@ -33,7 +33,8 @@ struct BilateralCycleResult {
 class NativeSparkCycle {
  public:
   NativeSparkCycle(QpIkConfig config, const std::string& model_path,
-                   const std::string& urdf_path, bool initially_enabled);
+                   const std::string& urdf_path, bool initially_enabled,
+                   bool resume_same_epoch = false);
   ~NativeSparkCycle();
   NativeSparkCycle(const NativeSparkCycle&) = delete;
   NativeSparkCycle& operator=(const NativeSparkCycle&) = delete;

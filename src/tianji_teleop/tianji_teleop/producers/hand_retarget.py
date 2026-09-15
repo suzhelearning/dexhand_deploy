@@ -10,12 +10,19 @@ import json
 import os
 from pathlib import Path
 import selectors
+import struct
 import subprocess
 from threading import Lock
 import time
 
 from ..protocol.messages import HAND_JOINT_NAMES, HandJointCommand, SessionState, strict_loads
 from ..worker_environment import isolated_worker_environment
+
+
+_NATIVE_HAND_REQUEST = struct.Struct('<4sBBHQQII126d')
+_NATIVE_HAND_RESPONSE = struct.Struct('<4sBBHQQ40d')
+_NATIVE_HAND_REQUEST_SIZE = _NATIVE_HAND_REQUEST.size
+_NATIVE_HAND_RESPONSE_SIZE = _NATIVE_HAND_RESPONSE.size
 
 
 def validate_result(row, *, sequence, timestamp_ns):
@@ -47,7 +54,8 @@ def validate_result(row, *, sequence, timestamp_ns):
 class OfficialHandClient:
     """Serialized bounded IPC; a failed transaction cannot silently restart."""
     def __init__(self, *, python, script, timeout_seconds=20., single_hand_side='right', startup_handshake=False,
-                 filter_continuity_ns=None):
+                 filter_continuity_ns=None, worker_backend=None, native_worker=None,
+                 native_launcher=None, left_config=None, right_config=None):
         # Opt-in only for latest-sampled Manus. Other routes retain raw-sequence
         # gap semantics. The worker's private sequence is never published.
         if filter_continuity_ns is not None and (type(filter_continuity_ns) is not int or
@@ -60,10 +68,35 @@ class OfficialHandClient:
             raise ValueError('timeout must be finite and positive')
         if single_hand_side not in ('left', 'right'):
             raise ValueError('single_hand_side must be explicit left/right')
+        self._single_hand_side = single_hand_side
         if type(startup_handshake) is not bool:
             raise ValueError('startup_handshake must be boolean')
-        command = [str(Path(p).resolve(strict=True)) for p in (python, script)]
-        command += ['--single-hand-side', single_hand_side]
+        backend = (os.environ.get('TIANJI_HAND_WORKER_BACKEND', 'python')
+                   if worker_backend is None else worker_backend)
+        if backend not in ('python', 'cpp'):
+            raise ValueError('TIANJI_HAND_WORKER_BACKEND must be python or cpp')
+        self.worker_backend = backend
+        worker_python = Path(python).resolve(strict=True)
+        if backend == 'cpp':
+            root = Path(__file__).resolve().parents[4]
+            native = Path(native_worker or os.environ.get(
+                'TIANJI_HAND_NATIVE_WORKER', root / 'build/hand-native/tianji_hand_native_worker'))
+            launcher = Path(native_launcher or os.environ.get(
+                'TIANJI_HAND_NATIVE_LAUNCHER', root / 'scripts/wuji_hand_native_launcher.py'))
+            if not native.is_file():
+                raise RuntimeError('native hand worker missing; run pixi run build-native-hand-optimizer')
+            if not launcher.is_file():
+                raise RuntimeError('native hand launcher missing; restore scripts/wuji_hand_native_launcher.py')
+            command = [str(worker_python), str(launcher.resolve(strict=True)),
+                       '--native-worker', str(native.resolve(strict=True)),
+                       '--single-hand-side', single_hand_side]
+            if left_config is not None:
+                command += ['--left-config', str(Path(left_config).resolve(strict=True))]
+            if right_config is not None:
+                command += ['--right-config', str(Path(right_config).resolve(strict=True))]
+        else:
+            command = [str(worker_python), str(Path(script).resolve(strict=True)),
+                       '--single-hand-side', single_hand_side]
         if startup_handshake:
             command.append('--startup-handshake')
         self.startup_ready = False
@@ -104,11 +137,18 @@ class OfficialHandClient:
             if self._filter_continuity_ns is not None:
                 interrupted = self._timestamp > 0 and timestamp_ns - self._timestamp > self._filter_continuity_ns
                 worker_sequence = self._worker_sequence + (2 if interrupted else 1)
-            request = (json.dumps(dict(schema_version=1, kind='wuji_hand_input',
-                callback_sequence=worker_sequence, timestamp_ns=timestamp_ns, points=points),
-                allow_nan=False, separators=(',', ':')) + '\n').encode()
-            if len(request) > 16384:
-                raise ValueError('official hand request exceeds IPC size limit')
+            if self.worker_backend == 'cpp':
+                padded = list(points) + [0.] * (126 - len(points))
+                flags = 1 if self._single_hand_side == 'left' else 2
+                request = _NATIVE_HAND_REQUEST.pack(
+                    b'TJWI', 1, flags, _NATIVE_HAND_REQUEST_SIZE,
+                    worker_sequence, timestamp_ns, len(points), 0, *padded)
+            else:
+                request = (json.dumps(dict(schema_version=1, kind='wuji_hand_input',
+                    callback_sequence=worker_sequence, timestamp_ns=timestamp_ns, points=points),
+                    allow_nan=False, separators=(',', ':')) + '\n').encode()
+                if len(request) > 16384:
+                    raise ValueError('official hand request exceeds IPC size limit')
             try:
                 result = self._exchange(request)
                 result = validate_result(result, sequence=worker_sequence, timestamp_ns=timestamp_ns)
@@ -121,6 +161,11 @@ class OfficialHandClient:
             return result
 
     def _exchange(self, request):
+        if self.worker_backend == 'cpp' and request:
+            return self._exchange_binary(request)
+        return self._exchange_text(request)
+
+    def _exchange_text(self, request):
         deadline = time.monotonic() + self._timeout
         # Requests can exceed PIPE_BUF: nonblocking partial writes are bounded
         # by the SAME transaction deadline as response reads.
@@ -154,6 +199,57 @@ class OfficialHandClient:
             if output.count(b'\n') != 1 or not output.endswith(b'\n'):
                 raise RuntimeError('unsolicited official hand output')
             return strict_loads(output)
+
+    def _exchange_binary(self, request):
+        if len(request) != _NATIVE_HAND_REQUEST_SIZE:
+            raise ValueError('native official hand request has an invalid fixed size')
+        deadline = time.monotonic() + self._timeout
+        with selectors.DefaultSelector() as selector:
+            selector.register(self._process.stdin, selectors.EVENT_WRITE)
+            offset = 0
+            while offset < len(request):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise TimeoutError('native official hand request timeout')
+                try:
+                    written = os.write(self._process.stdin.fileno(), request[offset:])
+                except BlockingIOError:
+                    continue
+                if written == 0:
+                    raise RuntimeError('incomplete native official hand request')
+                offset += written
+            selector.unregister(self._process.stdin)
+            selector.register(self._process.stdout, selectors.EVENT_READ)
+            output = bytearray()
+            while len(output) < _NATIVE_HAND_RESPONSE_SIZE:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise TimeoutError('native official hand response timeout')
+                chunk = os.read(self._process.stdout.fileno(),
+                                _NATIVE_HAND_RESPONSE_SIZE - len(output))
+                if not chunk:
+                    raise RuntimeError('native official hand worker exited without result')
+                output.extend(chunk)
+        if len(output) != _NATIVE_HAND_RESPONSE_SIZE:
+            raise RuntimeError('truncated native official hand response')
+        magic, version, flags, declared_size, sequence, timestamp, *values = \
+            _NATIVE_HAND_RESPONSE.unpack(output)
+        if (magic != b'TJHR' or version != 1 or declared_size != _NATIVE_HAND_RESPONSE_SIZE or
+                flags & ~3 or not flags or sequence <= 0 or timestamp <= 0 or
+                not all(math.isfinite(value) for value in values)):
+            raise RuntimeError('invalid native official hand response envelope')
+        left_names = [name.replace('_index_', '_index_finger_')
+                      .replace('_middle_', '_middle_finger_')
+                      .replace('_ring_', '_ring_finger_') for name in HAND_JOINT_NAMES['left']]
+        right_names = [name.replace('_index_', '_index_finger_')
+                       .replace('_middle_', '_middle_finger_')
+                       .replace('_ring_', '_ring_finger_') for name in HAND_JOINT_NAMES['right']]
+        return dict(schema_version=1, kind='wuji_hand_result', algorithm='official_wuji_hand2',
+                    callback_sequence=sequence, timestamp_ns=timestamp,
+                    left=dict(valid=bool(flags & 1), joint_names=left_names,
+                              position_rad=list(values[:20])),
+                    right=dict(valid=bool(flags & 2), joint_names=right_names,
+                              position_rad=list(values[20:])) )
 
     def _shutdown(self):
         self._closed = True
@@ -203,10 +299,20 @@ class HandRetargetProducer:
         self._input_time = 0
         self._pending = None
         self._input_snapshot = None
+        self._latest_input_snapshot = None
+        self._async_backend = bool(getattr(backend, 'async_retarget', False))
+        if self._async_backend and (not callable(getattr(backend, 'submit_retarget', None)) or
+                                    not callable(getattr(backend, 'poll_retarget', None))):
+            raise ValueError('async hand backend must provide submit_retarget and poll_retarget')
 
     @property
     def input_snapshot(self):
         return deepcopy(self._input_snapshot)
+
+    @property
+    def latest_input_snapshot(self):
+        """Latest admitted input, including a frame not solved yet."""
+        return deepcopy(self._latest_input_snapshot)
 
     def update_session(self, value):
         state = SessionState.from_dict(value.to_dict() if isinstance(value, SessionState) else value)
@@ -216,6 +322,22 @@ class HandRetargetProducer:
         if self._session is not None and (state.sequence <= self._session.sequence or
                                          state.timestamp_ns < self._session.timestamp_ns):
             return False
+        # The optional native scheduler receives the same validated coordinator
+        # heartbeat before it can process the next input. Legacy Python workers
+        # have no method here and keep their original behavior byte-for-byte.
+        update_native = getattr(self.backend, 'update_session', None)
+        if callable(update_native):
+            try:
+                if not update_native(state):
+                    self.healthy = False
+                    self.reason = 'native hand scheduler rejected session state'
+                    self._pending = None
+                    return False
+            except Exception as exc:
+                self.healthy = False
+                self.reason = f'native hand scheduler session failed: {exc}'
+                self._pending = None
+                return False
         self._session = state
         if state.state != 'teleop':
             self._pending = None
@@ -229,6 +351,28 @@ class HandRetargetProducer:
                 type(timestamp_ns) is not int or not 0 < timestamp_ns < 2**63 or
                 timestamp_ns < self._input_time or not 0 <= now_ns - timestamp_ns <= self.freshness_ns):
             return False
+        if self._async_backend:
+            try:
+                admission = self.backend.submit_retarget(
+                    points, sequence=sequence, timestamp_ns=timestamp_ns)
+            except Exception as exc:
+                self.healthy = False
+                self.reason = f'official hand backend failed: {exc}'
+                self._pending = None
+                return False
+            if (not isinstance(admission, dict) or admission.get('sequence') != sequence or
+                    admission.get('timestamp_ns') != timestamp_ns or
+                    not isinstance(admission.get('valid_sides'), list) or
+                    set(admission['valid_sides']) - {'left', 'right'}):
+                self.healthy = False
+                self.reason = 'official hand backend returned invalid async admission'
+                self._pending = None
+                return False
+            self._sequence, self._input_time = sequence, timestamp_ns
+            self._latest_input_snapshot = dict(
+                sequence=sequence, timestamp_ns=timestamp_ns,
+                valid_sides=list(admission['valid_sides']))
+            return True
         try:
             result = self.backend.retarget(points, sequence=sequence, timestamp_ns=timestamp_ns)
         except Exception as exc:
@@ -239,6 +383,7 @@ class HandRetargetProducer:
         self._sequence, self._input_time = sequence, timestamp_ns
         self._input_snapshot = dict(sequence=sequence, timestamp_ns=timestamp_ns,
                                    valid_sides=[side for side in ('left', 'right') if result[side]['valid']])
+        self._latest_input_snapshot = deepcopy(self._input_snapshot)
         self._pending = result
         return True
 
@@ -250,7 +395,41 @@ class HandRetargetProducer:
     def commands(self, now_ns):
         if type(now_ns) is not int or not 0 < now_ns < 2**63:
             raise ValueError('now_ns must be positive int64')
+        if self._async_backend:
+            try:
+                result = self.backend.poll_retarget()
+            except Exception as exc:
+                self.healthy = False
+                self.reason = f'official hand backend failed: {exc}'
+                self._pending = None
+                return {}
+            if result is not None:
+                if (not isinstance(result, dict) or
+                        type(result.get('callback_sequence')) is not int or
+                        result['callback_sequence'] <= 0 or
+                        result['callback_sequence'] > self._sequence or
+                        result.get('timestamp_ns', 0) > self._input_time):
+                    self.healthy = False
+                    self.reason = 'official hand backend returned invalid async result'
+                    self._pending = None
+                    return {}
+                if self._session is not None:
+                    phase = {'idle': 0, 'teleop': 1, 'returning': 2, 'fault': 3}[self._session.state]
+                    native = result.get('native_scheduler')
+                    if isinstance(native, dict) and native.get('phase') != phase:
+                        # A result generated before a session transition must
+                        # never become the first command after re-arm.
+                        self._pending = None
+                        return {}
+                self._input_snapshot = dict(
+                    sequence=result['callback_sequence'],
+                    timestamp_ns=result['timestamp_ns'],
+                    valid_sides=[side for side in ('left', 'right') if
+                                 isinstance(result.get(side), dict) and result[side].get('valid')])
+                self._pending = result
         if not self.tracking_authorized(now_ns):
+            if self._async_backend:
+                self._pending = None
             return {}
         row, self._pending = self._pending, None
         if row is None or not 0 <= now_ns - row['timestamp_ns'] <= self.freshness_ns:

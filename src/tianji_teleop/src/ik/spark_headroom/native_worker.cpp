@@ -1,5 +1,7 @@
 // Bounded stdin/stdout IPC only. This executable cannot publish robot commands.
 #include "tianji_spark/bilateral_cycle.hpp"
+#include "../native_binary_results.hpp"
+#include "../native_home_config.hpp"
 #include <charconv>
 #include <iomanip>
 #include <iostream>
@@ -87,16 +89,28 @@ std::string encode(const BilateralCycleResult& result, std::int64_t now, bool de
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 4 || argc > 6) throw std::invalid_argument(
-        "usage: spark_native_worker CONFIG MODEL URDF [--deterministic-test] [--startup-handshake]");
-    bool deterministic = false, handshake = false;
+    if (argc < 4 || argc > 10) throw std::invalid_argument(
+        "usage: spark_native_worker CONFIG MODEL URDF [--deterministic-test] [--startup-handshake] [--binary-results] [--resume-same-epoch]");
+    bool deterministic = false, handshake = false, binary = false;
+    bool resume_same_epoch = false;
+    std::string home_config;
     for (int i = 4; i < argc; ++i) {
       const std::string option(argv[i]);
-      if (option == "--deterministic-test" && !deterministic) deterministic = true;
+      if (option == "--home-config" && home_config.empty() && i+1<argc) home_config=argv[++i];
+      else if (option == "--deterministic-test" && !deterministic) deterministic = true;
       else if (option == "--startup-handshake" && !handshake) handshake = true;
+      else if (option == "--binary-results" && !binary) binary = true;
+      else if (option == "--resume-same-epoch" && !resume_same_epoch) resume_same_epoch = true;
       else throw std::invalid_argument("unknown or duplicate worker option");
     }
+    if (binary) {
+      // This worker uses only C++ streams. Responses explicitly flush; avoid
+      // per-character stdio synchronization while reading the bounded request.
+      std::ios::sync_with_stdio(false);
+      std::cin.tie(nullptr);
+    }
     auto config = loadConfig(argv[1]);
+    apply_deployment_home(config, home_config);
     if (deterministic) {
       // Only the explicit offline test mode relaxes wall-clock budgets. Keep
       // iteration counts/constraints/objectives unchanged. Never use this mode
@@ -104,7 +118,7 @@ int main(int argc, char** argv) {
       config.spark_upper_qpoases.ik_cycle_budget_seconds = 3600.0;
       config.qpoases.cpu_time_limit_seconds = 3600.0;
     }
-    NativeSparkCycle cycle(config, argv[2], argv[3], true);
+    NativeSparkCycle cycle(config, argv[2], argv[3], true, resume_same_epoch);
     if (handshake) {
       std::cout << "{\"schema_version\":1,\"kind\":\"spark_worker_ready\","
                    "\"algorithm\":\"spark_upper_qpoases_headroom_feedforward_velocity_qp\","
@@ -177,7 +191,22 @@ int main(int argc, char** argv) {
         frame->resynchronization_generation = generation;
         frame->stream_discontinuity = discontinuity != 0;
       }
-      std::cout << encode(cycle.step(tick, now, frame), now, deterministic) << std::endl;
+      const auto started = tianji_native_wire::Clock::now();
+      const auto result = cycle.step(tick, now, frame);
+      const auto solve_ns = tianji_native_wire::elapsed_ns(started);
+      if (binary) {
+        tianji_native_wire::ResultWriter out(1);
+        out.common(result, now, deterministic);
+        out.boolean(result.joint_takeover_cycle); out.boolean(result.guidance.accepted);
+        out.integer(result.guidance_updates); out.integer(result.headroom_updates);
+        out.arm(result.left, result.control.left, result.guidance.left.headroom.scale);
+        out.guidance(result.guidance.left);
+        out.arm(result.right, result.control.right, result.guidance.right.headroom.scale);
+        out.guidance(result.guidance.right);
+        out.finish(solve_ns);
+      } else {
+        std::cout << encode(result, now, deterministic) << std::endl;
+      }
     }
     if (!std::cin.eof()) throw std::invalid_argument("oversized/incomplete IPC frame");
     return 0;

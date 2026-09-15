@@ -405,7 +405,8 @@ hierarchical_qp:
   task_scaling_min_orientation: 0.75
   task_scaling_weight_position: 8000.0
   task_scaling_weight_orientation: 3000.0
-  slack_weight_position: 3.0e4
+  # Local tuning: tripled position tracking penalty; imported baseline was 3.0e4.
+  slack_weight_position: 9.0e4
   slack_weight_orientation: 3.0e4
   slack_position_scale: 1.0
   slack_orientation_scale: 2.0

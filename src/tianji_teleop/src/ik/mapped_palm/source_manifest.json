@@ -3,7 +3,8 @@
   "algorithm": "pico_ee_mapped_corrected_palm_velocity_qp",
   "transformations": [
     "namespace tianji_qp_ik -> tianji_mapped_palm",
-    "relative XML meshdir"
+    "relative XML meshdir",
+    "2026-09-15 user-approved local tuning: hierarchical_qp.slack_weight_position 30000 -> 90000 (after 45000 and 60000 trials); all other bandwidth parameters unchanged"
   ],
   "files": [
     {
@@ -736,7 +737,7 @@
       "source": "config/qp_ik_pico_ee_bandwidth_velocity_qp.yaml",
       "destination": "src/tianji_teleop/src/ik/mapped_palm/config/bandwidth.yaml",
       "original_sha256": "c6a428da9d9d1e8381726355ad6aa1b6a0de63e0c7943cddd7df8473d45b084c",
-      "sha256": "c6a428da9d9d1e8381726355ad6aa1b6a0de63e0c7943cddd7df8473d45b084c"
+      "sha256": "474b7c16ebf428533f405eca8ecb182c078a82dba05991dda5c8db5b435eed45"
     },
     {
       "source": "models/marvin_m6_wuji2.xml",

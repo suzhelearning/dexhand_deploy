@@ -32,6 +32,10 @@ class SparkLiveSimulationTest(unittest.TestCase):
 
     def test_live_core_requires_explicit_intent_and_uses_original_budgets(self):
         core, sample = self.make()
+        import yaml
+        home=yaml.safe_load((ROOT/'src/tianji_teleop/config/robot/arm.yaml').read_text())
+        self.assertEqual(list(core.sim.robot.left_home_rad), home['left_home_rad'])
+        self.assertEqual(list(core.sim.robot.right_home_rad), home['right_home_rad'])
         core.step(sample)
         self.assertEqual(core.coordinator.state.state, 'idle')
         self.assertEqual(core.hand_telemetry, {})
@@ -200,7 +204,11 @@ class SparkLiveSimulationTest(unittest.TestCase):
     def test_single_left_rawviz_worker_simulation_and_recording_are_consistent(self):
         self._record_and_reconstruct_actual_hands(('left',))
 
-    def _record_and_reconstruct_actual_hands(self, sides, *, backend=None):
+    @unittest.skipUnless(os.environ.get('WUJI_REFERENCE_TEST'), 'optional native hand environment')
+    def test_cpp_hand_scheduler_with_cpp_arm_adapters_and_recording(self):
+        self._record_and_reconstruct_actual_hands(('left', 'right'), scheduler_backend='cpp')
+
+    def _record_and_reconstruct_actual_hands(self, sides, *, backend=None, scheduler_backend='python'):
         from tianji_teleop.hand_tracking.input_modes import SPARK_BACKEND, MAPPED_PALM_BACKEND
         backend = backend or SPARK_BACKEND
         target_source = 'mapped_corrected_palm' if backend == MAPPED_PALM_BACKEND else 'packet'
@@ -229,11 +237,13 @@ class SparkLiveSimulationTest(unittest.TestCase):
         self.addCleanup(recorder.close)
         capture = LiveCapture(recorder, run_id='joined')
         capture.audit('lifecycle', {'stage': 'opening'})
-        hand = _make_hand_client(ROOT, sides)
+        hand = _make_hand_client(ROOT, sides, scheduler_backend=scheduler_backend)
         self.addCleanup(hand.close)
         slot = _InputSlot()
         core = SparkLiveSimulation(ROOT, run_id='joined', router_zid='router', instance_id='joined',
             backend=backend,
+            **(dict(native_result_format='binary', execution_guard='cpp', simulation_backend='cpp',
+                    coordinator_math='cpp') if scheduler_backend == 'cpp' else {}),
             hand_sides=sides, hand_source=slot, hand_backend=hand,
             hand_command_sink=capture.hand_output,
             hand_expired_input_sink=lambda row: capture.audit(
@@ -304,9 +314,15 @@ class SparkLiveSimulationTest(unittest.TestCase):
         reconstruction = check_manus_recording(capture_path)
         self.assertTrue(reconstruction['passed'], reconstruction)
         self.assertGreater(reconstruction['matched_callbacks'], 10)
-        joint_reconstruction = check_manus_hand_commands(capture_path, root=ROOT)
-        self.assertTrue(joint_reconstruction['passed'], joint_reconstruction)
-        self.assertGreater(joint_reconstruction['matched_commands'], 10)
+        if scheduler_backend == 'python':
+            joint_reconstruction = check_manus_hand_commands(capture_path, root=ROOT)
+            self.assertTrue(joint_reconstruction['passed'], joint_reconstruction)
+            self.assertGreater(joint_reconstruction['matched_commands'], 10)
+        else:
+            # Latest-result coalescing does not identify every stateful solver
+            # consumption; do not replay all raw inputs and claim equivalence.
+            self.assertIsNone(hand.async_diagnostics['failure'])
+            self.assertGreater(hand.async_diagnostics['last_output_sequence'], 10)
         from tianji_teleop.recording.tjvr_check import check_tjvr_recording
         gate_reconstruction = check_tjvr_recording(capture_path)
         self.assertTrue(gate_reconstruction['passed'], gate_reconstruction)

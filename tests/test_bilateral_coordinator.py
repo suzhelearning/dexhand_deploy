@@ -14,6 +14,7 @@ class BilateralCoordinatorTest(unittest.TestCase):
         config = ArmCommandCoordinator._coordinator_config(None)
         config['command_step_clipping_enabled'] = False
         co = ArmCommandCoordinator(None, publisher_instance_id='coord-1', router_zid='router-1',
+                                  command_math=getattr(self, 'command_math', 'python') if enabled else 'python',
                                   profile=profile, coordinator_config=config, clock=lambda: 1_000_000_000)
         for role, name in (('source', 'src'), ('producer_arm', 'ik'), ('executor_arm', 'mujoco')):
             co.update_component(_status(role, name, 1_000_000_000))

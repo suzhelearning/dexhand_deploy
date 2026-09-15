@@ -21,13 +21,15 @@ def create_bilateral_backend(name, input_mode, *, required_capability, **worker_
     return client(required_capability=required_capability, **worker_options)
 
 
-def reference_robot_config(config_path, urdf_path, base_arm_config):
-    """Explicit reference initial state and URDF bounds; no environment writes."""
+def reference_robot_config(config_path, urdf_path, base_arm_config, *, use_arm_home=False):
+    """URDF bounds plus reference Home (offline) or canonical arm Home (live)."""
     config = yaml.safe_load(Path(config_path).read_text())
     controller = config['controller']
     if controller.get('initial_posture_enabled') is not True:
         raise ValueError('SPARK session requires an explicit reference initial posture')
-    # Check the canonical joint naming, but never reuse shared bounds/Home.
-    ArmRobotConfig.load(base_arm_config)
+    # Share joint naming and optional Home, never replace the URDF bounds.
+    base = ArmRobotConfig.load(base_arm_config)
+    if use_arm_home:
+        return BilateralArmRobotConfig.from_urdf(urdf_path, base.left_home_rad, base.right_home_rad)
     return BilateralArmRobotConfig.from_urdf(urdf_path, controller['initial_left_q_rad'],
                                             controller['initial_right_q_rad'])

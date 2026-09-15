@@ -30,6 +30,7 @@ struct NativeSparkCycle::Impl {
   DualArmTargets last_targets;
   DualArmReferences last_references;
   bool takeover{false};
+  bool resume_same_epoch{false};
   bool pico_paused{false};
   std::uint64_t last_tick{0}, applied_epoch{0}, applied_sequence{0};
   std::uint64_t guidance_updates{0}, headroom_updates{0};
@@ -81,6 +82,13 @@ struct NativeSparkCycle::Impl {
         if (classification.action == PicoTeleopAction::kApply ||
             classification.action == PicoTeleopAction::kResetEpochAndApply) {
           const bool reset = classification.action == PicoTeleopAction::kResetEpochAndApply;
+          // Deployment opt-in only: same-coordinate-system recovery reseeds
+          // guidance from the current model but does not chase a frozen joint
+          // goal. Session classification still enforces freshness and identity.
+          const bool resume = reset && resume_same_epoch &&
+              session.freshness(now).has_applied_frame &&
+              applied_epoch == frame->tracking_epoch &&
+              out.button_action != PicoTeleopButtonAction::kResume;
           if (reset) {
             takeover = false;
             guidance->cancelJointSpaceTakeover();
@@ -89,7 +97,7 @@ struct NativeSparkCycle::Impl {
           }
           const auto targets = guidance->updatePicoFrame(*frame);
           if (targets.valid) {
-            if (reset) {
+            if (reset && !resume) {
               takeover = guidance->startJointSpaceTakeover(targets,
                   controller->referenceState(ArmSide::kLeft),
                   controller->referenceState(ArmSide::kRight));
@@ -190,8 +198,10 @@ struct NativeSparkCycle::Impl {
 };
 
 NativeSparkCycle::NativeSparkCycle(QpIkConfig config, const std::string& model,
-    const std::string& urdf, bool enabled)
-    : impl_(std::make_unique<Impl>(std::move(config), model, urdf, enabled)) {}
+    const std::string& urdf, bool enabled, bool resume_same_epoch)
+    : impl_(std::make_unique<Impl>(std::move(config), model, urdf, enabled)) {
+  impl_->resume_same_epoch = resume_same_epoch;
+}
 NativeSparkCycle::~NativeSparkCycle() = default;
 BilateralCycleResult NativeSparkCycle::step(std::uint64_t tick, std::int64_t now,
     const std::optional<PicoTeleopFrame>& frame) { return impl_->step(tick, now, frame); }
@@ -204,6 +214,7 @@ void NativeSparkCycle::reset_at_rest(const Vec7& left, const Vec7& right) {
   // survives a validation/model/solver initialization exception.
   auto replacement = std::make_unique<Impl>(impl_->config, impl_->model_path,
       impl_->urdf_path, true, std::array<Vec7, 2>{left, right});
+  replacement->resume_same_epoch = impl_->resume_same_epoch;
   impl_ = std::move(replacement);
 }
 ArmMotionState NativeSparkCycle::reference_state(ArmSide side) const {

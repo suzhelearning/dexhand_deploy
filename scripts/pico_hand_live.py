@@ -23,6 +23,14 @@ def bindings(environment):
     result = {key: environment.get(name, '') for key, name in names.items()}
     if any(not value.strip() or '/' in value for value in result.values()):
         raise ValueError('explicit PICO hand component identities required')
+    hand_worker_backend = environment.get('TIANJI_HAND_WORKER_BACKEND', 'python')
+    if hand_worker_backend not in ('python', 'cpp'):
+        raise ValueError('TIANJI_HAND_WORKER_BACKEND must be python or cpp')
+    hand_scheduler_backend = environment.get('TIANJI_HAND_SCHEDULER_BACKEND', 'python')
+    if hand_scheduler_backend not in ('python', 'cpp'):
+        raise ValueError('TIANJI_HAND_SCHEDULER_BACKEND must be python or cpp')
+    if hand_scheduler_backend == 'cpp' and hand_worker_backend != 'python':
+        raise ValueError('native hand scheduler cannot be combined with native hand worker')
     authorities = json.loads(environment.get('TIANJI_AUTHORITIES', '{}'))
     from tianji_teleop.coordination.arm_command_coordinator import ArmCommandCoordinator
     authorities = ArmCommandCoordinator._validate_authorities(authorities)
@@ -39,7 +47,9 @@ def bindings(environment):
                 tokens.add(f"tj/live/{token_role}/{row['logical_id']}/{row['publisher_instance_id']}")
     # This receiver is started fresh by the same launcher; its first successful
     # connection is generation 1. A reconnect is a fault, not an implicit reset.
-    return dict(result, expected_tokens=tokens, connection_generation=1, required_capability='simulation')
+    return dict(result, expected_tokens=tokens, connection_generation=1,
+                required_capability='simulation', hand_worker_backend=hand_worker_backend,
+                hand_scheduler_backend=hand_scheduler_backend)
 
 
 def main():
